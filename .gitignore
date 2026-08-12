@@ -1,0 +1,30 @@
+# Reproducible, project-local tool state.
+/.dependencies/
+/**/.dependencies/
+/.direnv/
+/node_modules/
+
+# Build and local runtime state.
+/target/
+/**/target/
+/.tasks
+/.worktrees/
+/.env.worktree
+/output/
+/mutants.out/
+/mutants.out.old/
+
+# Local residue from the retired repository layout must never re-enter Tiber.
+/.evals/
+/plugins/
+/evals/
+/site/
+/tooling/evals/
+
+# Nix build results.
+/result
+/result-*
+
+# Editor and operating-system noise.
+.DS_Store
+*.swp

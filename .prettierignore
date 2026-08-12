@@ -1,0 +1,8 @@
+# Generated, vendored, and frozen reference trees are not formatter input.
+.dependencies/
+.direnv/
+.worktrees/
+target/
+old-code-for-reference/
+Cargo.lock
+flake.lock

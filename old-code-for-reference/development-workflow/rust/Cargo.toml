@@ -1,0 +1,26 @@
+[package]
+name = "development-discipline-mcp"
+version = "0.20.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+eventcore = { version = "=2.0.0", features = ["experimental-modeling"] }
+eventcore-sqlite = "=2.0.0"
+eventcore-types = "=2.0.0"
+futures = "0.3"
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+toml = "0.8"
+tiber-git = { path = "../../tiber/rust/crates/tiber-git" }
+
+[[bin]]
+name = "development-discipline-mcp"
+path = "src/main.rs"
+
+[dev-dependencies]
+eventcore = { version = "=2.0.0", features = ["experimental-model-check"] }
+libc = "0.2.189"
+tempfile = "3"

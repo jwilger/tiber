@@ -1,0 +1,170 @@
+{
+  "_provenance": {
+    "codexVersion": "0.147.0",
+    "generatedCommand": "codex app-server generate-json-schema --experimental --out <directory>",
+    "schemaFile": "codex_app_server_protocol.v2.schemas.json",
+    "schemaSha256": "ff10829cd75b67297019b39ab508ac699198574663579aa18336b7dc55ea178f"
+  },
+  "definitions": {
+    "ThreadItem": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": ["userMessage"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["hookPrompt"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["agentMessage"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["plan"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["reasoning"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["commandExecution"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["fileChange"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["mcpToolCall"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["dynamicToolCall"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["collabAgentToolCall"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["subAgentActivity"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["webSearch"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["imageView"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["sleep"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["imageGeneration"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["enteredReviewMode"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["exitedReviewMode"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": ["contextCompaction"]
+            }
+          }
+        }
+      ]
+    },
+    "ThreadStartParams": {
+      "properties": {
+        "allowProviderModelFallback": {},
+        "approvalPolicy": {},
+        "approvalsReviewer": {},
+        "baseInstructions": {},
+        "config": {},
+        "cwd": {},
+        "developerInstructions": {},
+        "dynamicTools": {},
+        "environments": {},
+        "ephemeral": {},
+        "experimentalRawEvents": {},
+        "historyMode": {},
+        "mockExperimentalField": {},
+        "model": {},
+        "modelProvider": {},
+        "multiAgentMode": {},
+        "permissions": {},
+        "personality": {},
+        "runtimeWorkspaceRoots": {},
+        "sandbox": {},
+        "selectedCapabilityRoots": {},
+        "serviceName": {},
+        "serviceTier": {},
+        "sessionStartSource": {},
+        "threadSource": {}
+      }
+    }
+  },
+  "title": "CodexAppServerProtocolV2"
+}

@@ -1,0 +1,39 @@
+# Tiber owns this isolated Codex home. Subscription authentication delegates to
+# app-server; API-key setup delegates directly to Codex's inherited-stdin login
+# command. Tiber owns every effect outside this read-only inference profile.
+approval_policy = "never"
+approvals_reviewer = "user"
+default_permissions = "tiber-inference"
+web_search = "disabled"
+
+[agents]
+enabled = false
+
+[permissions.tiber-inference]
+description = "Read-only, offline inference for the Tiber harness"
+
+[permissions.tiber-inference.filesystem]
+":minimal" = "read"
+# TIBER_CODEX_RUNTIME_READ_GRANT
+
+[permissions.tiber-inference.filesystem.":workspace_roots"]
+"." = "read"
+
+[permissions.tiber-inference.network]
+enabled = false
+
+[features]
+apps = false
+browser_use = false
+browser_use_external = false
+browser_use_full_cdp_access = false
+computer_use = false
+image_generation = false
+in_app_browser = false
+multi_agent = false
+request_permissions_tool = false
+shell_tool = false
+skill_mcp_dependency_install = false
+skill_search = false
+tool_suggest = false
+view_image = false
