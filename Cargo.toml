@@ -3,7 +3,9 @@ members = [
   "crates/tiber-app-server",
   "crates/tiber-cli",
   "crates/tiber-review",
+  "crates/tiber-store-git",
   "crates/tiber-tasks-core",
+  "crates/tiber-tasks-service",
   "crates/tiber-tui",
 ]
 exclude = ["old-code-for-reference"]

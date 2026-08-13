@@ -11,6 +11,8 @@
     reason = "the thin command adapter keeps lifecycle types beside the TUI shell and uses process exits, OS arguments, and one-shot dispatch helpers at the imperative boundary"
 )]
 
+mod tasks;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -48,10 +50,35 @@ fn main() {
         "app-server-probe" => run_schema_probe(arguments),
         "auth" => run_auth(arguments),
         "converse" => run_conversation(arguments),
+        "tasks" => run_tasks(arguments),
         _ => {
             eprintln!("unknown command: {}", command.to_string_lossy());
             usage();
             process::exit(2);
+        }
+    }
+}
+
+#[expect(
+    clippy::print_stderr,
+    clippy::print_stdout,
+    reason = "the command shell writes read-model results and stable owner-facing diagnostics"
+)]
+/// Runs one native read-only task query against the current repository.
+fn run_tasks(arguments: impl Iterator<Item = std::ffi::OsString>) {
+    let repository = env::current_dir().unwrap_or_else(|_error| {
+        eprintln!("tiber_tasks_repository_unavailable: current directory could not be read");
+        process::exit(1);
+    });
+    match tasks::run(&repository, arguments) {
+        Ok(output) => print!("{output}"),
+        Err(error) => {
+            eprintln!("{}: {error}", error.code());
+            if error.is_usage_error() {
+                tasks_usage();
+                process::exit(2);
+            }
+            process::exit(1);
         }
     }
 }
@@ -447,7 +474,18 @@ fn tiber_codex_home() -> Option<PathBuf> {
 /// Prints the supported command grammar.
 fn usage() {
     eprintln!(
-        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt>]"
+        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <list [--status <backlog|in-progress|done|abandoned>]|show <ref>|search <query>|next>]"
+    );
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "nested command usage belongs on stderr for invalid task-query invocations"
+)]
+/// Prints the supported native task-query grammar.
+fn tasks_usage() {
+    eprintln!(
+        "usage: tiber tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next>"
     );
 }
 

@@ -15,8 +15,8 @@ serialization, process, authorization, and recovery boundaries.
 
 ## Decision
 
-Extract `tiber-tasks-core`, `tiber-tasks-service`,
-`development-workflow-core`, and `development-workflow-service`. CLI, MCP,
+Extract `tiber-tasks-core`, `tiber-tasks-service`, `tiber-workflow-core`, and
+`tiber-workflow-service`. CLI, MCP,
 and TUI integration points are adapters. Internal task and workflow actions
 call native typed services and never loop back through MCP or shell.
 

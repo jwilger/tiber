@@ -171,11 +171,22 @@ interruption remain subsequent vertical slices.
 
 ## Native workflow and Tiber Tasks
 
-The task domain becomes `tiber-tasks-core`; EventCore/Git application behavior
-becomes `tiber-tasks-service` plus store adapters. Workflow behavior becomes
-`development-workflow-core` and `development-workflow-service`. The CLI and
-TUI are adapters over these services. Internal actions never call MCP or shell
-back into the `tiber` executable.
+`tiber-tasks-core` defines the task vocabulary and
+`tiber-tasks-service` folds its immutable history into the query projection.
+`tiber-store-git` is a read-only EventCore adapter: when an `origin` remote is
+configured, it resolves the exact commit advertised for its fixed `tiber`
+authority branch and retrieves that object without moving a Git ref; without
+`origin`, it reads only the local `refs/heads/tiber` ref. It materializes a
+disposable snapshot of EventCore history preserved on the signed authority
+branch and cannot append facts or update a Git ref.
+
+The shipped native task-query surface exposes `tiber tasks list [--status
+<status>]`, `show`, `search`, and `next`. Those queries replay the full task history into a
+separate `TaskBoardProjection`; that projection is a read model, never
+EventCore command authority. Native task write commands, signed publication and
+reconciliation, workflow core and service adapters, scheduling, and TUI task
+integration remain subsequent vertical slices. Internal actions never call MCP
+or shell back into the `tiber` executable.
 
 ## Third-party MCP
 

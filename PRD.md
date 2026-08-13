@@ -12,8 +12,11 @@ implemented.
 
 The v1 product and executable are named `tiber`. The existing task board is
 named Tiber Tasks. Running `tiber` without arguments opens the current
-interactive terminal UI. Native task operations are a planned command surface
-under `tiber tasks …` as the task service is ported into the workspace.
+interactive terminal UI. Native task operations live only under `tiber tasks
+…`. The initial shipped task slice is deliberately query-only: `list`, `show`,
+`search`, and `next` replay EventCore history preserved on the signed Tiber
+authority branch. Task mutations, signed publication and
+reconciliation, and workflow scheduling remain subsequent native slices.
 
 ## Problem
 

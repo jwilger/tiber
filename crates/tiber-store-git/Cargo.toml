@@ -1,0 +1,21 @@
+[package]
+name = "tiber-store-git"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+eventcore-fs = "=2.0.0"
+eventcore-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "=3.27.0"
+thiserror = "=2.0.20"
+wait-timeout = "=0.2.1"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

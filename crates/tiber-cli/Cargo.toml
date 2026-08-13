@@ -6,9 +6,21 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+eventcore-types.workspace = true
 tiber-app-server = { path = "../tiber-app-server" }
+tiber-store-git = { path = "../tiber-store-git" }
+tiber-tasks-core = { path = "../tiber-tasks-core" }
+tiber-tasks-service = { path = "../tiber-tasks-service" }
 tiber-tui = { path = "../tiber-tui" }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt"] }
 ratatui.workspace = true
+
+[dev-dependencies]
+eventcore-fs = "=2.0.0"
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "=3.27.0"
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
