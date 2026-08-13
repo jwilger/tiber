@@ -1,22 +1,114 @@
-//! Read-side task-board projection for native Tiber Tasks.
+//! Native query projections and narrow task-command decisions.
 //!
 //! This crate folds the preserved `tiber.domain_event` task vocabulary into a
-//! query model. It deliberately provides no task write model: future
-//! business-domain `EventCore` commands will each own a narrow decision fold,
-//! while this projection remains a separate read model.
+//! query model and exposes command-specific pure decisions. Broad
+//! [`TaskBoardProjection`] state remains query-only; every write decision owns
+//! only the facts required for its business rule.
 
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
+/// Pure native task-command decisions.
+pub mod command;
+
 use alloc::collections::BTreeMap;
 use core::{error::Error, fmt};
 
+use eventcore_types::StreamId;
 use tiber_tasks_core::{
     Task, TaskAcceptanceAdded, TaskAcceptanceChecked, TaskAcceptanceRemoved, TaskCreated,
     TaskDetailsUpdated, TaskEvent, TaskId, TaskLinksChanged, TaskOrder, TaskPullRequestChanged,
     TaskStatus, TaskSubtaskAdded, TaskSubtaskChecked, TaskTransitioned,
 };
+
+/// The only publication input the initial native task-write slice may emit.
+///
+/// This opaque token carries exactly one checked acceptance fact and the board
+/// plus addressed-task streams whose versions fenced the command decision.
+/// Future task writes introduce their own closed publication types rather than
+/// widening this boundary to arbitrary events or stream lists.
+#[derive(Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct AcceptanceCheckPublication {
+    /// The sole fact allowed through the first native task-write boundary.
+    checked_fact: TaskAcceptanceChecked,
+    /// Exact stream-version fence read by the acceptance-check command.
+    consistency_streams: [StreamId; 2],
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque publication token presents construction, inspection, then one-shot transfer in data-flow order"
+)]
+impl AcceptanceCheckPublication {
+    /// Creates the single check-only publication token from one modeled command projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`command::TaskCommandError::InvalidModeledAcceptancePublication`]
+    /// when the modeled fact would not produce the one allowed durable task
+    /// acceptance event with its exact two-stream consistency boundary.
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the only command-local construction point consumes the checked model's single internal fact before constructing the single named durable fact"
+    )]
+    pub(crate) fn from_modeled_fact(
+        checked_fact: TaskAcceptanceChecked,
+        consistency_streams: [StreamId; 2],
+    ) -> Result<Self, command::TaskCommandError> {
+        let expected_streams = command::acceptance_consistency_streams(&checked_fact.stem)?;
+        if !checked_fact.checked
+            || checked_fact.stream_id != consistency_streams[0]
+            || expected_streams != consistency_streams
+        {
+            return Err(command::TaskCommandError::InvalidModeledAcceptancePublication);
+        }
+        Ok(Self {
+            checked_fact,
+            consistency_streams,
+        })
+    }
+
+    /// Returns the sole checked acceptance fact authorized for publication.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the opaque token exposes its modeled fact only for inspection at an adapter boundary"
+    )]
+    pub const fn checked_fact(&self) -> &TaskAcceptanceChecked {
+        &self.checked_fact
+    }
+
+    /// Returns the exact board/task stream fence read by the command.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the fixed two-stream command fence is clearest as a borrowed token accessor"
+    )]
+    pub const fn consistency_streams(&self) -> &[StreamId; 2] {
+        &self.consistency_streams
+    }
+
+    /// Transfers the closed event and its exact stream fence to the publication adapter.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot adapter transfer preserves the token's modeled event and fixed fence together"
+    )]
+    pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 2]) {
+        (
+            TaskEvent::TaskAcceptanceChecked(self.checked_fact),
+            self.consistency_streams,
+        )
+    }
+}
 
 /// An immutable, globally ordered set of durable task facts.
 ///

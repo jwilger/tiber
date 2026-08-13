@@ -19,13 +19,21 @@ mod tests {
         StreamPattern, StreamVersion, StreamWrites,
     };
     use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
     use tempfile::TempDir;
+    use tiber_store_git::publication::{TiberEventPublisher, TiberPublicationError};
     use tiber_store_git::{
         GitCommandFailureKind, GitOperation, Retryability, TIBER_REF, TiberEventStore,
-        TransactionHistoryError,
+        TiberRevision, TransactionHistoryError,
+    };
+    use tiber_tasks_core::{TaskEvent, TaskId};
+    use tiber_tasks_service::{
+        AcceptanceCheckPublication, TaskHistory,
+        command::{AcceptanceIndex, CheckAcceptance, decide_check_acceptance},
     };
 
     const COUNTED_EVENT_COUNT: usize = 3;
+    const PUBLISHED_TASK_ID: &str = "fixture";
     const SUBTREE_MATERIALIZATION_MARKER: &str = "subtree materialization fixture event";
     const UNRELATED_ARTIFACT_SIZE_BYTES: usize = 3 * 1024 * 1024;
     static COUNTED_EVENT_DESERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -386,6 +394,50 @@ mod tests {
     #[expect(
         clippy::expect_used,
         clippy::implicit_return,
+        reason = "the public-boundary fixture fails fast while constructing one canonical acceptance-check decision"
+    )]
+    fn acceptance_check_publication() -> AcceptanceCheckPublication {
+        let task = TaskId::parse(PUBLISHED_TASK_ID).expect("fixture task ID should be valid");
+        let history = TaskHistory::from_ordered_events(vec![task_event(json!({
+            "event": "task_created",
+            "stream_id": format!("tiber:task:{PUBLISHED_TASK_ID}"),
+            "task": {
+                "acceptance": [{"checked": false, "text": "publish this acceptance"}],
+                "blocked_by": [],
+                "blocks": [],
+                "claim": null,
+                "committed_at": "2026-08-12T00:00:00Z",
+                "context": "",
+                "notes": [],
+                "pr_mr_status": null,
+                "pr_mr_url": null,
+                "status": "backlog",
+                "stem": PUBLISHED_TASK_ID,
+                "subtasks": [],
+                "summary": "",
+                "tags": [],
+                "title": "Fixture task"
+            }
+        }))]);
+        let request = CheckAcceptance::new(task, AcceptanceIndex::zero_based(0));
+        decide_check_acceptance(history.events(), &request)
+            .expect("fixture acceptance check should decide")
+            .expect("unchecked fixture acceptance should require publication")
+    }
+
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the public-boundary fixture fails fast if its one local durable task event no longer matches the retained wire vocabulary"
+    )]
+    fn task_event(value: Value) -> TaskEvent {
+        serde_json::from_value(value).expect("fixture task event should deserialize")
+    }
+
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
         reason = "the black-box fixture test intentionally fails fast on setup and replay assertions"
     )]
     #[tokio::test]
@@ -413,6 +465,266 @@ mod tests {
                     .expect("fixture stream should be valid"),
                 text: "replay this fact".to_owned(),
             }],
+        );
+    }
+
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
+        reason = "the signed local publication fixture uses direct assertions to prove optimistic append, commit signing, and durable replay"
+    )]
+    #[tokio::test]
+    async fn publishes_only_the_modeled_acceptance_check_with_its_exact_fence() {
+        let fixture = GitFixture::signed_history().await;
+        let signing_key = git_output(
+            &fixture.repository,
+            ["config", "--local", "--get-all", "user.signingkey"],
+        );
+        let reader = TiberEventStore::open(&fixture.repository)
+            .expect("the initial signed authority should open");
+        let base_revision = reader.revision().clone();
+        drop(reader);
+
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, &base_revision)
+            .expect("the unchanged local authority should open a publication stage");
+        assert_eq!(
+            git_output(
+                &fixture.repository,
+                ["config", "--local", "--get-all", "user.signingkey"],
+            ),
+            signing_key,
+            "opening a local publication stage must not rewrite caller-local signing configuration",
+        );
+        let outcome = publisher
+            .publish_acceptance_check(acceptance_check_publication())
+            .await
+            .expect("the signed local candidate should publish with compare-and-swap");
+        drop(publisher);
+
+        assert_ne!(outcome.revision(), &base_revision);
+        let replay = TiberEventStore::open(&fixture.repository)
+            .expect("the newly signed local authority should reopen");
+        assert_eq!(replay.revision(), outcome.revision());
+        let events = replay
+            .verified_reader::<TaskEvent>(EventFilter::all())
+            .expect("published acceptance event should verify")
+            .read_page(EventPage::first(BatchSize::new(64)))
+            .await
+            .expect("published acceptance event should read")
+            .into_iter()
+            .map(|(event, _position)| event)
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            serde_json::to_value(events.first()).expect("published task event should serialize"),
+            json!({
+                "event": "task_acceptance_checked",
+                "stream_id": "tiber:board",
+                "stem": PUBLISHED_TASK_ID,
+                "index": usize::MIN,
+                "checked": true
+            })
+        );
+        assert_eq!(
+            candidate_stream_bases(&fixture.repository, outcome.revision()),
+            vec![
+                ("tiber:board".to_owned(), 0),
+                (format!("tiber:task:{PUBLISHED_TASK_ID}"), 1),
+            ],
+            "the closed public boundary must retain both exact command-fence streams",
+        );
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the remote publication fixture proves the disposable authority preserves caller-local signing identity while using exact-base Git lease semantics"
+    )]
+    #[tokio::test]
+    async fn publishes_a_signed_declared_event_to_origin_tiber() {
+        let fixture = GitFixture::signed_history().await;
+        let origin = fixture.add_origin(true);
+        let reader = TiberEventStore::open(&fixture.repository)
+            .expect("the signed remote authority should open");
+        let base_revision = reader.revision().clone();
+        drop(reader);
+
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, &base_revision)
+            .expect("the unchanged remote authority should open a publication stage");
+        let outcome = publisher
+            .publish_acceptance_check(acceptance_check_publication())
+            .await
+            .expect("the signed candidate should fast-forward the fixed remote authority");
+        drop(publisher);
+
+        let remote_head = git_output(&origin, ["rev-parse", "refs/heads/tiber"]);
+        assert_eq!(remote_head, outcome.revision().as_str());
+        let replay = TiberEventStore::open(&fixture.repository)
+            .expect("the freshly published signed remote authority should reopen");
+        assert_eq!(replay.revision(), outcome.revision());
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the remote publication fixture proves a caller-local one-component SSH signing-key pathname retains normal Git semantics in the disposable authority repository"
+    )]
+    #[tokio::test]
+    async fn publishes_to_origin_with_a_one_component_caller_local_signing_key() {
+        let fixture = GitFixture::signed_history().await;
+        let _origin = fixture.add_origin(true);
+        let signing_key = fixture.repository.join("signing-key");
+        fs::copy(
+            fixture.directory.path().join("fixture-signing-key"),
+            &signing_key,
+        )
+        .expect("the caller-relative SSH private key should copy into the worktree");
+        git(
+            &fixture.repository,
+            ["config", "user.signingkey", "signing-key"],
+        );
+        let reader = TiberEventStore::open(&fixture.repository)
+            .expect("the signed remote authority should open before publication");
+        let base_revision = reader.revision().clone();
+        drop(reader);
+
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, &base_revision)
+            .expect("the remote stage should preserve caller-local signing configuration");
+        let outcome = publisher
+            .publish_acceptance_check(acceptance_check_publication())
+            .await
+            .expect("the disposable candidate should resolve the caller-relative one-component signing key");
+        drop(publisher);
+
+        let replay = TiberEventStore::open(&fixture.repository)
+            .expect("the signed remote publication should reopen");
+        assert_eq!(replay.revision(), outcome.revision());
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the concurrent publication fixture uses explicit signed Git advancement to prove an exact-base lease never overwrites a newer authority revision"
+    )]
+    #[tokio::test]
+    async fn refuses_to_overwrite_a_concurrently_advanced_origin_tiber() {
+        let fixture = GitFixture::signed_history().await;
+        let origin = fixture.add_origin(true);
+        let reader = TiberEventStore::open(&fixture.repository)
+            .expect("the original signed remote authority should open");
+        let base_revision = reader.revision().clone();
+        drop(reader);
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, &base_revision)
+            .expect("the original remote authority should open a publication stage");
+
+        let competing_store = FileEventStore::open(fixture.repository.join("eventstore"))
+            .expect("the fixture authority should reopen for a competing signed update");
+        append_fixture_event(
+            &competing_store,
+            fixture.stream.clone(),
+            1,
+            "competing authority update",
+        )
+        .await;
+        drop(competing_store);
+        fixture.commit_event_changes("competing authority update");
+        git(
+            &fixture.repository,
+            ["push", "origin", "refs/heads/tiber:refs/heads/tiber"],
+        );
+        let competing_head = git_output(&origin, ["rev-parse", "refs/heads/tiber"]);
+
+        let error = publisher
+            .publish_acceptance_check(acceptance_check_publication())
+            .await
+            .expect_err("an exact-base lease must reject the stale publication candidate");
+        assert!(matches!(error, TiberPublicationError::Conflict));
+        assert_eq!(error.retryability(), Retryability::Retryable);
+        assert_eq!(
+            git_output(&origin, ["rev-parse", "refs/heads/tiber"]),
+            competing_head
+        );
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the rollback concurrency fixture proves publication is fenced to the exact authority revision rather than ancestry alone"
+    )]
+    #[tokio::test]
+    async fn refuses_to_overwrite_a_concurrently_rolled_back_origin_tiber() {
+        let fixture = GitFixture::signed_history().await;
+        let writable = FileEventStore::open(fixture.repository.join("eventstore"))
+            .expect("the fixture authority should reopen for a second signed revision");
+        append_fixture_event(
+            &writable,
+            fixture.stream.clone(),
+            1,
+            "second authority revision",
+        )
+        .await;
+        drop(writable);
+        fixture.commit_event_changes("second authority revision");
+        let origin = fixture.add_origin(true);
+        let reader = TiberEventStore::open(&fixture.repository)
+            .expect("the second signed remote authority should open");
+        let base_revision = reader.revision().clone();
+        drop(reader);
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, &base_revision)
+            .expect("the second remote authority should open a publication stage");
+        let rolled_back_head = git_output(&origin, ["rev-parse", "refs/heads/tiber^"]);
+        git(
+            &origin,
+            [
+                "update-ref",
+                "refs/heads/tiber",
+                rolled_back_head.as_str(),
+                base_revision.as_str(),
+            ],
+        );
+
+        let error = publisher
+            .publish_acceptance_check(acceptance_check_publication())
+            .await
+            .expect_err("an exact revision fence must reject a rolled-back remote authority");
+
+        assert!(matches!(error, TiberPublicationError::Conflict));
+        assert_eq!(
+            git_output(&origin, ["rev-parse", "refs/heads/tiber"]),
+            rolled_back_head,
+            "a stale publisher must not restore a deliberately rolled-back authority",
+        );
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the deletion concurrency fixture proves a stale publication cannot recreate a fixed authority ref removed after its canonical read"
+    )]
+    #[tokio::test]
+    async fn refuses_to_recreate_a_concurrently_deleted_origin_tiber() {
+        let fixture = GitFixture::signed_history().await;
+        let origin = fixture.add_origin(true);
+        let reader = TiberEventStore::open(&fixture.repository)
+            .expect("the signed remote authority should open before deletion");
+        let base_revision = reader.revision().clone();
+        drop(reader);
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, &base_revision)
+            .expect("the existing remote authority should open a publication stage");
+        git(
+            &origin,
+            [
+                "update-ref",
+                "-d",
+                "refs/heads/tiber",
+                base_revision.as_str(),
+            ],
+        );
+
+        let error = publisher
+            .publish_acceptance_check(acceptance_check_publication())
+            .await
+            .expect_err("an exact revision fence must reject a deleted remote authority");
+
+        assert!(matches!(error, TiberPublicationError::Conflict));
+        assert!(
+            !git_status(&origin, ["show-ref", "--verify", "refs/heads/tiber"]).success(),
+            "a stale publisher must not recreate a deliberately deleted authority ref",
         );
     }
 
@@ -1892,7 +2204,6 @@ mod tests {
 
     #[expect(
         clippy::expect_used,
-        clippy::single_call_fn,
         clippy::implicit_return,
         reason = "the fixture status helper intentionally fails fast if Git cannot start"
     )]
@@ -1927,6 +2238,52 @@ mod tests {
             .expect("fixture Git output should be UTF-8")
             .trim()
             .to_owned()
+    }
+
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the single public-boundary fixture helper fails fast while reading the signed candidate transaction header it just published"
+    )]
+    fn candidate_stream_bases(repository: &Path, revision: &TiberRevision) -> Vec<(String, u64)> {
+        let paths = git_output(
+            repository,
+            [
+                "ls-tree",
+                "-r",
+                "--name-only",
+                revision.as_str(),
+                "eventstore/events",
+            ],
+        );
+        let header = paths.lines().find_map(|path| {
+            let object = format!("{}:{path}", revision.as_str());
+            let contents = git_output(repository, ["show", object.as_str()]);
+            let first_line = contents.lines().next()?;
+            let value: Value = serde_json::from_str(first_line).ok()?;
+            value
+                .get("stream_bases")?
+                .get("tiber:board")
+                .and_then(Value::as_u64)
+                .map(|_board_version| value)
+        });
+        let streams = header
+            .and_then(|value| value.get("stream_bases").cloned())
+            .and_then(|value| serde_json::from_value::<serde_json::Map<String, Value>>(value).ok())
+            .expect("published acceptance candidate should retain its transaction stream bases");
+        let mut bases = streams
+            .into_iter()
+            .map(|(stream, version)| {
+                let stream_version = version
+                    .as_u64()
+                    .expect("published stream base should be an unsigned version");
+                (stream, stream_version)
+            })
+            .collect::<Vec<_>>();
+        bases.sort();
+        bases
     }
 
     fn assert_authority_object_is_absent(repository: &Path, revision: &str) {

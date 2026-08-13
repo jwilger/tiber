@@ -1295,6 +1295,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tiber-tasks-core",
+ "tiber-tasks-service",
  "tokio",
  "wait-timeout",
 ]
@@ -1315,6 +1317,9 @@ dependencies = [
 name = "tiber-tasks-service"
 version = "0.1.0"
 dependencies = [
+ "eventcore",
+ "eventcore-types",
+ "serde",
  "serde_json",
  "tiber-tasks-core",
 ]

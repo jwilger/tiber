@@ -64,7 +64,7 @@ fn main() {
     clippy::print_stdout,
     reason = "the command shell writes read-model results and stable owner-facing diagnostics"
 )]
-/// Runs one native read-only task query against the current repository.
+/// Runs one native task query or narrow signed task mutation against the current repository.
 fn run_tasks(arguments: impl Iterator<Item = std::ffi::OsString>) {
     let repository = env::current_dir().unwrap_or_else(|_error| {
         eprintln!("tiber_tasks_repository_unavailable: current directory could not be read");
@@ -480,12 +480,12 @@ fn usage() {
 
 #[expect(
     clippy::print_stderr,
-    reason = "nested command usage belongs on stderr for invalid task-query invocations"
+    reason = "nested command usage belongs on stderr for invalid task invocations"
 )]
-/// Prints the supported native task-query grammar.
+/// Prints the supported native task grammar.
 fn tasks_usage() {
     eprintln!(
-        "usage: tiber tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next>"
+        "usage: tiber tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | acceptance check <ref> <one-based-index>>"
     );
 }
 

@@ -173,17 +173,24 @@ interruption remain subsequent vertical slices.
 
 `tiber-tasks-core` defines the task vocabulary and
 `tiber-tasks-service` folds its immutable history into the query projection.
-`tiber-store-git` is a read-only EventCore adapter: when an `origin` remote is
-configured, it resolves the exact commit advertised for its fixed `tiber`
-authority branch and retrieves that object without moving a Git ref; without
-`origin`, it reads only the local `refs/heads/tiber` ref. It materializes a
-disposable snapshot of EventCore history preserved on the signed authority
-branch and cannot append facts or update a Git ref.
+`tiber-store-git` resolves the exact signed authority revision: when an
+`origin` remote is configured, it retrieves the currently advertised fixed
+`tiber` commit without moving a caller Git ref; without `origin`, it reads only
+the local `refs/heads/tiber` ref. Its reader materializes a disposable
+`EventCore` snapshot. Its separate one-shot publication boundary stages named
+facts in a disposable store, signs one candidate, and uses either an exact-base
+`--force-with-lease` update of `origin/tiber` or a local ref CAS. The remote
+operation rejects any changed authority head rather than overwriting it. It is
+not a generic writable EventCore store, and an ambiguous remote result requires
+reload rather than an automatic retry.
 
 The shipped native task-query surface exposes `tiber tasks list [--status
 <status>]`, `show`, `search`, and `next`. Those queries replay the full task history into a
 separate `TaskBoardProjection`; that projection is a read model, never
-EventCore command authority. Native task write commands, signed publication and
+EventCore command authority. The first write surface is `tiber tasks acceptance
+check <ref> <one-based-index>`: a command-specific pure fold creates at most
+one `TaskAcceptanceChecked` fact and declares only the board and addressed
+task stream as its consistency boundary. Other task writes, publication
 reconciliation, workflow core and service adapters, scheduling, and TUI task
 integration remain subsequent vertical slices. Internal actions never call MCP
 or shell back into the `tiber` executable.

@@ -54,6 +54,41 @@ mod tests {
 
     impl TaskFixture {
         #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            reason = "the dedicated write fixture extends the signed paged base fixture while proving native signed idempotent publication"
+        )]
+        async fn signed_acceptance_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(task_acceptance_added(
+                    &board_stream,
+                    TASK_ID,
+                    "first native acceptance",
+                ))
+                .expect("first acceptance fact should append")
+                .append(task_acceptance_added(
+                    &board_stream,
+                    TASK_ID,
+                    "second native acceptance",
+                ))
+                .expect("second acceptance fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture acceptance fact should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
             clippy::implicit_return,
             clippy::single_call_fn,
             reason = "the active-task scenario names its distinct fixture state at its only public-boundary use"
@@ -307,6 +342,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tasks_acceptance_check_publishes_once_and_is_idempotent() {
+        let fixture = TaskFixture::signed_acceptance_history().await;
+
+        let checked = fixture.tiber(&["tasks", "acceptance", "check", TASK_ID, "1"]);
+        assert_success(&checked);
+        assert!(
+            String::from_utf8_lossy(&checked.stdout)
+                .starts_with(&format!("checked acceptance 1 for {TASK_ID} at "))
+        );
+
+        let repeated = fixture.tiber(&["tasks", "acceptance", "check", TASK_ID, "1"]);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("acceptance 1 already checked for {TASK_ID}\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_show_displays_ordered_acceptance_with_current_checked_state() {
+        let fixture = TaskFixture::signed_acceptance_history().await;
+
+        let before_check = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&before_check);
+        assert_eq!(
+            String::from_utf8_lossy(&before_check.stdout),
+            format!(
+                "id: {TASK_ID}\nstatus: backlog\ntitle: Paged task revision {}\nsummary: History page {}.\ncontext: Read the complete EventCore history.\ntags: native\nacceptance:\n1. [ ] first native acceptance\n2. [ ] second native acceptance\n",
+                PAGE_SPANNING_UPDATES - 1,
+                PAGE_SPANNING_UPDATES - 1
+            )
+        );
+
+        let checked = fixture.tiber(&["tasks", "acceptance", "check", TASK_ID, "1"]);
+        assert_success(&checked);
+
+        let after_check = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&after_check);
+        assert_eq!(
+            String::from_utf8_lossy(&after_check.stdout),
+            format!(
+                "id: {TASK_ID}\nstatus: backlog\ntitle: Paged task revision {}\nsummary: History page {}.\ncontext: Read the complete EventCore history.\ntags: native\nacceptance:\n1. [x] first native acceptance\n2. [ ] second native acceptance\n",
+                PAGE_SPANNING_UPDATES - 1,
+                PAGE_SPANNING_UPDATES - 1
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn tasks_next_continues_the_sole_active_task() {
         let fixture = TaskFixture::signed_active_paged_history().await;
 
@@ -440,6 +524,58 @@ mod tests {
         }
     }
 
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the sentinel fixture must fail fast while proving malformed native acceptance input cannot trigger a Git authority read"
+    )]
+    fn invalid_acceptance_commands_fail_before_any_git_command() {
+        let directory = TempDir::new().expect("fixture directory should be created");
+        let command_directory = directory.path().join("commands");
+        fs::create_dir_all(&command_directory)
+            .expect("sentinel command directory should be created");
+        let git_sentinel = command_directory.join("git");
+        fs::write(
+            &git_sentinel,
+            "#!/bin/sh\n: > \"$TIBER_GIT_SENTINEL\"\nexit 99\n",
+        )
+        .expect("sentinel Git command should be written");
+        let mut permissions = fs::metadata(&git_sentinel)
+            .expect("sentinel Git command metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&git_sentinel, permissions)
+            .expect("sentinel Git command should be executable");
+
+        for (index, (reference, acceptance_index, code)) in [
+            ("../x", "1", "tasks_invalid_task_reference"),
+            (TASK_ID, "0", "tasks_invalid_acceptance_index"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let marker = directory.path().join(format!("git-was-run-{index}"));
+            let usage_exit_code: i32 = 2;
+            let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+                .args(["tasks", "acceptance", "check", reference, acceptance_index])
+                .current_dir(directory.path())
+                .env("PATH", &command_directory)
+                .env("TIBER_GIT_SENTINEL", &marker)
+                .output()
+                .expect("Tiber CLI should execute");
+
+            assert_eq!(output.status.code(), Some(usage_exit_code));
+            assert!(
+                String::from_utf8_lossy(&output.stderr).starts_with(&format!("{code}:")),
+                "invalid acceptance input must report the stable usage code"
+            );
+            assert!(
+                !marker.exists(),
+                "invalid acceptance command must not invoke Git"
+            );
+        }
+    }
+
     #[expect(
         clippy::implicit_return,
         reason = "the static event fixture returns its decoded wire representation directly"
@@ -465,6 +601,19 @@ mod tests {
                 "tags": ["native"],
                 "title": title
             }
+        }))
+    }
+
+    #[expect(
+        clippy::implicit_return,
+        reason = "the acceptance fixture's one stable board-side mutation returns its decoded durable task fact directly"
+    )]
+    fn task_acceptance_added(stream_id: &StreamId, task_id: &str, text: &str) -> TaskEvent {
+        event(json!({
+            "event": "task_acceptance_added",
+            "stream_id": stream_id.as_ref(),
+            "stem": task_id,
+            "item": {"checked": false, "text": text}
         }))
     }
 

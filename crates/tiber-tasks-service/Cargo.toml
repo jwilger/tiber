@@ -6,9 +6,13 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+eventcore.workspace = true
+eventcore-types.workspace = true
+serde.workspace = true
 tiber-tasks-core = { path = "../tiber-tasks-core" }
 
 [dev-dependencies]
+eventcore = { version = "=2.0.0", features = ["experimental-model-check"] }
 serde_json.workspace = true
 
 [lints]

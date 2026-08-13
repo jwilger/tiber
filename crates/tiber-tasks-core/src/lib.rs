@@ -10,20 +10,16 @@
 #![expect(
     clippy::arbitrary_source_item_ordering,
     clippy::exhaustive_enums,
-    clippy::exhaustive_structs,
     clippy::implicit_return,
-    clippy::impl_trait_in_params,
     clippy::missing_errors_doc,
     clippy::missing_inline_in_public_items,
-    clippy::missing_trait_methods,
     clippy::pattern_type_mismatch,
     clippy::question_mark_used,
-    reason = "durable serde facts need stable public shapes and source order; semantic parsing returns typed failures; and EventCore checked-model derives supply standard trait methods and internal helper signatures"
+    reason = "durable serde facts need stable public shapes and source order, and semantic parsing returns typed failures"
 )]
 
 use core::{error::Error, fmt};
 
-use eventcore::ModelEvent;
 use eventcore_types::{Event, StreamId};
 use serde::{Deserialize, Serialize, de::Error as _};
 
@@ -59,6 +55,10 @@ impl fmt::Display for TaskCoreError {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "this leaf semantic parsing error deliberately exposes only its stable display code"
+)]
 impl Error for TaskCoreError {}
 
 /// Collision-resistant durable task identity.
@@ -86,6 +86,10 @@ impl TaskId {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "the serde boundary delegates construction to the semantic parser and has no distinct in-place representation"
+)]
 impl<'de> Deserialize<'de> for TaskId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -152,6 +156,10 @@ impl TaskTitle {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "the serde boundary delegates construction to the semantic parser and has no distinct in-place representation"
+)]
 impl<'de> Deserialize<'de> for TaskTitle {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -434,6 +442,19 @@ pub struct TaskAcceptanceChecked {
     pub checked: bool,
 }
 
+impl TaskAcceptanceChecked {
+    /// Creates one named acceptance-check fact payload.
+    #[must_use]
+    pub fn new(stream_id: StreamId, stem: TaskId, index: usize, checked: bool) -> Self {
+        Self {
+            stream_id,
+            stem,
+            index,
+            checked,
+        }
+    }
+}
+
 /// Durable source-event payload for removing an acceptance item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -510,7 +531,7 @@ pub struct HistoricalTaskStatePublished {
 /// Git `EventCore` store uses them to recover Tiber's existing task history. New
 /// commands must emit named business facts and must not emit historical-only
 /// variants.
-#[derive(Clone, Debug, Deserialize, Eq, ModelEvent, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskEvent {

@@ -1,13 +1,18 @@
-//! Read-only materialization of Tiber's signed `EventCore` Git history.
+//! Signed `EventCore` authority materialization and one-shot Tiber publication.
 //!
 //! This adapter resolves one fixed authority revision, verifies its signature,
-//! materializes it in disposable storage, and exposes only `EventCore` reads.
-//! It deliberately supplies neither an `EventStore` implementation nor a write
-//! command surface.
+//! materializes it in disposable storage, and exposes typed `EventCore` reads.
+//! Its [`publication`] module supplies the deliberately separate, narrow
+//! one-shot signed append boundary; this crate never implements a generic
+//! writable `EventStore` or broad task authority.
 
 #![forbid(unsafe_code)]
 
 extern crate alloc;
+
+/// Signed native Tiber publication boundary.
+#[path = "publisher.rs"]
+pub mod publication;
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -143,12 +148,18 @@ impl GitObjectFormat {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum GitOperation {
+    /// Append a named `EventCore` transaction to a disposable publication stage.
+    AppendTiberEvents,
     /// Materialize a verified revision in disposable storage.
     MaterializeTiberSnapshot,
+    /// Publish a signed candidate transaction to the fixed Tiber authority.
+    PublishTiberEvents,
     /// Resolve or fetch the remote authority ref.
     RefreshOriginTiberRef,
     /// Resolve the origin configuration or local authority ref.
     ResolveTiberRef,
+    /// Sign one candidate commit before authority publication.
+    SignTiberCandidate,
     /// Verify an authority commit signature.
     VerifyTiberSignature,
 }
@@ -287,9 +298,12 @@ impl GitCommandFailure {
     )]
     pub const fn code(&self) -> &'static str {
         match self.operation {
+            GitOperation::AppendTiberEvents => "tiber_store_append_tiber_events_failed",
             GitOperation::MaterializeTiberSnapshot => "tiber_store_snapshot_materialization_failed",
+            GitOperation::PublishTiberEvents => "tiber_store_publish_tiber_events_failed",
             GitOperation::RefreshOriginTiberRef => "tiber_git_refresh_origin_tiber_ref_failed",
             GitOperation::ResolveTiberRef => "tiber_git_resolve_tiber_ref_failed",
+            GitOperation::SignTiberCandidate => "tiber_git_sign_tiber_candidate_failed",
             GitOperation::VerifyTiberSignature => "tiber_git_verify_tiber_signature_failed",
         }
     }
@@ -605,6 +619,12 @@ struct EventCatalogEntry {
 
 /// One exact authority revision and the repository containing its disposable snapshot objects.
 struct ResolvedAuthority {
+    /// The caller working directory required by a relative local SSH command.
+    ///
+    /// Remote authority operations keep object and ref state in the disposable
+    /// repository while retaining this caller-root working directory for the
+    /// owner's repository-local transport configuration.
+    caller_execution_root: Option<PathBuf>,
     /// The repository used only to verify and materialize this exact revision.
     repository: PathBuf,
     /// The exact signed revision selected at the local or remote authority boundary.
@@ -936,30 +956,10 @@ const fn retryability_for_io(kind: io::ErrorKind) -> Retryability {
     }
 }
 
-/// Classifies an unsuccessful Git status without retaining Git output.
-#[expect(
-    clippy::implicit_return,
-    clippy::single_call_fn,
-    reason = "authority-ref absence is permanent while remote refresh transport failures can be retried"
-)]
-const fn retryability_for_exit(operation: GitOperation, exit_code: Option<i32>) -> Retryability {
-    match (operation, exit_code) {
-        (GitOperation::RefreshOriginTiberRef, Some(GIT_NOT_FOUND_EXIT))
-        | (
-            GitOperation::MaterializeTiberSnapshot
-            | GitOperation::ResolveTiberRef
-            | GitOperation::VerifyTiberSignature,
-            _,
-        ) => Retryability::Permanent,
-        (GitOperation::RefreshOriginTiberRef, _) => Retryability::Retryable,
-    }
-}
-
 /// Resolves the only authority revision accepted by this adapter.
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
-    clippy::single_call_fn,
     reason = "the fixed origin/local split retains distinct stable authority failures"
 )]
 fn resolve_authority_revision(
@@ -987,6 +987,7 @@ fn resolve_authority_revision(
         return Ok(ResolvedAuthority {
             repository: repository.to_path_buf(),
             revision,
+            caller_execution_root: None,
         });
     }
     Err(git_nonzero_error(GitOperation::ResolveTiberRef, &origin))
@@ -1027,7 +1028,6 @@ fn resolve_local_authority_revision(repository: &Path) -> Result<TiberRevision, 
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
-    clippy::single_call_fn,
     reason = "the fixed remote read sequence retains a clear exact-OID boundary"
 )]
 fn resolve_remote_authority_revision(
@@ -1098,6 +1098,7 @@ fn resolve_remote_authority_revision(
     Ok(ResolvedAuthority {
         repository: authority_repository,
         revision,
+        caller_execution_root: Some(caller_execution_root),
     })
 }
 
@@ -1152,7 +1153,6 @@ fn copy_local_transport_configuration(
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
-    clippy::single_call_fn,
     reason = "only Git's unambiguous relative filesystem URL forms need rebasing before the repository directory changes"
 )]
 fn origin_url_for_disposable_authority(
@@ -1331,7 +1331,7 @@ fn gpg_configuration_value_for_authority(
         return Ok(value.to_owned());
     };
     if caller_worktree_root.is_none() {
-        let resolved = caller_worktree_top_level(repository)?;
+        let resolved = caller_worktree_top_level(repository, GitOperation::VerifyTiberSignature)?;
         *caller_worktree_root = Some(resolved);
     }
     let worktree_root = caller_worktree_root
@@ -1400,7 +1400,6 @@ fn is_gpg_program_key(key: &str) -> bool {
 /// Leaves Git's tilde and installation-prefix path interpolation to Git itself.
 #[expect(
     clippy::implicit_return,
-    clippy::single_call_fn,
     reason = "these documented path forms are already independent of a Git worktree directory"
 )]
 fn git_path_is_self_resolving(value: &str) -> bool {
@@ -1422,27 +1421,29 @@ fn is_explicit_relative_program_path(path: &Path) -> bool {
 /// Resolves the caller worktree root required by Git's relative SSH signer-file semantics.
 #[expect(
     clippy::implicit_return,
+    clippy::pub_with_shorthand,
     clippy::question_mark_used,
-    clippy::single_call_fn,
-    reason = "the worktree lookup is a separate fixed Git boundary with the signature-verification error class"
+    reason = "the worktree lookup is a separate fixed Git boundary shared with publication, while rustfmt canonicalizes the crate visibility spelling"
 )]
-fn caller_worktree_top_level(repository: &Path) -> Result<PathBuf, GitStoreError> {
+pub(crate) fn caller_worktree_top_level(
+    repository: &Path,
+    operation: GitOperation,
+) -> Result<PathBuf, GitStoreError> {
     let output = run_git(
         repository,
-        GitOperation::VerifyTiberSignature,
+        operation,
         &["rev-parse", "--show-toplevel"],
         None,
         None,
     )?;
-    require_git_success(&output, GitOperation::VerifyTiberSignature)?;
-    let text =
-        str::from_utf8(&output.stdout).map_err(|_source| GitStoreError::VerifyTiberSignature)?;
+    require_git_success(&output, operation)?;
+    let text = str::from_utf8(&output.stdout).map_err(|_source| git_semantic_error(operation))?;
     let Some(path) = text.strip_suffix('\n') else {
-        return Err(GitStoreError::VerifyTiberSignature);
+        return Err(git_semantic_error(operation));
     };
     let worktree = PathBuf::from(path);
     if path.is_empty() || path.contains('\n') || !worktree.is_absolute() {
-        return Err(GitStoreError::VerifyTiberSignature);
+        return Err(git_semantic_error(operation));
     }
     Ok(worktree)
 }
@@ -1451,7 +1452,6 @@ fn caller_worktree_top_level(repository: &Path) -> Result<PathBuf, GitStoreError
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
-    clippy::single_call_fn,
     reason = "the parser accepts one opaque Git URL without retaining malformed command output"
 )]
 fn parse_origin_url(output: &[u8]) -> Result<String, GitStoreError> {
@@ -1469,7 +1469,6 @@ fn parse_origin_url(output: &[u8]) -> Result<String, GitStoreError> {
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
-    clippy::single_call_fn,
     reason = "the parser maps all malformed remote output into the one stable refresh failure"
 )]
 fn parse_ls_remote_revision(output: &[u8]) -> Result<TiberRevision, GitStoreError> {
@@ -1518,7 +1517,10 @@ fn parse_revision_output(
 )]
 const fn git_semantic_error(operation: GitOperation) -> GitStoreError {
     match operation {
-        GitOperation::MaterializeTiberSnapshot => GitStoreError::Materialization,
+        GitOperation::AppendTiberEvents
+        | GitOperation::MaterializeTiberSnapshot
+        | GitOperation::PublishTiberEvents
+        | GitOperation::SignTiberCandidate => GitStoreError::Materialization,
         GitOperation::RefreshOriginTiberRef => GitStoreError::RefreshOriginTiberRef,
         GitOperation::ResolveTiberRef => GitStoreError::ResolveTiberRef,
         GitOperation::VerifyTiberSignature => GitStoreError::VerifyTiberSignature,
@@ -1529,7 +1531,6 @@ const fn git_semantic_error(operation: GitOperation) -> GitStoreError {
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
-    clippy::single_call_fn,
     reason = "signature verification is intentionally an explicit boundary before materialization"
 )]
 fn verify_signed_revision(
@@ -1593,11 +1594,70 @@ fn materialize_revision(
     Ok(())
 }
 
-/// Requires a signed snapshot to retain its committed `EventCore` transaction directory.
+/// Builds a root-tree index while materializing only the committed `EventCore` subtree.
+///
+/// The publication index retains every path from the signed base revision, while a
+/// second disposable index limits checkout to `eventstore`. This keeps unrelated
+/// repository files out of the temporary work tree without dropping them from the
+/// signed candidate tree.
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
     clippy::single_call_fn,
+    reason = "the two-index publication materialization keeps full-tree preservation and subtree isolation explicit"
+)]
+fn materialize_publishable_revision(
+    repository: &Path,
+    revision: &TiberRevision,
+    destination: &Path,
+    publication_index: &Path,
+    materialization_index: &Path,
+) -> Result<(), GitStoreError> {
+    let event_store_tree = format!("{}:{EVENT_STORE_DIRECTORY}", revision.as_str());
+    let object_type = run_git(
+        repository,
+        GitOperation::MaterializeTiberSnapshot,
+        &["cat-file", "-t", event_store_tree.as_str()],
+        None,
+        None,
+    )?;
+    if !object_type.status.success() {
+        return Err(GitStoreError::EventDirectoryMissing);
+    }
+    if object_type.stdout != b"tree\n" {
+        return Err(GitStoreError::EventHistory);
+    }
+    let root_index = run_git(
+        repository,
+        GitOperation::MaterializeTiberSnapshot,
+        &["read-tree", revision.as_str()],
+        None,
+        Some(publication_index),
+    )?;
+    require_git_success(&root_index, GitOperation::MaterializeTiberSnapshot)?;
+    let subtree_index = run_git(
+        repository,
+        GitOperation::MaterializeTiberSnapshot,
+        &["read-tree", event_store_tree.as_str()],
+        None,
+        Some(materialization_index),
+    )?;
+    require_git_success(&subtree_index, GitOperation::MaterializeTiberSnapshot)?;
+    let checkout = run_git(
+        repository,
+        GitOperation::MaterializeTiberSnapshot,
+        &["checkout-index", "--all", "--force", "--prefix=eventstore/"],
+        Some(destination),
+        Some(materialization_index),
+    )?;
+    require_git_success(&checkout, GitOperation::MaterializeTiberSnapshot)?;
+    Ok(())
+}
+
+/// Requires a signed snapshot to retain its committed `EventCore` transaction directory.
+#[expect(
+    clippy::implicit_return,
+    clippy::question_mark_used,
     reason = "the one-purpose boundary preserves distinct missing and malformed snapshot errors while validating both committed directories"
 )]
 fn require_safe_event_store_layout(snapshot: &Path) -> Result<(), GitStoreError> {
@@ -1687,17 +1747,16 @@ fn run_git(
         .map_err(|source| GitCommandFailure::io(operation, source))?;
     if timed_status.is_none() {
         #[cfg(target_os = "linux")]
-        terminate_process_group(child.id());
+        let process_group_termination = terminate_process_group(child.id());
         let _killed = child.kill();
         let _waited = child.wait();
-        return Err(GitCommandFailure {
-            exit_code: None,
-            io_source: None,
-            kind: GitCommandFailureKind::TimedOut,
-            operation,
-            retryability: Retryability::Retryable,
-        }
-        .into());
+        #[cfg(target_os = "linux")]
+        return match process_group_termination {
+            Ok(()) => Err(timed_out_failure(operation)),
+            Err(source) => Err(GitCommandFailure::io(operation, source).into()),
+        };
+        #[cfg(not(target_os = "linux"))]
+        return Err(timed_out_failure(operation));
     }
     child
         .wait_with_output()
@@ -1717,9 +1776,13 @@ fn run_git(
 )]
 const fn timeout_for(operation: GitOperation) -> Duration {
     match operation {
-        GitOperation::RefreshOriginTiberRef => REMOTE_AUTHORITY_GIT_TIMEOUT,
-        GitOperation::MaterializeTiberSnapshot
+        GitOperation::PublishTiberEvents | GitOperation::RefreshOriginTiberRef => {
+            REMOTE_AUTHORITY_GIT_TIMEOUT
+        }
+        GitOperation::AppendTiberEvents
+        | GitOperation::MaterializeTiberSnapshot
         | GitOperation::ResolveTiberRef
+        | GitOperation::SignTiberCandidate
         | GitOperation::VerifyTiberSignature => LOCAL_GIT_TIMEOUT,
     }
 }
@@ -1730,17 +1793,41 @@ const fn timeout_for(operation: GitOperation) -> Duration {
 /// be reused between the timeout decision and this direct, no-shell signal invocation.
 #[cfg(target_os = "linux")]
 #[expect(
+    clippy::implicit_return,
+    clippy::question_mark_used,
     clippy::single_call_fn,
-    reason = "the one-purpose Linux process-group boundary keeps signal argv separate from Git command construction"
+    reason = "the one-purpose Linux process-group boundary keeps signal argv separate from Git command construction and propagates a failed cleanup command"
 )]
-fn terminate_process_group(process_group_id: u32) {
+fn terminate_process_group(process_group_id: u32) -> io::Result<()> {
     let target = format!("-{process_group_id}");
-    let _status = Command::new("kill")
+    let status = Command::new("kill")
         .args(["-KILL", "--", target.as_str()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("process-group termination command failed"))
+    }
+}
+
+/// Builds the stable timeout outcome after bounded process cleanup completed.
+#[expect(
+    clippy::implicit_return,
+    clippy::single_call_fn,
+    reason = "the timeout outcome is a closed sanitized process-failure value"
+)]
+fn timed_out_failure(operation: GitOperation) -> GitStoreError {
+    GitCommandFailure {
+        exit_code: None,
+        io_source: None,
+        kind: GitCommandFailureKind::TimedOut,
+        operation,
+        retryability: Retryability::Retryable,
+    }
+    .into()
 }
 
 /// Turns a non-success Git output into the operation's stable error.
@@ -1763,12 +1850,26 @@ fn require_git_success(output: &Output, operation: GitOperation) -> Result<(), G
 )]
 fn git_nonzero_error(operation: GitOperation, output: &Output) -> GitStoreError {
     let exit_code = output.status.code();
+    let retryability = match (operation, exit_code) {
+        (GitOperation::RefreshOriginTiberRef, Some(GIT_NOT_FOUND_EXIT))
+        | (
+            GitOperation::AppendTiberEvents
+            | GitOperation::MaterializeTiberSnapshot
+            | GitOperation::ResolveTiberRef
+            | GitOperation::SignTiberCandidate
+            | GitOperation::VerifyTiberSignature,
+            _,
+        ) => Retryability::Permanent,
+        (GitOperation::PublishTiberEvents | GitOperation::RefreshOriginTiberRef, _) => {
+            Retryability::Retryable
+        }
+    };
     GitCommandFailure {
         exit_code,
         io_source: None,
         kind: GitCommandFailureKind::NonZeroExit,
         operation,
-        retryability: retryability_for_exit(operation, exit_code),
+        retryability,
     }
     .into()
 }
@@ -1778,7 +1879,6 @@ fn git_nonzero_error(operation: GitOperation, output: &Output) -> GitStoreError 
     clippy::implicit_return,
     clippy::question_mark_used,
     clippy::shadow_reuse,
-    clippy::single_call_fn,
     reason = "the catalog parser keeps transient file and envelope data local while mapping all failures to one stable source error"
 )]
 fn inspect_event_history(events_directory: &Path) -> Result<EventHistoryCatalog, GitStoreError> {
@@ -1957,6 +2057,25 @@ fn stream_ids_from_catalog(catalog: &EventHistoryCatalog) -> Result<Vec<StreamId
         .collect()
 }
 
+/// Returns the exact append version for one stream in an immutable validated catalog.
+#[expect(
+    clippy::implicit_return,
+    clippy::single_call_fn,
+    reason = "an EventCore stream version is the count of validated envelopes in that exact stream"
+)]
+fn stream_version_from_catalog(
+    catalog: &EventHistoryCatalog,
+    stream: &StreamId,
+) -> eventcore_types::StreamVersion {
+    let count = catalog
+        .transactions
+        .values()
+        .flat_map(|transaction| &transaction.event_envelopes)
+        .filter(|envelope| envelope.stream_id == *stream)
+        .count();
+    eventcore_types::StreamVersion::new(count)
+}
+
 /// Checks whether an immutable envelope belongs to any member of a closed stream union.
 #[expect(
     clippy::implicit_return,
@@ -2099,7 +2218,6 @@ fn linear_transaction_order(
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
-    clippy::single_call_fn,
     reason = "EventCore status and fork inspection remain explicit fail-closed source validation steps"
 )]
 fn verify_history_integrity(
@@ -2203,7 +2321,7 @@ fn is_transaction_ancestor(
 #[cfg(test)]
 mod git_error_tests {
     use core::error::Error as _;
-    use std::io;
+    use std::{io, process::Command};
 
     use super::{
         GitCommandFailure, GitCommandFailureKind, GitOperation, GitStoreError, Retryability,
@@ -2213,13 +2331,7 @@ mod git_error_tests {
     use core::time::Duration;
 
     #[cfg(target_os = "linux")]
-    use std::{
-        fs,
-        path::Path,
-        process::{Command, Stdio},
-        thread,
-        time::Instant,
-    };
+    use std::{fs, path::Path, process::Stdio, thread, time::Instant};
 
     #[cfg(target_os = "linux")]
     use tempfile::TempDir;
@@ -2297,6 +2409,49 @@ mod git_error_tests {
         assert_eq!(failure.kind(), GitCommandFailureKind::Io);
         assert_eq!(failure.exit_code(), None);
         assert!(failure.io_source().is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the focused timeout-cleanup contract test fails fast when the typed Git process context is absent"
+    )]
+    fn reports_a_process_group_cleanup_failure_as_a_typed_process_error() {
+        let error = GitStoreError::from(GitCommandFailure::io(
+            GitOperation::ResolveTiberRef,
+            io::Error::from(io::ErrorKind::NotFound),
+        ));
+
+        assert_eq!(error.code(), "tiber_git_resolve_tiber_ref_failed");
+        assert_eq!(error.to_string(), "tiber_git_resolve_tiber_ref_failed");
+        assert_eq!(error.retryability(), Retryability::Permanent);
+        let failure = error
+            .git_command_failure()
+            .expect("cleanup failure must retain Git process context");
+        assert_eq!(failure.operation(), GitOperation::ResolveTiberRef);
+        assert_eq!(failure.kind(), GitCommandFailureKind::Io);
+        assert_eq!(failure.exit_code(), None);
+        assert_eq!(
+            failure.io_source().map(io::Error::kind),
+            Some(io::ErrorKind::NotFound)
+        );
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the focused fixed-Git failure fixture fails fast if the test process cannot run"
+    )]
+    #[test]
+    fn classifies_candidate_signing_failure_as_permanent() {
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", "definitely-not-a-tiber-revision"])
+            .output()
+            .expect("the fixed Git fixture should start");
+        assert!(!output.status.success());
+        let error = super::git_nonzero_error(GitOperation::SignTiberCandidate, &output);
+        assert_eq!(error.code(), "tiber_git_sign_tiber_candidate_failed");
+        assert_eq!(error.retryability(), Retryability::Permanent,);
     }
 
     #[cfg(target_os = "linux")]

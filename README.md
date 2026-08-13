@@ -9,11 +9,20 @@ authority itself.
 Tiber v1 targets x86_64 Linux. The primary executable is `tiber`; running it
 without an argument opens the terminal UI. Native task operations live only
 under `tiber tasks …`. The shipped `list`, `show`, `search`, and `next` commands
-are read-only queries over EventCore task history preserved on the signed
+are read-only queries over `EventCore` task history preserved on the signed
 `tiber` authority branch. When an `origin` remote exists, they resolve its
 currently advertised `tiber` commit and fetch that exact object without moving
-any Git ref. They never append facts or update Git refs; task writes, publication,
-and workflow scheduling remain later native slices.
+any caller Git ref.
+
+`tiber tasks acceptance check <task-ref> <one-based-index>` is the first narrow
+native mutation. It folds only the addressed task's canonical acceptance facts,
+then appends one `task_acceptance_checked` fact with the board and task-stream
+versions as its consistency boundary. Tiber creates a signed candidate and uses
+an exact-base `--force-with-lease` update of the fixed authority branch (or a
+local ref CAS when no `origin` exists), so it cannot overwrite a changed remote
+head. A post-push ambiguity is reported rather than retried automatically. Other
+task mutations, publication reconciliation, and workflow scheduling remain later
+native slices.
 
 `tiber tasks list` shows open work in board priority order with its status: one
 item may be `in-progress` while the remaining queued work is `backlog`.
@@ -50,6 +59,7 @@ cargo run --locked -p tiber -- tasks list
 cargo run --locked -p tiber -- tasks show <task-ref>
 cargo run --locked -p tiber -- tasks search "outcome terms"
 cargo run --locked -p tiber -- tasks next
+cargo run --locked -p tiber -- tasks acceptance check <task-ref> <one-based-index>
 ```
 
 Read [`AGENTS.md`](AGENTS.md) before making a change.
