@@ -37,10 +37,13 @@ First-party legacy source required during the port lives temporarily under
 CI, packaging, and public command routing. New implementation code is ported
 into native `tiber-*` crates, with no compatibility crate, second `tiber`
 binary, or legacy top-level task aliases. The default `tiber` command remains
-the TUI and task operations live at `tiber tasks …`. The initial native task
-surface provides read-only queries over preserved EventCore history and one
-narrow signed acceptance-check mutation; broader task writes, reconciliation,
-and workflow scheduling remain follow-on work, not compatibility surfaces.
+the TUI and task operations live at `tiber tasks …`. The native task surface
+provides read-only queries over preserved EventCore history plus only bounded
+signed completion operations: acceptance check, occurrence-safe subtask check,
+and terminal `transition <ref> done`. They consume opaque command-specific
+publication tokens at the Git adapter rather than reopening a generic append,
+generic task mutation, or former MCP write surface. Reconciliation and workflow
+scheduling remain follow-on work, not compatibility surfaces.
 
 One bounded exception corrects malformed retained task metadata: native Tasks
 may append a named, preconditioned duplicate-subtask identity correction. It

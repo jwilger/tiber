@@ -19,7 +19,8 @@ use eventcore_types::StreamId;
 use tiber_tasks_core::{
     Task, TaskAcceptanceAdded, TaskAcceptanceChecked, TaskAcceptanceRemoved, TaskCreated,
     TaskDetailsUpdated, TaskEvent, TaskId, TaskLinksChanged, TaskOrder, TaskPullRequestChanged,
-    TaskStatus, TaskSubtaskAdded, TaskSubtaskChecked, TaskSubtaskIdCorrected, TaskTransitioned,
+    TaskStatus, TaskSubtaskAdded, TaskSubtaskChecked, TaskSubtaskIdCorrected,
+    TaskSubtaskOccurrenceChecked, TaskTransitioned,
 };
 
 /// The only publication input the initial native task-write slice may emit.
@@ -201,6 +202,222 @@ impl SubtaskIdCorrectionPublication {
     }
 }
 
+/// The only publication input for checking one exact subtask occurrence.
+///
+/// This opaque token carries one preconditioned occurrence fact and the board
+/// plus addressed-task streams whose versions fenced its pure decision. It is
+/// intentionally not an identifier-based or generic subtask mutation.
+#[derive(Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SubtaskOccurrenceCheckPublication {
+    /// The sole exact occurrence fact allowed through this closed boundary.
+    checked_fact: TaskSubtaskOccurrenceChecked,
+    /// Exact stream-version fence read by the occurrence-check command.
+    consistency_streams: [StreamId; 2],
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque occurrence-check token presents validation, inspection, then one-shot transfer in data-flow order"
+)]
+impl SubtaskOccurrenceCheckPublication {
+    /// Creates a closed occurrence-check token from one modeled command fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed command error when the modeled fact is not an exact
+    /// unchecked occurrence on the required board/task consistency fence.
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the only command-local construction point validates the modeled fact before the closed transfer token is created"
+    )]
+    pub(crate) fn from_modeled_fact(
+        checked_fact: TaskSubtaskOccurrenceChecked,
+        consistency_streams: [StreamId; 2],
+    ) -> Result<Self, command::TaskCommandError> {
+        let expected_streams = command::acceptance_consistency_streams(&checked_fact.stem)?;
+        if checked_fact.expected.checked
+            || checked_fact.stream_id != consistency_streams[0]
+            || expected_streams != consistency_streams
+        {
+            return Err(command::TaskCommandError::InvalidModeledSubtaskOccurrencePublication);
+        }
+        Ok(Self {
+            checked_fact,
+            consistency_streams,
+        })
+    }
+
+    /// Returns the sole exact occurrence fact authorized for publication.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the opaque token exposes its modeled fact only for adapter-boundary inspection"
+    )]
+    pub const fn checked_fact(&self) -> &TaskSubtaskOccurrenceChecked {
+        &self.checked_fact
+    }
+
+    /// Returns the exact board/task stream fence read by the command.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the fixed two-stream occurrence-check fence is clearest as a borrowed token accessor"
+    )]
+    pub const fn consistency_streams(&self) -> &[StreamId; 2] {
+        &self.consistency_streams
+    }
+
+    /// Transfers the closed event and exact stream fence to the publication adapter.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot adapter transfer preserves the modeled occurrence fact and its fence together"
+    )]
+    pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 2]) {
+        (
+            TaskEvent::TaskSubtaskOccurrenceChecked(self.checked_fact),
+            self.consistency_streams,
+        )
+    }
+}
+
+/// The only publication input for completing one current task.
+///
+/// A first completion carries the terminal lifecycle transition plus one
+/// strict board-order fact. A retry after a completed task whose old order
+/// still names it carries only the order repair. No caller can construct a
+/// broad task-mutation batch through this opaque boundary.
+#[derive(Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque completion token fields follow addressed task, optional transition, order repair, then consistency fence"
+)]
+pub struct TaskCompletionPublication {
+    /// Exact task addressed by the completion decision.
+    task: TaskId,
+    /// Present only when the task still needs its terminal lifecycle transition.
+    transitioned_fact: Option<TaskTransitioned>,
+    /// Complete strict open-task order after removing every stale target entry.
+    reordered_fact: TaskOrder,
+    /// Exact board/task stream fence read by the completion command.
+    consistency_streams: [StreamId; 2],
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque completion token presents validation, inspection, then one-shot batch transfer in data-flow order"
+)]
+impl TaskCompletionPublication {
+    /// Creates a closed completion token from modeled terminal and board facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed command error when the modeled batch is not exactly one
+    /// order repair with an optional `Done` transition on its board/task fence.
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the only command-local construction point validates the optional terminal fact and mandatory strict order before creating the closed token"
+    )]
+    pub(crate) fn from_modeled_facts(
+        task: TaskId,
+        transitioned_fact: Option<TaskTransitioned>,
+        reordered_fact: TaskOrder,
+        consistency_streams: [StreamId; 2],
+    ) -> Result<Self, command::TaskCommandError> {
+        let expected_streams = command::acceptance_consistency_streams(&task)?;
+        let transition_is_valid = transitioned_fact.as_ref().is_none_or(|transitioned| {
+            transitioned.stream_id == consistency_streams[0]
+                && transitioned.stem == task
+                && transitioned.status == TaskStatus::Done
+                && transitioned.claim.is_none()
+        });
+        if expected_streams != consistency_streams
+            || !transition_is_valid
+            || reordered_fact.stream_id != consistency_streams[0]
+            || reordered_fact.order.contains(&task)
+        {
+            return Err(command::TaskCommandError::InvalidModeledTaskCompletionPublication);
+        }
+        Ok(Self {
+            task,
+            transitioned_fact,
+            reordered_fact,
+            consistency_streams,
+        })
+    }
+
+    /// Returns the addressed durable task identity.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the borrowed addressed identity is clearest as the opaque token's direct accessor"
+    )]
+    pub const fn task(&self) -> &TaskId {
+        &self.task
+    }
+
+    /// Returns the terminal fact when this publication performs the first completion.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the optional terminal fact is exposed only for adapter-boundary inspection"
+    )]
+    pub const fn transitioned_fact(&self) -> Option<&TaskTransitioned> {
+        self.transitioned_fact.as_ref()
+    }
+
+    /// Returns the mandatory strict board-order fact.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the mandatory strict order repair is exposed only for adapter-boundary inspection"
+    )]
+    pub const fn reordered_fact(&self) -> &TaskOrder {
+        &self.reordered_fact
+    }
+
+    /// Returns the exact board/task stream fence read by the command.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the fixed two-stream completion fence is clearest as a borrowed token accessor"
+    )]
+    pub const fn consistency_streams(&self) -> &[StreamId; 2] {
+        &self.consistency_streams
+    }
+
+    /// Transfers the closed one-or-two-event batch and exact fence to its adapter.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot batch transfer preserves the optional terminal fact, mandatory order repair, and fence together"
+    )]
+    pub fn into_events_and_consistency_streams(self) -> (Vec<TaskEvent>, [StreamId; 2]) {
+        let mut events = Vec::new();
+        if let Some(transitioned_fact) = self.transitioned_fact {
+            events.push(TaskEvent::TaskTransitioned(transitioned_fact));
+        }
+        events.push(TaskEvent::BoardReordered(self.reordered_fact));
+        (events, self.consistency_streams)
+    }
+}
+
 /// An immutable, globally ordered set of durable task facts.
 ///
 /// The source adapter must preserve commit order across all included streams.
@@ -345,6 +562,13 @@ pub enum TaskProjectionError {
         /// The zero-based corrected occurrence position.
         index: usize,
     },
+    /// An exact occurrence check's recorded preimage did not match the current occurrence.
+    SubtaskOccurrenceCheckPreimageMismatch {
+        /// The owning task identity.
+        task: TaskId,
+        /// The zero-based checked occurrence position.
+        index: usize,
+    },
     /// A correction attempted to rename an identity that was not duplicated.
     SubtaskCorrectionIdNotDuplicate {
         /// The owning task identity.
@@ -395,6 +619,9 @@ impl TaskProjectionError {
             Self::SubtaskOccurrenceMissing { .. } => "tasks_projection_subtask_occurrence_missing",
             Self::SubtaskCorrectionPreimageMismatch { .. } => {
                 "tasks_projection_subtask_correction_preimage_mismatch"
+            }
+            Self::SubtaskOccurrenceCheckPreimageMismatch { .. } => {
+                "tasks_projection_subtask_occurrence_check_preimage_mismatch"
             }
             Self::SubtaskCorrectionIdNotDuplicate { .. } => {
                 "tasks_projection_subtask_correction_id_not_duplicate"
@@ -498,6 +725,9 @@ impl TaskBoardProjection {
             TaskEvent::TaskLinksChanged(changed) => self.apply_links_changed(changed)?,
             TaskEvent::TaskSubtaskAdded(added) => self.apply_subtask_added(added)?,
             TaskEvent::TaskSubtaskChecked(checked) => self.apply_subtask_checked(checked)?,
+            TaskEvent::TaskSubtaskOccurrenceChecked(checked) => {
+                self.apply_subtask_occurrence_checked(checked)?;
+            }
             TaskEvent::TaskSubtaskIdCorrected(corrected) => {
                 self.apply_subtask_id_corrected(corrected)?;
             }
@@ -815,6 +1045,41 @@ impl TaskBoardProjection {
                 subtask: checked.subtask_id.clone(),
             })?;
         subtask.checked = checked.checked;
+        Ok(())
+    }
+
+    /// Checks one exact current subtask occurrence after verifying its complete preimage.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the narrow exact-occurrence fold uses typed propagation and validates its immutable preimage before changing only the check state"
+    )]
+    fn apply_subtask_occurrence_checked(
+        &mut self,
+        checked: &TaskSubtaskOccurrenceChecked,
+    ) -> Result<(), TaskProjectionError> {
+        let task = self.task_mut(&checked.stem)?;
+        let current = task.subtasks.get(checked.index).ok_or_else(|| {
+            TaskProjectionError::SubtaskOccurrenceMissing {
+                task: checked.stem.clone(),
+                index: checked.index,
+            }
+        })?;
+        if current != &checked.expected || checked.expected.checked {
+            return Err(
+                TaskProjectionError::SubtaskOccurrenceCheckPreimageMismatch {
+                    task: checked.stem.clone(),
+                    index: checked.index,
+                },
+            );
+        }
+        let target = task.subtasks.get_mut(checked.index).ok_or_else(|| {
+            TaskProjectionError::SubtaskOccurrenceMissing {
+                task: checked.stem.clone(),
+                index: checked.index,
+            }
+        })?;
+        target.checked = true;
         Ok(())
     }
 

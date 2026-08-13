@@ -322,6 +322,24 @@ pub struct TaskTransitioned {
     pub claim: Option<TaskClaim>,
 }
 
+impl TaskTransitioned {
+    /// Creates one named lifecycle transition fact payload.
+    #[must_use]
+    pub fn new(
+        stream_id: StreamId,
+        stem: TaskId,
+        status: TaskStatus,
+        claim: Option<TaskClaim>,
+    ) -> Self {
+        Self {
+            stream_id,
+            stem,
+            status,
+            claim,
+        }
+    }
+}
+
 /// Durable source-event payload for a strict board ordering.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -330,6 +348,14 @@ pub struct TaskOrder {
     pub stream_id: StreamId,
     /// Complete strict order of open tasks.
     pub order: Vec<TaskId>,
+}
+
+impl TaskOrder {
+    /// Creates one named complete strict board-order fact payload.
+    #[must_use]
+    pub fn new(stream_id: StreamId, order: Vec<TaskId>) -> Self {
+        Self { stream_id, order }
+    }
 }
 
 /// Durable source-event payload for task dependency links.
@@ -370,6 +396,39 @@ pub struct TaskSubtaskChecked {
     pub subtask_id: String,
     /// Checked state.
     pub checked: bool,
+}
+
+/// Durable source-event payload for checking one exact subtask occurrence.
+///
+/// Unlike the retained identifier-only [`TaskSubtaskChecked`] fact, this fact
+/// carries the complete unchecked preimage and its durable list position. It
+/// therefore remains unambiguous when legacy history contains duplicate
+/// subtask identifiers. The resulting check state is always `true`; callers
+/// cannot use this vocabulary to clear a subtask.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct TaskSubtaskOccurrenceChecked {
+    /// Stream receiving the exact occurrence check fact.
+    pub stream_id: StreamId,
+    /// Task owning the checked subtask occurrence.
+    pub stem: TaskId,
+    /// Zero-based immutable occurrence position.
+    pub index: usize,
+    /// Exact current unchecked occurrence required before applying the check.
+    pub expected: Subtask,
+}
+
+impl TaskSubtaskOccurrenceChecked {
+    /// Creates one named, preconditioned exact subtask-occurrence check.
+    #[must_use]
+    pub fn new(stream_id: StreamId, stem: TaskId, index: usize, expected: Subtask) -> Self {
+        Self {
+            stream_id,
+            stem,
+            index,
+            expected,
+        }
+    }
 }
 
 /// Durable source-event payload for correcting one malformed legacy subtask identity.
@@ -590,6 +649,8 @@ pub enum TaskEvent {
     TaskSubtaskAdded(TaskSubtaskAdded),
     /// A subtask check state changed.
     TaskSubtaskChecked(TaskSubtaskChecked),
+    /// One exact subtask occurrence was checked.
+    TaskSubtaskOccurrenceChecked(TaskSubtaskOccurrenceChecked),
     /// A malformed legacy subtask identity was corrected at one exact occurrence.
     TaskSubtaskIdCorrected(TaskSubtaskIdCorrected),
     /// Editable task details changed.
@@ -636,6 +697,9 @@ impl TaskEvent {
             | Self::TaskLinksChanged(TaskLinksChanged { stream_id, .. })
             | Self::TaskSubtaskAdded(TaskSubtaskAdded { stream_id, .. })
             | Self::TaskSubtaskChecked(TaskSubtaskChecked { stream_id, .. })
+            | Self::TaskSubtaskOccurrenceChecked(TaskSubtaskOccurrenceChecked {
+                stream_id, ..
+            })
             | Self::TaskSubtaskIdCorrected(TaskSubtaskIdCorrected { stream_id, .. })
             | Self::TaskDetailsUpdated(TaskDetailsUpdated { stream_id, .. })
             | Self::HistoricalTaskClaimChanged(HistoricalTaskClaimChanged { stream_id, .. })

@@ -15,7 +15,10 @@ use std::{
 use eventcore_fs::{FileEventStore, FsConfig, FsyncPolicy};
 use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamWrites};
 use tempfile::TempDir;
-use tiber_tasks_service::{AcceptanceCheckPublication, SubtaskIdCorrectionPublication};
+use tiber_tasks_service::{
+    AcceptanceCheckPublication, SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication,
+    TaskCompletionPublication,
+};
 
 use crate::{
     EVENT_STORE_DIRECTORY, EVENTS_DIRECTORY, GitOperation, GitStoreError, ResolvedAuthority,
@@ -289,6 +292,58 @@ impl TiberEventPublisher {
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (event, consistency_streams) = publication.into_event_and_consistency_streams();
         self.append(&consistency_streams, vec![event]).await
+    }
+
+    /// Publishes the only modeled fact accepted by the exact-subtask-check boundary.
+    ///
+    /// The opaque service token can represent only a checked occurrence with
+    /// its complete unchecked preimage and the board plus addressed-task
+    /// streams whose versions fenced its pure decision. It cannot become an
+    /// identifier-based or generic subtask mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed conflict without overwriting authority when a concurrent
+    /// writer advances the fixed branch. Returns [`TiberPublicationError::Ambiguous`]
+    /// if a transport interruption prevents conclusive publication confirmation;
+    /// callers must reload the authority before retrying their idempotent intent.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the closed occurrence-check boundary retains its exact event, optimistic staging, signing, and publication steps"
+    )]
+    #[inline]
+    pub async fn publish_subtask_occurrence_check(
+        &mut self,
+        publication: SubtaskOccurrenceCheckPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, consistency_streams) = publication.into_event_and_consistency_streams();
+        self.append(&consistency_streams, vec![event]).await
+    }
+
+    /// Publishes the only modeled one-or-two-fact task-completion batch.
+    ///
+    /// The opaque service token permits a terminal `Done` transition with its
+    /// strict board-order repair, or the order repair alone for a stale board
+    /// entry left after an already-completed task. It cannot encode another
+    /// lifecycle status or a generic mutable task batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed conflict without overwriting authority when a concurrent
+    /// writer advances the fixed branch. Returns [`TiberPublicationError::Ambiguous`]
+    /// if a transport interruption prevents conclusive publication confirmation;
+    /// callers must reload the authority before retrying their idempotent intent.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the closed completion boundary retains its exact modeled batch, optimistic staging, signing, and publication steps"
+    )]
+    #[inline]
+    pub async fn publish_task_completion(
+        &mut self,
+        publication: TaskCompletionPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (events, consistency_streams) = publication.into_events_and_consistency_streams();
+        self.append(&consistency_streams, events).await
     }
 
     /// Appends an already-closed internal event batch to the disposable stage.

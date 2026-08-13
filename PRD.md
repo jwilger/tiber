@@ -13,14 +13,20 @@ implemented.
 The v1 product and executable are named `tiber`. The existing task board is
 named Tiber Tasks. Running `tiber` without arguments opens the current
 interactive terminal UI. Native task operations live only under `tiber tasks
-…`. The initial shipped task slice includes read-only `list`, `show`, `search`,
-and `next` queries over EventCore history preserved on the signed Tiber
-authority branch, plus one narrow native mutation: `acceptance check`. That
-command folds only a task's canonical acceptance facts, appends one checked
-fact through the exact board/task consistency boundary, signs the candidate,
-and uses an exact-base lease to publish to the fixed authority ref. Other task
-mutations, publication reconciliation, and workflow scheduling remain
-subsequent native slices.
+…`. The shipped task slice includes read-only `list`, `show`, `search`, and
+`next` queries over EventCore history preserved on the signed Tiber authority
+branch, plus three bounded native completion operations: `acceptance check`,
+`subtask check <ref> <one-based-occurrence>`, and `transition <ref> done`.
+Each folds only the facts needed for that decision, publishes a closed modeled
+fact sequence through the exact board/task consistency boundary, signs the
+candidate, and uses an exact-base lease to publish to the fixed authority ref.
+The occurrence check captures the addressed subtask's complete preimage, so a
+legacy duplicate ID cannot select the wrong row. Transition accepts only the
+terminal `done` status; it is not a generic lifecycle setter. There is no
+general public EventCore append, legacy MCP task write, or generic task-mutation
+surface. A retained done task with stale strict-board entries receives only an
+order reconciliation, never a repeated transition. Publication reconciliation
+and workflow scheduling remain subsequent native slices.
 
 The native task surface also has one explicit legacy-data repair, not a general
 write: `subtask repair-duplicate`. It requires a one-based occurrence and a new

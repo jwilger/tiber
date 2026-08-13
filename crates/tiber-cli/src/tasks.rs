@@ -13,8 +13,9 @@ use tiber_store_git::{
 };
 use tiber_tasks_core::{Subtask, Task, TaskEvent, TaskId, TaskStatus};
 use tiber_tasks_service::command::{
-    AcceptanceIndex, CheckAcceptance, RepairDuplicateSubtaskId, SubtaskOccurrence,
-    SubtaskReplacementId, TaskCommandError, decide_check_acceptance,
+    AcceptanceIndex, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask,
+    RepairDuplicateSubtaskId, SubtaskOccurrence, SubtaskReplacementId, TaskCommandError,
+    decide_check_acceptance, decide_check_subtask_occurrence, decide_complete_task,
     decide_repair_duplicate_subtask_id,
 };
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
@@ -55,6 +56,11 @@ pub(super) fn run(
             occurrence,
             replacement_id,
         } => repair_duplicate_subtask(repository, &reference, occurrence, replacement_id),
+        TaskCommand::SubtaskCheck {
+            reference,
+            occurrence,
+        } => check_subtask_occurrence(repository, &reference, occurrence),
+        TaskCommand::TransitionDone { reference } => complete_task(repository, &reference),
         TaskCommand::List(status) => {
             let projection = load_projection(repository)?;
             Ok(list_tasks(&projection, status))
@@ -91,6 +97,18 @@ enum TaskCommand {
         occurrence: SubtaskOccurrence,
         /// The validated replacement identity for that exact occurrence.
         replacement_id: SubtaskReplacementId,
+    },
+    /// Checks one exact current subtask occurrence through the signed native write boundary.
+    SubtaskCheck {
+        /// The parsed task reference resolved after canonical history is read.
+        reference: TaskReference,
+        /// The parsed human-facing one-based immutable subtask occurrence.
+        occurrence: SubtaskOccurrence,
+    },
+    /// Completes one current task through the signed native write boundary.
+    TransitionDone {
+        /// The parsed task reference resolved after canonical history is read.
+        reference: TaskReference,
     },
     /// Lists all current tasks, optionally restricted to one status.
     List(Option<TaskStatus>),
@@ -211,8 +229,57 @@ impl fmt::Display for TaskCliError {
             Self::Command(TaskCommandError::InvalidSubtaskReplacementId) => {
                 "replacement subtask ID must be non-empty and contain no control characters"
             }
+            Self::Command(TaskCommandError::TaskNotInProgress { task, status }) => {
+                return write!(
+                    f,
+                    "task `{}` is currently `{}`, not `in-progress`; reload with `tiber tasks show {}` before retrying",
+                    task.as_str(),
+                    status_name(*status),
+                    task.as_str()
+                );
+            }
+            Self::Command(TaskCommandError::SubtaskOccurrenceMissing { task, occurrence }) => {
+                return write!(
+                    f,
+                    "subtask occurrence {} does not exist for task `{}`; reload with `tiber tasks show {}` before choosing an occurrence",
+                    occurrence.zero_based_value().saturating_add(1),
+                    task.as_str(),
+                    task.as_str()
+                );
+            }
+            Self::Command(TaskCommandError::AcceptanceItemUnchecked { task, index }) => {
+                let displayed_index = index.zero_based_value().saturating_add(1);
+                return write!(
+                    f,
+                    "task `{}` cannot transition to done because acceptance item {} is unchecked; run `tiber tasks acceptance check {} {}` before retrying",
+                    task.as_str(),
+                    displayed_index,
+                    task.as_str(),
+                    displayed_index
+                );
+            }
+            Self::Command(TaskCommandError::SubtaskOccurrenceUnchecked { task, occurrence }) => {
+                let displayed_occurrence = occurrence.zero_based_value().saturating_add(1);
+                return write!(
+                    f,
+                    "task `{}` cannot transition to done because subtask {} is unchecked; run `tiber tasks subtask check {} {}` before retrying",
+                    task.as_str(),
+                    displayed_occurrence,
+                    task.as_str(),
+                    displayed_occurrence
+                );
+            }
             Self::Command(_) => {
                 "the authoritative Tiber task history could not decide that task change"
+            }
+            Self::Publication(TiberPublicationError::AuthorityChanged) => {
+                "the task authority changed before this update could be published; reload with `tiber tasks show <ref>` before retrying"
+            }
+            Self::Publication(TiberPublicationError::Conflict) => {
+                "the task update conflicted with another authority change; reload with `tiber tasks show <ref>` before retrying"
+            }
+            Self::Publication(TiberPublicationError::Ambiguous) => {
+                "the task update may already have been published; reload with `tiber tasks show <ref>` before retrying"
             }
             Self::Publication(_) => "the authoritative Tiber task update could not be published",
             Self::Runtime(_) => "the local task runtime could not be started",
@@ -285,6 +352,13 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
             _ => Err(TaskCliError::InvalidArguments),
         },
         "subtask" => match arguments {
+            [operation, reference, occurrence] if operation == "check" => {
+                Ok(TaskCommand::SubtaskCheck {
+                    reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+                    occurrence: SubtaskOccurrence::parse_one_based(occurrence)
+                        .map_err(TaskCliError::Command)?,
+                })
+            }
             [operation, reference, occurrence, replacement_id]
                 if operation == "repair-duplicate" =>
             {
@@ -321,6 +395,12 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
         }
         "next" if arguments.is_empty() => Ok(TaskCommand::Next),
         "next" => Err(TaskCliError::InvalidArguments),
+        "transition" => match arguments {
+            [reference, status] if status == "done" => Ok(TaskCommand::TransitionDone {
+                reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+            }),
+            _ => Err(TaskCliError::InvalidArguments),
+        },
         _ => Err(TaskCliError::UnknownSubcommand),
     }
 }
@@ -461,6 +541,99 @@ fn repair_duplicate_subtask(
         new_id,
         outcome.revision().as_str()
     ))
+}
+
+/// Decides and publishes one exact subtask-occurrence check through the native signed boundary.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the command sequences canonical read, immutable occurrence selection, narrow pure decision, fixed revision fence, and one bounded append with typed recovery"
+)]
+fn check_subtask_occurrence(
+    repository: &Path,
+    reference: &TaskReference,
+    occurrence: SubtaskOccurrence,
+) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let expected = projection
+        .task(&task)
+        .and_then(|current| current.subtasks.get(occurrence.zero_based_value()))
+        .cloned()
+        .ok_or_else(|| {
+            TaskCliError::Command(TaskCommandError::SubtaskOccurrenceMissing {
+                task: task.clone(),
+                occurrence,
+            })
+        })?;
+    let request = CheckSubtaskOccurrence::new(task.clone(), occurrence, expected);
+    let displayed_occurrence = occurrence.zero_based_value().saturating_add(1);
+    let Some(publication) = decide_check_subtask_occurrence(history.events(), &request)
+        .map_err(TaskCliError::Command)?
+    else {
+        return Ok(format!(
+            "subtask {} already checked for {}\n",
+            displayed_occurrence,
+            task.as_str()
+        ));
+    };
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_subtask_occurrence_check(publication))
+        .map_err(TaskCliError::Publication)?;
+    Ok(format!(
+        "checked subtask {} for {} at {}\n",
+        displayed_occurrence,
+        task.as_str(),
+        outcome.revision().as_str()
+    ))
+}
+
+/// Decides and publishes one terminal task completion through the native signed boundary.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the command sequences canonical read, narrow completion decision, fixed revision fence, and one closed modeled batch with typed recovery"
+)]
+fn complete_task(repository: &Path, reference: &TaskReference) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let request = CompleteTask::new(task.clone());
+    let Some(publication) =
+        decide_complete_task(history.events(), &request).map_err(TaskCliError::Command)?
+    else {
+        return Ok(format!("{} already done\n", task.as_str()));
+    };
+    let transitioned = publication.transitioned_fact().is_some();
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_task_completion(publication))
+        .map_err(TaskCliError::Publication)?;
+    if transitioned {
+        Ok(format!(
+            "transitioned {} to done at {}\n",
+            task.as_str(),
+            outcome.revision().as_str()
+        ))
+    } else {
+        Ok(format!(
+            "reconciled completed task {} board entries at {}\n",
+            task.as_str(),
+            outcome.revision().as_str()
+        ))
+    }
 }
 
 /// Finds the original preimage for an already-published exact correction retry.
@@ -698,5 +871,38 @@ const fn status_name(status: TaskStatus) -> &'static str {
         TaskStatus::InProgress => "in-progress",
         TaskStatus::Done => "done",
         TaskStatus::Abandoned => "abandoned",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskCliError;
+    use tiber_store_git::publication::TiberPublicationError;
+
+    #[test]
+    fn publication_failures_preserve_their_stable_codes_and_safe_recovery() {
+        let cases = [
+            (
+                TiberPublicationError::AuthorityChanged,
+                "tiber_store_publication_authority_changed",
+                "the task authority changed before this update could be published; reload with `tiber tasks show <ref>` before retrying",
+            ),
+            (
+                TiberPublicationError::Conflict,
+                "tiber_store_publication_conflict",
+                "the task update conflicted with another authority change; reload with `tiber tasks show <ref>` before retrying",
+            ),
+            (
+                TiberPublicationError::Ambiguous,
+                "tiber_store_publication_ambiguous",
+                "the task update may already have been published; reload with `tiber tasks show <ref>` before retrying",
+            ),
+        ];
+
+        for (publication, code, message) in cases {
+            let error = TaskCliError::Publication(publication);
+            assert_eq!(error.code(), code);
+            assert_eq!(error.to_string(), message);
+        }
     }
 }

@@ -37,7 +37,6 @@ mod tests {
     #[expect(
         clippy::expect_used,
         clippy::implicit_return,
-        clippy::single_call_fn,
         reason = "the complete preimage fixture fails fast and returns the exact retained subtask directly"
     )]
     fn second_duplicate_preimage() -> Subtask {
@@ -93,6 +92,16 @@ mod tests {
             second_duplicate_preimage(),
             SubtaskReplacementId::parse(replacement_id).expect("fixture replacement ID is valid"),
         )
+    }
+
+    #[expect(
+        clippy::implicit_return,
+        reason = "the checked-preimage fixture changes only the exact current occurrence state required after the durable occurrence-check fact"
+    )]
+    fn checked_second_duplicate_preimage() -> Subtask {
+        let mut checked = second_duplicate_preimage();
+        checked.checked = true;
+        checked
     }
 
     #[test]
@@ -151,6 +160,36 @@ mod tests {
             decide_repair_duplicate_subtask_id(&history, &request)
                 .expect("the exact retained correction remains valid"),
             None
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the ordered regression uses the prior exact occurrence fact and asserts that a subsequent correction carries its current checked preimage"
+    )]
+    fn repairs_a_duplicate_occurrence_after_an_exact_occurrence_check() {
+        let mut history = duplicate_subtask_history();
+        history.push(event(json!({
+            "event": "task_subtask_occurrence_checked", "stream_id": "tiber:board",
+            "stem": TASK_ID, "index": THIRD_OCCURRENCE,
+            "expected": {
+                "after": ["s4"], "checked": false, "id": "s4", "title": "disable retained legacy eval paths"
+            }
+        })));
+        let request = RepairDuplicateSubtaskId::new(
+            TaskId::parse(TASK_ID).expect("fixture task ID is valid"),
+            SubtaskOccurrence::zero_based(THIRD_OCCURRENCE),
+            checked_second_duplicate_preimage(),
+            SubtaskReplacementId::parse("s5").expect("fixture replacement ID is valid"),
+        );
+        let decided = decide_repair_duplicate_subtask_id(&history, &request)
+            .expect("the preceding exact occurrence check remains replayable by repair")
+            .expect("the checked duplicate occurrence still needs its unique identity correction");
+
+        assert_eq!(
+            decided.corrected_fact().expected,
+            checked_second_duplicate_preimage()
         );
     }
 

@@ -95,10 +95,85 @@ mod tests {
         #[expect(
             clippy::expect_used,
             clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the active completion fixture needs one unchecked acceptance item to exercise the public recovery diagnostic"
+        )]
+        async fn signed_active_acceptance_history() -> Self {
+            let fixture = Self::signed_active_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(task_acceptance_added(
+                    &board_stream,
+                    TASK_ID,
+                    "first native acceptance",
+                ))
+                .expect("fixture acceptance fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture acceptance fact should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::implicit_return,
             reason = "the duplicate-identity fixture deliberately fails fast while constructing the signed authority state exercised by the public repair command"
         )]
         async fn signed_duplicate_subtask_history() -> Self {
-            let fixture = Self::signed_paged_history().await;
+            Self::signed_duplicate_subtask_history_with_status("backlog").await
+        }
+
+        #[expect(
+            clippy::implicit_return,
+            reason = "the active duplicate scenario names its distinct lifecycle state at its public completion-boundary use"
+        )]
+        async fn signed_active_duplicate_subtask_history() -> Self {
+            Self::signed_duplicate_subtask_history_with_status("in-progress").await
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            reason = "the completion-ready fixture deliberately fails fast while retaining historical unique-ID checks before the public occurrence-safe completion boundary"
+        )]
+        async fn signed_active_completion_ready_duplicate_subtask_history() -> Self {
+            let fixture = Self::signed_active_duplicate_subtask_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(6))
+                .expect("fixture board stream should register after five subtasks")
+                .append(task_subtask_checked(&board_stream, TASK_ID, "s1"))
+                .expect("first unique historical check should append")
+                .append(task_subtask_checked(&board_stream, TASK_ID, "s2"))
+                .expect("second unique historical check should append")
+                .append(task_subtask_checked(&board_stream, TASK_ID, "s3"))
+                .expect("third unique historical check should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture historical checks should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            reason = "the parameterized duplicate-identity fixture deliberately fails fast while constructing the signed authority state exercised by distinct public task commands"
+        )]
+        async fn signed_duplicate_subtask_history_with_status(status: &str) -> Self {
+            let fixture = Self::signed_paged_history_with_status(status).await;
             let board_stream = StreamId::try_new("tiber:board".to_owned())
                 .expect("fixture board stream should be valid");
             let writes = StreamWrites::new()
@@ -240,8 +315,7 @@ mod tests {
 
         #[expect(
             clippy::implicit_return,
-            clippy::single_call_fn,
-            reason = "the active-task scenario names its distinct fixture state at its only public-boundary use"
+            reason = "the shared active-task scenario keeps its distinct lifecycle state explicit for public completion-boundary fixtures"
         )]
         async fn signed_active_paged_history() -> Self {
             Self::signed_paged_history_with_status("in-progress").await
@@ -312,6 +386,37 @@ mod tests {
                 _directory: directory,
                 repository,
             }
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the stale-order fixture deliberately extends a signed multi-task board so the public completion adapter can prove its order-only reconciliation behavior; its one named caller keeps that scenario isolated"
+        )]
+        async fn signed_done_task_with_duplicate_stale_board_entries() -> Self {
+            let fixture = Self::signed_ordered_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream, StreamVersion::new(2))
+                .expect("fixture board stream should register after its retained order and detail facts")
+                .append(board_reordered(&[
+                    FIRST_PRIORITY_TASK_ID,
+                    CLOSED_TASK_ID,
+                    CLOSED_TASK_ID,
+                    SECOND_PRIORITY_TASK_ID,
+                ]))
+                .expect("fixture stale board order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture stale board order should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
         }
 
         #[expect(
@@ -548,6 +653,317 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tasks_subtask_check_addresses_the_duplicate_id_by_occurrence_before_repair() {
+        let fixture = TaskFixture::signed_active_duplicate_subtask_history().await;
+
+        let before = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&before);
+        let before_text = String::from_utf8_lossy(&before.stdout);
+        assert!(
+            before_text
+                .contains("4. [ ] s4 Protect native review orchestration \u{2014} after: s3")
+        );
+        assert!(before_text.contains("5. [ ] s4 Disable legacy eval execution \u{2014} after: s4"));
+
+        let checked = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "5"]);
+        assert_success(&checked);
+        assert!(
+            String::from_utf8_lossy(&checked.stdout)
+                .starts_with(&format!("checked subtask 5 for {TASK_ID} at "))
+        );
+        let after_first_check = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let repeated = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "5"]);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("subtask 5 already checked for {TASK_ID}\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_first_check,
+            "an idempotent duplicate-occurrence retry must not publish another board update"
+        );
+
+        let shown = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&shown);
+        let shown_text = String::from_utf8_lossy(&shown.stdout);
+        assert!(
+            shown_text.contains("4. [ ] s4 Protect native review orchestration \u{2014} after: s3")
+        );
+        assert!(shown_text.contains("5. [x] s4 Disable legacy eval execution \u{2014} after: s4"));
+    }
+
+    #[tokio::test]
+    async fn tasks_subtask_check_addresses_the_repaired_occurrence_and_is_idempotent() {
+        let fixture = TaskFixture::signed_active_duplicate_subtask_history().await;
+
+        let repaired = fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "5", "s5"]);
+        assert_success(&repaired);
+
+        let checked = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "5"]);
+        assert_success(&checked);
+        assert!(
+            String::from_utf8_lossy(&checked.stdout)
+                .starts_with(&format!("checked subtask 5 for {TASK_ID} at "))
+        );
+        let after_first_check = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let repeated = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "5"]);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("subtask 5 already checked for {TASK_ID}\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_first_check,
+            "an idempotent occurrence-check retry must not publish another board update"
+        );
+
+        let shown = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&shown);
+        let shown_text = String::from_utf8_lossy(&shown.stdout);
+        assert!(
+            shown_text.contains("4. [ ] s4 Protect native review orchestration \u{2014} after: s3")
+        );
+        assert!(shown_text.contains("5. [x] s5 Disable legacy eval execution \u{2014} after: s4"));
+    }
+
+    #[tokio::test]
+    async fn tasks_subtask_check_rejects_a_missing_occurrence_without_publishing() {
+        let fixture = TaskFixture::signed_active_duplicate_subtask_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "6"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_subtask_occurrence_missing: subtask occurrence 6 does not exist for task `{TASK_ID}`; reload with `tiber tasks show {TASK_ID}` before choosing an occurrence\n"
+            ),
+            "a valid but absent occurrence must name its one-based position and the safe recovery command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a rejected occurrence check must not publish a board update"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_subtask_check_rejects_a_non_active_task_with_a_safe_status_diagnostic() {
+        let fixture = TaskFixture::signed_duplicate_subtask_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "1"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_task_not_in_progress: task `{TASK_ID}` is currently `backlog`, not `in-progress`; reload with `tiber tasks show {TASK_ID}` before retrying\n"
+            ),
+            "a lifecycle rejection must name the durable status and a safe task-specific recovery command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a rejected occurrence check must not publish a board update"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_done_transition_rejects_a_non_active_task_with_a_safe_status_diagnostic() {
+        let fixture = TaskFixture::signed_duplicate_subtask_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", TASK_ID, "done"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_task_not_in_progress: task `{TASK_ID}` is currently `backlog`, not `in-progress`; reload with `tiber tasks show {TASK_ID}` before retrying\n"
+            ),
+            "a lifecycle rejection must name the durable status and a safe task-specific recovery command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a rejected terminal transition must not publish a board update"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_done_transition_completes_the_ready_active_task_and_is_idempotent() {
+        let fixture = TaskFixture::signed_active_completion_ready_duplicate_subtask_history().await;
+
+        let repaired = fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "5", "s5"]);
+        assert_success(&repaired);
+        for occurrence in ["4", "5"] {
+            let checked = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, occurrence]);
+            assert_success(&checked);
+        }
+
+        let completed = fixture.tiber(&["tasks", "transition", TASK_ID, "done"]);
+        assert_success(&completed);
+        assert!(
+            String::from_utf8_lossy(&completed.stdout)
+                .starts_with(&format!("transitioned {TASK_ID} to done at "))
+        );
+        let after_completion = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let repeated = fixture.tiber(&["tasks", "transition", TASK_ID, "done"]);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("{TASK_ID} already done\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_completion,
+            "an idempotent completion retry must not publish another board update"
+        );
+
+        let shown = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&shown);
+        assert!(String::from_utf8_lossy(&shown.stdout).contains("status: done\n"));
+
+        let listed = fixture.tiber(&["tasks", "list"]);
+        assert_success(&listed);
+        assert!(
+            listed.stdout.is_empty(),
+            "completed work must leave the open board"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_subtask_check_remains_idempotent_after_task_completion() {
+        let fixture = TaskFixture::signed_active_completion_ready_duplicate_subtask_history().await;
+
+        let repaired = fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "5", "s5"]);
+        assert_success(&repaired);
+        let prerequisite = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "4"]);
+        assert_success(&prerequisite);
+        let checked = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "5"]);
+        assert_success(&checked);
+
+        let completed = fixture.tiber(&["tasks", "transition", TASK_ID, "done"]);
+        assert_success(&completed);
+        let after_completion = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let repeated = fixture.tiber(&["tasks", "subtask", "check", TASK_ID, "5"]);
+
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("subtask 5 already checked for {TASK_ID}\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_completion,
+            "an idempotent terminal occurrence-check retry must not publish another board update"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_done_transition_rejects_unchecked_requirements_without_publishing() {
+        let fixture = TaskFixture::signed_active_duplicate_subtask_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", TASK_ID, "done"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_subtask_occurrence_unchecked: task `{TASK_ID}` cannot transition to done because subtask 1 is unchecked; run `tiber tasks subtask check {TASK_ID} 1` before retrying\n"
+            ),
+            "terminal completion must name the first unchecked one-based subtask and its safe check command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a rejected terminal completion must not publish a board update"
+        );
+        let shown = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&shown);
+        assert!(String::from_utf8_lossy(&shown.stdout).contains("status: in-progress\n"));
+    }
+
+    #[tokio::test]
+    async fn tasks_done_transition_names_an_unchecked_acceptance_item_without_publishing() {
+        let fixture = TaskFixture::signed_active_acceptance_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", TASK_ID, "done"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_acceptance_item_unchecked: task `{TASK_ID}` cannot transition to done because acceptance item 1 is unchecked; run `tiber tasks acceptance check {TASK_ID} 1` before retrying\n"
+            ),
+            "terminal completion must name the first unchecked one-based acceptance item and its safe check command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a rejected terminal completion must not publish a board update"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_done_transition_repairs_all_stale_board_entries_without_retransitioning() {
+        let fixture = TaskFixture::signed_done_task_with_duplicate_stale_board_entries().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let reconciled = fixture.tiber(&["tasks", "transition", CLOSED_TASK_ID, "done"]);
+
+        assert_success(&reconciled);
+        assert!(
+            String::from_utf8_lossy(&reconciled.stdout).starts_with(&format!(
+                "reconciled completed task {CLOSED_TASK_ID} board entries at "
+            )),
+            "a done task with stale order entries must not be reported as a new transition"
+        );
+        let after_reconciliation = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        assert_ne!(
+            after_reconciliation, before,
+            "the order-only repair must publish one exact new authority revision"
+        );
+
+        let listed = fixture.tiber(&["tasks", "list"]);
+        assert_success(&listed);
+        assert_eq!(
+            String::from_utf8_lossy(&listed.stdout),
+            format!(
+                "{FIRST_PRIORITY_TASK_ID}\tbacklog\tFirst priority task revised by board\n{SECOND_PRIORITY_TASK_ID}\tbacklog\tSecond priority task\n"
+            ),
+            "all target entries must be removed while non-target board order is retained"
+        );
+
+        let repeated = fixture.tiber(&["tasks", "transition", CLOSED_TASK_ID, "done"]);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("{CLOSED_TASK_ID} already done\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_reconciliation,
+            "a reconciled completion retry must not publish another board update"
+        );
+    }
+
+    #[tokio::test]
     async fn tasks_subtask_repair_canonicalizes_a_whitespace_padded_replacement_for_retry() {
         let fixture = TaskFixture::signed_duplicate_subtask_history().await;
 
@@ -599,7 +1015,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stdout).is_empty());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.starts_with(
-            "tasks_command_subtask_occurrence_missing: the authoritative Tiber task history could not decide that task change"
+            "tasks_command_subtask_occurrence_missing: subtask occurrence 1 does not exist for task `20260812-a111-paged-task-history`; reload with `tiber tasks show 20260812-a111-paged-task-history` before choosing an occurrence"
         ));
         assert!(
             !stderr.contains("acceptance change"),
@@ -880,9 +1296,93 @@ mod tests {
     #[test]
     #[expect(
         clippy::expect_used,
+        reason = "the sentinel fixture must fail fast while proving malformed bounded-completion input cannot trigger a Git authority read"
+    )]
+    fn invalid_bounded_completion_commands_fail_before_any_git_command() {
+        let directory = TempDir::new().expect("fixture directory should be created");
+        let command_directory = directory.path().join("commands");
+        fs::create_dir_all(&command_directory)
+            .expect("sentinel command directory should be created");
+        let git_sentinel = command_directory.join("git");
+        fs::write(
+            &git_sentinel,
+            "#!/bin/sh\n: > \"$TIBER_GIT_SENTINEL\"\nexit 99\n",
+        )
+        .expect("sentinel Git command should be written");
+        let mut permissions = fs::metadata(&git_sentinel)
+            .expect("sentinel Git command metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&git_sentinel, permissions)
+            .expect("sentinel Git command should be executable");
+        let usage_exit_code: i32 = 2;
+
+        let invalid_occurrence = directory.path().join("git-was-run-invalid-occurrence");
+        let occurrence_output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(["tasks", "subtask", "check", TASK_ID, "0"])
+            .current_dir(directory.path())
+            .env("PATH", &command_directory)
+            .env("TIBER_GIT_SENTINEL", &invalid_occurrence)
+            .output()
+            .expect("Tiber CLI should execute");
+        assert_eq!(occurrence_output.status.code(), Some(usage_exit_code));
+        assert!(
+            String::from_utf8_lossy(&occurrence_output.stderr)
+                .starts_with("tasks_invalid_subtask_occurrence:"),
+            "the malformed occurrence must report its semantic usage error"
+        );
+        assert!(
+            !invalid_occurrence.exists(),
+            "a malformed occurrence must not invoke Git"
+        );
+
+        let invalid_status = directory.path().join("git-was-run-invalid-transition");
+        let transition_output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(["tasks", "transition", TASK_ID, "backlog"])
+            .current_dir(directory.path())
+            .env("PATH", &command_directory)
+            .env("TIBER_GIT_SENTINEL", &invalid_status)
+            .output()
+            .expect("Tiber CLI should execute");
+        assert_eq!(transition_output.status.code(), Some(usage_exit_code));
+        assert!(
+            String::from_utf8_lossy(&transition_output.stderr)
+                .starts_with("tiber_tasks_invalid_arguments:"),
+            "only the literal done transition is accepted"
+        );
+        assert!(
+            !invalid_status.exists(),
+            "a non-done transition must not invoke Git"
+        );
+
+        let invalid_reference = directory
+            .path()
+            .join("git-was-run-invalid-transition-reference");
+        let reference_output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(["tasks", "transition", "../not-a-task", "done"])
+            .current_dir(directory.path())
+            .env("PATH", &command_directory)
+            .env("TIBER_GIT_SENTINEL", &invalid_reference)
+            .output()
+            .expect("Tiber CLI should execute");
+        assert_eq!(reference_output.status.code(), Some(usage_exit_code));
+        assert!(
+            String::from_utf8_lossy(&reference_output.stderr)
+                .starts_with("tasks_invalid_task_reference:"),
+            "a malformed transition reference must report its semantic usage error"
+        );
+        assert!(
+            !invalid_reference.exists(),
+            "a malformed transition reference must not invoke Git"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
         reason = "the command shell must start successfully before its public usage output can be asserted"
     )]
-    fn task_help_advertises_the_duplicate_repair_grammar() {
+    fn task_help_advertises_only_the_bounded_completion_grammar() {
         let directory = TempDir::new().expect("fixture directory should be created");
         let usage_exit_code: i32 = 2;
         let nested = Command::new(env!("CARGO_BIN_EXE_tiber"))
@@ -895,6 +1395,11 @@ mod tests {
             String::from_utf8_lossy(&nested.stderr)
                 .contains("subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id>")
         );
+        assert!(
+            String::from_utf8_lossy(&nested.stderr)
+                .contains("subtask check <ref> <one-based-occurrence>")
+        );
+        assert!(String::from_utf8_lossy(&nested.stderr).contains("transition <ref> done"));
 
         let top_level = Command::new(env!("CARGO_BIN_EXE_tiber"))
             .arg("unsupported")
@@ -906,6 +1411,11 @@ mod tests {
             String::from_utf8_lossy(&top_level.stderr)
                 .contains("subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id>")
         );
+        assert!(
+            String::from_utf8_lossy(&top_level.stderr)
+                .contains("subtask check <ref> <one-based-occurrence>")
+        );
+        assert!(String::from_utf8_lossy(&top_level.stderr).contains("transition <ref> done"));
     }
 
     #[expect(
@@ -965,6 +1475,20 @@ mod tests {
             "stream_id": stream_id.as_ref(),
             "stem": task_id,
             "subtask": {"after": after, "checked": false, "id": id, "title": title}
+        }))
+    }
+
+    #[expect(
+        clippy::implicit_return,
+        reason = "the completion-ready fixture returns its retained unique-ID check fact directly"
+    )]
+    fn task_subtask_checked(stream_id: &StreamId, task_id: &str, subtask_id: &str) -> TaskEvent {
+        event(json!({
+            "event": "task_subtask_checked",
+            "stream_id": stream_id.as_ref(),
+            "stem": task_id,
+            "subtask_id": subtask_id,
+            "checked": true
         }))
     }
 

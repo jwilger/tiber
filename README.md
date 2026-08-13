@@ -14,15 +14,22 @@ are read-only queries over `EventCore` task history preserved on the signed
 currently advertised `tiber` commit and fetch that exact object without moving
 any caller Git ref.
 
-`tiber tasks acceptance check <task-ref> <one-based-index>` is the first narrow
-native mutation. It folds only the addressed task's canonical acceptance facts,
-then appends one `task_acceptance_checked` fact with the board and task-stream
+Tiber exposes only bounded native task-completion mutations:
+`acceptance check`, `subtask check`, and `transition <task-ref> done`. Each
+starts with canonical history, makes one command-specific pure decision, and
+publishes only its opaque modeled fact sequence with the board and task-stream
 versions as its consistency boundary. Tiber creates a signed candidate and uses
 an exact-base `--force-with-lease` update of the fixed authority branch (or a
 local ref CAS when no `origin` exists), so it cannot overwrite a changed remote
-head. A post-push ambiguity is reported rather than retried automatically. Other
-task mutations, publication reconciliation, and workflow scheduling remain later
-native slices.
+head. A post-push ambiguity is reported rather than retried automatically.
+`subtask check` addresses a stable one-based occurrence and carries that row's
+exact preimage, so retained duplicate IDs cannot redirect a check. `transition`
+accepts only `done`; it is a terminal completion operation, not an arbitrary
+status setter. If history already says `done` but strict board order retains
+that task, the same bounded command publishes only the order reconciliation; it
+does not re-emit a lifecycle transition. There is no general public EventCore
+append, legacy MCP task write, or generic task-mutation surface. Publication
+reconciliation and workflow scheduling remain later native slices.
 
 `tiber tasks show <task-ref>` renders subtasks by stable one-based occurrence,
 identity, status, title, and prerequisites. The narrowly scoped
@@ -68,7 +75,9 @@ cargo run --locked -p tiber -- tasks show <task-ref>
 cargo run --locked -p tiber -- tasks search "outcome terms"
 cargo run --locked -p tiber -- tasks next
 cargo run --locked -p tiber -- tasks acceptance check <task-ref> <one-based-index>
+cargo run --locked -p tiber -- tasks subtask check <task-ref> <one-based-occurrence>
 cargo run --locked -p tiber -- tasks subtask repair-duplicate <task-ref> <one-based-occurrence> <replacement-id>
+cargo run --locked -p tiber -- tasks transition <task-ref> done
 ```
 
 Read [`AGENTS.md`](AGENTS.md) before making a change.
