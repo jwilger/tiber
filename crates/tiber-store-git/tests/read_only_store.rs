@@ -28,8 +28,10 @@ mod tests {
     };
     use tiber_tasks_core::{TaskEvent, TaskId};
     use tiber_tasks_service::{
-        AcceptanceCheckPublication, TaskHistory,
-        command::{AcceptanceIndex, CheckAcceptance, decide_check_acceptance},
+        AcceptanceCheckPublication, TaskActivationPublication, TaskHistory,
+        command::{
+            AcceptanceIndex, CheckAcceptance, StartTask, decide_check_acceptance, decide_start_task,
+        },
     };
 
     const COUNTED_EVENT_COUNT: usize = 3;
@@ -429,6 +431,47 @@ mod tests {
         clippy::expect_used,
         clippy::implicit_return,
         clippy::single_call_fn,
+        reason = "the public-boundary fixture fails fast while constructing one canonical strict-next task activation decision"
+    )]
+    fn task_activation_publication() -> TaskActivationPublication {
+        let task = TaskId::parse(PUBLISHED_TASK_ID).expect("fixture task ID should be valid");
+        let history = TaskHistory::from_ordered_events(vec![
+            task_event(json!({
+                "event": "task_created",
+                "stream_id": format!("tiber:task:{PUBLISHED_TASK_ID}"),
+                "task": {
+                    "acceptance": [],
+                    "blocked_by": [],
+                    "blocks": [],
+                    "claim": null,
+                    "committed_at": "2026-08-13T00:00:00Z",
+                    "context": "",
+                    "notes": [],
+                    "pr_mr_status": null,
+                    "pr_mr_url": null,
+                    "status": "backlog",
+                    "stem": PUBLISHED_TASK_ID,
+                    "subtasks": [],
+                    "summary": "",
+                    "tags": [],
+                    "title": "Activation fixture task"
+                }
+            })),
+            task_event(json!({
+                "event": "board_reordered",
+                "stream_id": "tiber:board",
+                "order": [PUBLISHED_TASK_ID]
+            })),
+        ]);
+        let request = StartTask::new(task);
+        decide_start_task(history.events(), &request)
+            .expect("eligible fixture task should decide")
+            .expect("eligible backlog fixture task should require activation publication")
+    }
+
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
         reason = "the public-boundary fixture fails fast if its one local durable task event no longer matches the retained wire vocabulary"
     )]
     fn task_event(value: Value) -> TaskEvent {
@@ -532,6 +575,61 @@ mod tests {
                 (format!("tiber:task:{PUBLISHED_TASK_ID}"), 1),
             ],
             "the closed public boundary must retain both exact command-fence streams",
+        );
+    }
+
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
+        reason = "the signed local publication fixture uses direct replay assertions to prove one opaque activation fact and its exact two-stream fence"
+    )]
+    #[tokio::test]
+    async fn publishes_only_the_modeled_task_activation_with_its_exact_fence() {
+        let fixture = GitFixture::signed_history().await;
+        let reader = TiberEventStore::open(&fixture.repository)
+            .expect("the initial signed authority should open");
+        let base_revision = reader.revision().clone();
+        drop(reader);
+
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, &base_revision)
+            .expect("the unchanged local authority should open a publication stage");
+        let outcome = publisher
+            .publish_task_activation(task_activation_publication())
+            .await
+            .expect("the signed local candidate should publish the closed activation with compare-and-swap");
+        drop(publisher);
+
+        assert_ne!(outcome.revision(), &base_revision);
+        let replay = TiberEventStore::open(&fixture.repository)
+            .expect("the newly signed local authority should reopen");
+        assert_eq!(replay.revision(), outcome.revision());
+        let events = replay
+            .verified_reader::<TaskEvent>(EventFilter::all())
+            .expect("published activation event should verify")
+            .read_page(EventPage::first(BatchSize::new(64)))
+            .await
+            .expect("published activation event should read")
+            .into_iter()
+            .map(|(event, _position)| event)
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            serde_json::to_value(events.first()).expect("published task event should serialize"),
+            json!({
+                "event": "task_transitioned",
+                "stream_id": "tiber:board",
+                "stem": PUBLISHED_TASK_ID,
+                "status": "in-progress",
+                "claim": null
+            })
+        );
+        assert_eq!(
+            candidate_stream_bases(&fixture.repository, outcome.revision()),
+            vec![
+                ("tiber:board".to_owned(), 0),
+                (format!("tiber:task:{PUBLISHED_TASK_ID}"), 1),
+            ],
+            "the closed public boundary must retain only the exact activation command-fence streams",
         );
     }
 
@@ -2244,8 +2342,7 @@ mod tests {
         clippy::expect_used,
         clippy::implicit_return,
         clippy::question_mark_used,
-        clippy::single_call_fn,
-        reason = "the single public-boundary fixture helper fails fast while reading the signed candidate transaction header it just published"
+        reason = "the public-boundary fixture helper fails fast while reading signed candidate transaction headers it just published"
     )]
     fn candidate_stream_bases(repository: &Path, revision: &TiberRevision) -> Vec<(String, u64)> {
         let paths = git_output(

@@ -36,7 +36,7 @@ const TUI_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Maximum observations applied before terminal input is polled again.
 const MAX_OBSERVATIONS_PER_FRAME: usize = 16;
 /// Complete grammar accepted after the `tiber tasks` command prefix.
-const TASKS_COMMAND_GRAMMAR: &str = "list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
+const TASKS_COMMAND_GRAMMAR: &str = "list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
 #[expect(
     clippy::print_stderr,
     reason = "a command-line adapter intentionally writes its result and diagnostics"

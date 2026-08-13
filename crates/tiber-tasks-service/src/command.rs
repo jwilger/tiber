@@ -4,7 +4,7 @@
 //! adapter. They deliberately do not reuse [`crate::TaskBoardProjection`],
 //! whose broad state is query-only rather than write authority.
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::{error::Error, fmt};
 
 use eventcore::{
@@ -22,7 +22,7 @@ use tiber_tasks_core::{
 
 use crate::{
     AcceptanceCheckPublication, SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication,
-    TaskCompletionPublication,
+    TaskActivationPublication, TaskCompletionPublication,
 };
 
 /// The native board stream receiving task-mutation facts.
@@ -406,6 +406,37 @@ pub struct CompleteTask {
     task: TaskId,
 }
 
+/// The request to activate one strict-next eligible backlog task.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartTask {
+    /// The exact task whose backlog lifecycle is addressed.
+    task: TaskId,
+}
+
+impl StartTask {
+    /// Creates a semantic task-activation request.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the immutable activation request is clearest as its final semantic construction"
+    )]
+    pub fn new(task: TaskId) -> Self {
+        Self { task }
+    }
+
+    /// Returns the exact task identity addressed by this request.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the borrowed task identity is clearest as its final accessor expression"
+    )]
+    pub const fn task(&self) -> &TaskId {
+        &self.task
+    }
+}
+
 impl CompleteTask {
     /// Creates a semantic task-completion request.
     #[must_use]
@@ -678,6 +709,44 @@ pub enum TaskCommandError {
         /// Current durable lifecycle state.
         status: TaskStatus,
     },
+    /// An activation request addressed a task that is not currently queued.
+    TaskActivationNotBacklog {
+        /// The task whose current lifecycle blocks activation.
+        task: TaskId,
+        /// Current durable lifecycle state.
+        status: TaskStatus,
+    },
+    /// An activation request found one different active task already in progress.
+    TaskActivationActiveTask {
+        /// The sole task that must be continued before another task can start.
+        active_task: TaskId,
+    },
+    /// Retained history currently contains more than one active task.
+    MultipleActiveTasks {
+        /// Active task identities in stable identity order.
+        active_tasks: Vec<TaskId>,
+    },
+    /// A requested backlog task has a missing or nonterminal blocker.
+    TaskActivationBlocked {
+        /// The queued task that cannot start yet.
+        task: TaskId,
+        /// The first stable unresolved blocker identity.
+        blocker: TaskId,
+    },
+    /// A requested backlog task is not the strict first eligible board task.
+    TaskActivationNotNextEligible {
+        /// The requested task that cannot bypass board priority.
+        task: TaskId,
+        /// The first current eligible backlog task in strict board order.
+        next: TaskId,
+    },
+    /// The addressed task is absent or duplicated in the current strict board order.
+    TaskActivationOrderDrift {
+        /// The task whose exact board membership is malformed.
+        task: TaskId,
+    },
+    /// A fact needed to decide activation has no valid current task/board interpretation.
+    TaskActivationMalformedHistory,
     /// The requested task has no creation fact in the supplied canonical history.
     TaskMissing {
         /// The absent task identity.
@@ -796,6 +865,8 @@ pub enum TaskCommandError {
     ModeledSubtaskCorrectionDecisionFailed,
     /// The checked `EventCore` command could not produce its one occurrence-check fact.
     ModeledSubtaskOccurrenceDecisionFailed,
+    /// The checked `EventCore` command could not produce its one activation fact.
+    ModeledTaskActivationDecisionFailed,
     /// The checked `EventCore` command did not produce exactly one internal acceptance fact.
     InvalidModeledAcceptancePublication,
     /// The checked `EventCore` command did not produce exactly one correction fact.
@@ -804,6 +875,8 @@ pub enum TaskCommandError {
     InvalidModeledSubtaskOccurrencePublication,
     /// The closed completion decision did not produce a valid terminal/order batch.
     InvalidModeledTaskCompletionPublication,
+    /// The checked `EventCore` command did not produce one valid activation fact.
+    InvalidModeledTaskActivationPublication,
 }
 
 impl TaskCommandError {
@@ -821,6 +894,17 @@ impl TaskCommandError {
             Self::InvalidSubtaskOccurrence => "tasks_invalid_subtask_occurrence",
             Self::InvalidSubtaskReplacementId => "tasks_invalid_subtask_replacement_id",
             Self::TaskNotInProgress { .. } => "tasks_command_task_not_in_progress",
+            Self::TaskActivationNotBacklog { .. } => "tasks_command_task_activation_not_backlog",
+            Self::TaskActivationActiveTask { .. } => "tasks_command_task_activation_active_task",
+            Self::MultipleActiveTasks { .. } => "tasks_command_multiple_active_tasks",
+            Self::TaskActivationBlocked { .. } => "tasks_command_task_activation_blocked",
+            Self::TaskActivationNotNextEligible { .. } => {
+                "tasks_command_task_activation_not_next_eligible"
+            }
+            Self::TaskActivationOrderDrift { .. } => "tasks_command_task_activation_order_drift",
+            Self::TaskActivationMalformedHistory => {
+                "tasks_command_task_activation_malformed_history"
+            }
             Self::TaskMissing { .. } => "tasks_command_task_missing",
             Self::DuplicateTaskCreation { .. } => "tasks_command_duplicate_task_creation",
             Self::TargetTaskFactUnexpectedStream { .. } => {
@@ -864,6 +948,9 @@ impl TaskCommandError {
             Self::ModeledSubtaskOccurrenceDecisionFailed => {
                 "tasks_command_modeled_subtask_occurrence_decision_failed"
             }
+            Self::ModeledTaskActivationDecisionFailed => {
+                "tasks_command_modeled_task_activation_decision_failed"
+            }
             Self::InvalidModeledAcceptancePublication => {
                 "tasks_command_invalid_modeled_acceptance_publication"
             }
@@ -875,6 +962,9 @@ impl TaskCommandError {
             }
             Self::InvalidModeledTaskCompletionPublication => {
                 "tasks_command_invalid_modeled_task_completion_publication"
+            }
+            Self::InvalidModeledTaskActivationPublication => {
+                "tasks_command_invalid_modeled_task_activation_publication"
             }
         }
     }
@@ -2640,6 +2730,328 @@ impl TaskCompletionState {
     }
 }
 
+/// Current lifecycle and dependency data needed only for one activation decision.
+#[derive(Clone, Debug)]
+struct ActivationTask {
+    /// Current prerequisite task identities.
+    blockers: Vec<TaskId>,
+    /// Current durable lifecycle state.
+    status: TaskStatus,
+}
+
+/// Command-specific state for activating one strict-next backlog task.
+///
+/// This is intentionally narrower than the query projection: it folds only
+/// current lifecycle, blocker, and strict-order facts needed to select a
+/// single active task without normalizing unrelated historical board state.
+#[derive(Debug, Default)]
+struct TaskActivationState {
+    /// Latest strict board ordering, retaining unrelated stale entries.
+    board_order: Vec<TaskId>,
+    /// Current task lifecycle and blocker data by durable identity.
+    tasks: BTreeMap<TaskId, ActivationTask>,
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the activation fold follows canonical history, bounded current-state updates, then one strict-next decision"
+)]
+impl TaskActivationState {
+    /// Folds only activation-relevant facts from canonical task history.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the command-local fold retains only lifecycle, blockers, and board order required for activation"
+    )]
+    fn fold(events: &[TaskEvent]) -> Result<Self, TaskCommandError> {
+        let mut state = Self::default();
+        for event in events {
+            state.apply(event)?;
+        }
+        Ok(state)
+    }
+
+    /// Applies one retained fact that can change activation authority.
+    #[expect(
+        clippy::implicit_return,
+        clippy::pattern_type_mismatch,
+        clippy::question_mark_used,
+        reason = "the bounded dispatcher keeps every lifecycle, dependency, and board-order fact affecting strict activation visible at its authority boundary"
+    )]
+    fn apply(&mut self, event: &TaskEvent) -> Result<(), TaskCommandError> {
+        match event {
+            TaskEvent::TaskCreated(created) => self.apply_created(created)?,
+            TaskEvent::TaskTransitioned(transitioned) => self.apply_transition(transitioned)?,
+            TaskEvent::TaskLinksChanged(changed) => self.apply_links_changed(changed)?,
+            TaskEvent::TaskPriorityChanged(order) | TaskEvent::BoardReordered(order) => {
+                self.apply_board_order(order)?;
+            }
+            TaskEvent::TaskValidationRepaired(repaired) => {
+                Self::require_board_stream(&repaired.stream_id)?;
+                for changed in &repaired.link_changes {
+                    self.apply_links_changed(changed)?;
+                }
+                if let Some(order) = &repaired.order_change {
+                    if order.stream_id != repaired.stream_id {
+                        return Err(TaskCommandError::TaskActivationMalformedHistory);
+                    }
+                    self.apply_board_order(order)?;
+                }
+            }
+            TaskEvent::TasksClosedFromCommitTrailers(closed) => {
+                Self::require_board_stream(&closed.stream_id)?;
+                for task in &closed.stems {
+                    self.task_mut(task)?.status = TaskStatus::Done;
+                }
+                self.board_order.clone_from(&closed.order);
+            }
+            TaskEvent::HistoricalTaskClosedFromTrailer(closed) => {
+                Self::require_task_stream(&closed.stream_id, &closed.stem)?;
+                self.task_mut(&closed.stem)?.status = TaskStatus::Done;
+            }
+            TaskEvent::HistoricalTaskRemoved(removed) => {
+                Self::require_task_stream(&removed.stream_id, &removed.stem)?;
+                self.remove_task(&removed.stem)?;
+            }
+            TaskEvent::RepositoryInitialized(_)
+            | TaskEvent::TaskSubtaskAdded(_)
+            | TaskEvent::TaskSubtaskChecked(_)
+            | TaskEvent::TaskSubtaskOccurrenceChecked(_)
+            | TaskEvent::TaskSubtaskIdCorrected(_)
+            | TaskEvent::TaskDetailsUpdated(_)
+            | TaskEvent::HistoricalTaskClaimChanged(_)
+            | TaskEvent::TaskPullRequestChanged(_)
+            | TaskEvent::TaskAcceptanceAdded(_)
+            | TaskEvent::TaskAcceptanceChecked(_)
+            | TaskEvent::TaskAcceptanceRemoved(_)
+            | TaskEvent::TaskNoteAdded(_)
+            | TaskEvent::HistoricalTaskStatePublished(_) => {}
+            _ => return Err(TaskCommandError::UnsupportedTaskEvent),
+        }
+        Ok(())
+    }
+
+    /// Folds one current task creation after checking its stream ownership.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the small creation fold validates source ownership before preserving just lifecycle and blockers"
+    )]
+    fn apply_created(&mut self, created: &TaskCreated) -> Result<(), TaskCommandError> {
+        let task = &created.task;
+        Self::require_task_stream(&created.stream_id, &task.stem)?;
+        if self.tasks.contains_key(&task.stem) {
+            return Err(TaskCommandError::DuplicateTaskCreation {
+                task: task.stem.clone(),
+            });
+        }
+        let _: Option<ActivationTask> = self.tasks.insert(
+            task.stem.clone(),
+            ActivationTask {
+                status: task.status,
+                blockers: task.blocked_by.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Folds one current lifecycle fact after checking its stream ownership.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the small lifecycle fold validates source ownership and preserves only the current state needed by activation"
+    )]
+    fn apply_transition(
+        &mut self,
+        transitioned: &TaskTransitioned,
+    ) -> Result<(), TaskCommandError> {
+        Self::require_task_stream(&transitioned.stream_id, &transitioned.stem)?;
+        self.task_mut(&transitioned.stem)?.status = transitioned.status;
+        Ok(())
+    }
+
+    /// Folds one dependency replacement after checking its source ownership.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the small dependency fold validates source ownership and preserves only blockers needed for eligibility"
+    )]
+    fn apply_links_changed(
+        &mut self,
+        changed: &tiber_tasks_core::TaskLinksChanged,
+    ) -> Result<(), TaskCommandError> {
+        Self::require_task_stream(&changed.stream_id, &changed.stem)?;
+        self.task_mut(&changed.stem)?
+            .blockers
+            .clone_from(&changed.blocked_by);
+        Ok(())
+    }
+
+    /// Replaces the strict order after checking that it is board-authoritative.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the board-order fold validates the sole board authority before preserving the exact sequence"
+    )]
+    fn apply_board_order(&mut self, order: &TaskOrder) -> Result<(), TaskCommandError> {
+        Self::require_board_stream(&order.stream_id)?;
+        self.board_order.clone_from(&order.order);
+        Ok(())
+    }
+
+    /// Requires a task fact to come from its task stream or the board stream.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the narrow stream check derives the exact two-stream activation fence before deciding current authority"
+    )]
+    fn require_task_stream(stream: &StreamId, task: &TaskId) -> Result<(), TaskCommandError> {
+        let [board_stream, task_stream] = acceptance_consistency_streams(task)?;
+        if stream == &board_stream || stream == &task_stream {
+            Ok(())
+        } else {
+            Err(TaskCommandError::TaskActivationMalformedHistory)
+        }
+    }
+
+    /// Requires a board-wide fact to come from the fixed board stream.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the fixed board ownership predicate is clearest as a compact conditional result"
+    )]
+    fn require_board_stream(stream: &StreamId) -> Result<(), TaskCommandError> {
+        if stream.as_ref() == TASK_BOARD_STREAM {
+            Ok(())
+        } else {
+            Err(TaskCommandError::TaskActivationMalformedHistory)
+        }
+    }
+
+    /// Borrows current task data or reports an activation-relevant malformed fact.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the borrowed lookup and typed malformed-history conversion are clearest as expressions"
+    )]
+    fn task_mut(&mut self, task: &TaskId) -> Result<&mut ActivationTask, TaskCommandError> {
+        self.tasks
+            .get_mut(task)
+            .ok_or(TaskCommandError::TaskActivationMalformedHistory)
+    }
+
+    /// Removes one current task lifetime or reports an activation-relevant malformed fact.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the single current-lifetime removal maps an absent durable task to its typed activation-history failure"
+    )]
+    fn remove_task(&mut self, task: &TaskId) -> Result<(), TaskCommandError> {
+        if self.tasks.remove(task).is_some() {
+            Ok(())
+        } else {
+            Err(TaskCommandError::TaskActivationMalformedHistory)
+        }
+    }
+
+    /// Decides one first activation, a sole-target retry, or a stable refusal.
+    #[expect(
+        clippy::implicit_return,
+        clippy::pattern_type_mismatch,
+        clippy::question_mark_used,
+        reason = "the final narrow decision validates exact board membership, one-active-task policy, blockers, and strict eligible order before one modeled publication"
+    )]
+    fn decide(
+        &self,
+        request: &StartTask,
+    ) -> Result<Option<TaskActivationPublication>, TaskCommandError> {
+        let target =
+            self.tasks
+                .get(request.task())
+                .ok_or_else(|| TaskCommandError::TaskMissing {
+                    task: request.task().clone(),
+                })?;
+        let target_order_entries = self
+            .board_order
+            .iter()
+            .filter(|entry| *entry == request.task())
+            .count();
+        if target_order_entries != 1 {
+            return Err(TaskCommandError::TaskActivationOrderDrift {
+                task: request.task().clone(),
+            });
+        }
+        let mut active_tasks = Vec::new();
+        for (task, state) in &self.tasks {
+            if state.status == TaskStatus::InProgress {
+                active_tasks.push(task.clone());
+            }
+        }
+        match active_tasks.as_slice() {
+            [] => {}
+            [active_task] if active_task == request.task() => return Ok(None),
+            [active_task] => {
+                return Err(TaskCommandError::TaskActivationActiveTask {
+                    active_task: active_task.clone(),
+                });
+            }
+            _ => return Err(TaskCommandError::MultipleActiveTasks { active_tasks }),
+        }
+        if target.status != TaskStatus::Backlog {
+            return Err(TaskCommandError::TaskActivationNotBacklog {
+                task: request.task().clone(),
+                status: target.status,
+            });
+        }
+        if let Some(blocker) = self.first_unresolved_blocker(target) {
+            return Err(TaskCommandError::TaskActivationBlocked {
+                task: request.task().clone(),
+                blocker,
+            });
+        }
+        let next = self
+            .first_eligible_backlog_task()
+            .ok_or(TaskCommandError::TaskActivationMalformedHistory)?;
+        if &next != request.task() {
+            return Err(TaskCommandError::TaskActivationNotNextEligible {
+                task: request.task().clone(),
+                next,
+            });
+        }
+        modeled_task_activation_publication(request).map(Some)
+    }
+
+    /// Returns the first target blocker that is missing or not done.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the first stable unresolved blocker makes an activation refusal deterministic without broad projection state"
+    )]
+    fn first_unresolved_blocker(&self, task: &ActivationTask) -> Option<TaskId> {
+        task.blockers.iter().find_map(|blocker| {
+            self.tasks
+                .get(blocker)
+                .is_none_or(|state| state.status != TaskStatus::Done)
+                .then(|| blocker.clone())
+        })
+    }
+
+    /// Returns the first current eligible backlog task in strict board order.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the strict order scan intentionally skips only unrelated stale or terminal entries that cannot become the next backlog task"
+    )]
+    fn first_eligible_backlog_task(&self) -> Option<TaskId> {
+        for task in &self.board_order {
+            let Some(state) = self.tasks.get(task) else {
+                continue;
+            };
+            if state.status == TaskStatus::Backlog && self.first_unresolved_blocker(state).is_none()
+            {
+                return Some(task.clone());
+            }
+        }
+        None
+    }
+}
+
 /// Modeled external intent for one exact subtask-occurrence check.
 #[derive(ModelInput)]
 #[expect(
@@ -3139,6 +3551,188 @@ impl ModelCommandLogic for ModeledCompleteTask {
     }
 }
 
+/// Modeled external intent for one closed task-activation publication.
+#[derive(ModelInput)]
+struct StartTaskIntent {
+    /// Board stream receiving the sole activation fact.
+    #[model(origin)]
+    board_stream: StreamId,
+    /// Exact backlog task selected by the parsed command boundary.
+    #[model(origin)]
+    task: TaskId,
+    /// Legacy task stream whose version also fences the decision.
+    #[model(origin)]
+    task_stream: StreamId,
+}
+
+/// Checked `EventCore` command that produces one internal activation decision fact.
+#[derive(ModelCommand)]
+struct ModeledStartTask {
+    /// Board stream receiving the sole activation fact.
+    #[stream]
+    board_stream: StreamId,
+    /// Exact backlog task selected by the parsed command boundary.
+    task: TaskId,
+    /// Legacy task stream read for optimistic consistency.
+    #[stream]
+    task_stream: StreamId,
+}
+
+mapping! {
+    StartTaskIntentToBoardStream:
+        StartTaskIntent.board_stream => ModeledStartTask.board_stream
+        using clone;
+}
+
+mapping! {
+    StartTaskIntentToTask:
+        StartTaskIntent.task => ModeledStartTask.task
+        using clone;
+}
+
+mapping! {
+    StartTaskIntentToTaskStream:
+        StartTaskIntent.task_stream => ModeledStartTask.task_stream
+        using clone;
+}
+
+/// Internal modeled fact from which the opaque activation token is derived.
+#[derive(Clone, Debug, Deserialize, ModelEvent, Serialize)]
+struct ModeledTaskActivation {
+    /// Board stream receiving the durable activation fact.
+    stream: StreamId,
+    /// Exact task entering the active lifecycle.
+    task: TaskId,
+}
+
+#[expect(
+    clippy::implicit_return,
+    reason = "the EventCore trait names the internal activation decision after its direct stream accessor"
+)]
+impl Event for ModeledTaskActivation {
+    fn event_type_name() -> &'static str {
+        "TiberModeledTaskActivation"
+    }
+
+    fn stream_id(&self) -> &StreamId {
+        &self.stream
+    }
+}
+
+/// Query-shaped view that consumes every modeled activation field for provenance checking.
+#[derive(ModelOutput)]
+struct ModeledTaskActivationView {
+    /// Board stream receiving the durable activation fact.
+    stream: StreamId,
+    /// Exact task entering the active lifecycle.
+    task: TaskId,
+}
+
+impl ModeledTaskActivationView {
+    /// Projects every modeled activation field into the durable-fact boundary shape.
+    #[expect(
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the modeled activation view construction is clearest as the final checked builder expression"
+    )]
+    fn from_event(event: &ModeledTaskActivation) -> Self {
+        Self::model_builder()
+            .stream(ModeledTaskActivationToViewStream::apply(event))
+            .task(ModeledTaskActivationToViewTask::apply(event))
+            .build()
+            .into_inner()
+    }
+
+    /// Converts the modeled activation decision into its sole durable lifecycle fact.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the closed activation view maps directly into one unclaimed in-progress fact"
+    )]
+    fn into_task_transitioned(self) -> TaskTransitioned {
+        TaskTransitioned::new(self.stream, self.task, TaskStatus::InProgress, None)
+    }
+}
+
+mapping! {
+    ModeledTaskActivationToViewStream:
+        ModeledTaskActivation.stream => ModeledTaskActivationView.stream
+        using clone;
+}
+
+mapping! {
+    ModeledTaskActivationToViewTask:
+        ModeledTaskActivation.task => ModeledTaskActivationView.task
+        using clone;
+}
+
+/// Minimal modeled state for exactly-once emission within one activation execution.
+#[derive(ModelState)]
+struct ModeledStartTaskState {
+    /// Whether this modeled command already emitted its one activation fact.
+    #[model(default)]
+    emitted: bool,
+}
+
+/// Decision state consumed by the modeled activation-fact constructor.
+#[derive(ModelOutput)]
+struct ModeledStartTaskDecision {
+    /// Whether the command had already emitted its one activation fact.
+    emitted: bool,
+}
+
+mapping! {
+    ModeledStartTaskStateToDecision:
+        ModeledStartTaskState.emitted => ModeledStartTaskDecision.emitted
+        using copy;
+}
+
+mapping! {
+    ModeledStartTaskToFactStream:
+        (ModeledStartTask.board_stream, ModeledStartTaskDecision.emitted) => ModeledTaskActivation.stream
+        using try activation_stream_once, error = CommandError;
+}
+
+mapping! {
+    ModeledStartTaskToFactTask:
+        ModeledStartTask.task => ModeledTaskActivation.task
+        using clone;
+}
+
+#[expect(
+    clippy::implicit_return,
+    clippy::missing_trait_methods,
+    clippy::question_mark_used,
+    reason = "the EventCore trait fixes the evolve/decide API and uses a default stream-discovery method; modeled activation construction is the checked terminal expression"
+)]
+impl ModelCommandLogic for ModeledStartTask {
+    type Event = ModeledTaskActivation;
+    type State = ModeledStartTaskState;
+
+    fn decide(
+        &self,
+        state: Modeled<Self::State>,
+    ) -> Result<ModeledEvents<Self::Event>, CommandError> {
+        let decision = ModeledStartTaskDecision::model_builder()
+            .emitted(ModeledStartTaskStateToDecision::apply(state.as_ref()))
+            .build();
+        Ok(ModeledEvents::one(
+            ModeledTaskActivation::model_builder()
+                .stream(ModeledStartTaskToFactStream::apply((
+                    self,
+                    decision.as_ref(),
+                ))?)
+                .task(ModeledStartTaskToFactTask::apply(self))
+                .build(),
+        ))
+    }
+
+    fn evolve(&self, state: Modeled<Self::State>, _event: &Self::Event) -> Modeled<Self::State> {
+        let mut folded = state.into_inner();
+        folded.emitted = true;
+        Modeled::from_built(folded)
+    }
+}
+
 /// Produces the board stream only when the modeled command has not emitted a correction.
 #[expect(
     clippy::implicit_return,
@@ -3165,6 +3759,22 @@ fn completion_stream_once(stream: &StreamId, emitted: &bool) -> Result<StreamId,
     if *emitted {
         return Err(CommandError::ValidationError(
             "tasks_command_completion_already_emitted".to_owned(),
+        ));
+    }
+    Ok(stream.clone())
+}
+
+/// Produces the board stream only when the modeled activation has not emitted its decision.
+#[expect(
+    clippy::implicit_return,
+    clippy::single_call_fn,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "the EventCore mapping API passes model fields by reference, so this narrow one-use transform retains its checked signature"
+)]
+fn activation_stream_once(stream: &StreamId, emitted: &bool) -> Result<StreamId, CommandError> {
+    if *emitted {
+        return Err(CommandError::ValidationError(
+            "tasks_command_task_activation_already_emitted".to_owned(),
         ));
     }
     Ok(stream.clone())
@@ -3329,6 +3939,40 @@ fn modeled_task_completion_publication(
     )
 }
 
+/// Executes the checked `EventCore` model and returns one closed activation publication.
+#[expect(
+    clippy::implicit_return,
+    clippy::question_mark_used,
+    clippy::single_call_fn,
+    reason = "the narrow pure activation maps one exact parsed intent through a checked EventCore command and keeps model failures typed"
+)]
+fn modeled_task_activation_publication(
+    request: &StartTask,
+) -> Result<TaskActivationPublication, TaskCommandError> {
+    let consistency_streams = acceptance_consistency_streams(request.task())?;
+    let intent = StartTaskIntent::model_builder()
+        .board_stream(consistency_streams[0].clone())
+        .task(request.task().clone())
+        .task_stream(consistency_streams[1].clone())
+        .build();
+    let command = ModeledStartTask::model_builder()
+        .board_stream(StartTaskIntentToBoardStream::apply(intent.as_ref()))
+        .task(StartTaskIntentToTask::apply(intent.as_ref()))
+        .task_stream(StartTaskIntentToTaskStream::apply(intent.as_ref()))
+        .build();
+    let events: Vec<ModeledTaskActivation> = CommandLogic::handle(&command, Modeled::default())
+        .map_err(|_source| TaskCommandError::ModeledTaskActivationDecisionFailed)?
+        .into();
+    let [event]: [ModeledTaskActivation; 1] =
+        events
+            .try_into()
+            .map_err(|_events: Vec<ModeledTaskActivation>| {
+                TaskCommandError::InvalidModeledTaskActivationPublication
+            })?;
+    let fact = ModeledTaskActivationView::from_event(&event).into_task_transitioned();
+    TaskActivationPublication::from_modeled_fact(fact, consistency_streams)
+}
+
 /// Produces the only permitted acceptance state after rejecting a repeated modeled command.
 #[expect(
     clippy::implicit_return,
@@ -3487,6 +4131,32 @@ pub fn decide_check_subtask_occurrence(
     request: &CheckSubtaskOccurrence,
 ) -> Result<Option<SubtaskOccurrenceCheckPublication>, TaskCommandError> {
     let state = SubtaskOccurrenceCheckState::fold(events, request)?;
+    state.decide(request)
+}
+
+/// Decides the closed activation publication needed to start one strict-next task.
+///
+/// The caller supplies relevant facts in canonical transaction order. This
+/// fold retains only current lifecycle, blockers, and strict board order; it
+/// is deliberately not a task-board projection or generic lifecycle setter.
+///
+/// # Errors
+///
+/// Returns a stable typed failure for malformed activation-relevant history,
+/// board-order drift, another active task, blocked prerequisites, or a request
+/// that would bypass the next eligible backlog task. `Ok(None)` means the
+/// addressed task is already the sole active task in current history.
+#[inline]
+#[expect(
+    clippy::implicit_return,
+    clippy::question_mark_used,
+    reason = "the activation command stays a compact pure fold with explicit typed propagation"
+)]
+pub fn decide_start_task(
+    events: &[TaskEvent],
+    request: &StartTask,
+) -> Result<Option<TaskActivationPublication>, TaskCommandError> {
+    let state = TaskActivationState::fold(events)?;
     state.decide(request)
 }
 

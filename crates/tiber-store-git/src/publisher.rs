@@ -17,7 +17,7 @@ use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamW
 use tempfile::TempDir;
 use tiber_tasks_service::{
     AcceptanceCheckPublication, SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication,
-    TaskCompletionPublication,
+    TaskActivationPublication, TaskCompletionPublication,
 };
 
 use crate::{
@@ -264,6 +264,32 @@ impl TiberEventPublisher {
     pub async fn publish_acceptance_check(
         &mut self,
         publication: AcceptanceCheckPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, consistency_streams) = publication.into_event_and_consistency_streams();
+        self.append(&consistency_streams, vec![event]).await
+    }
+
+    /// Publishes the only modeled fact accepted by the strict-next task-activation boundary.
+    ///
+    /// The opaque service token can represent only one unclaimed `InProgress`
+    /// transition with the exact board and addressed-task streams that fenced
+    /// its pure command decision. It cannot encode a general lifecycle
+    /// transition or a generic mutable task batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed conflict without overwriting authority when a concurrent
+    /// writer advances the fixed branch. Returns [`TiberPublicationError::Ambiguous`]
+    /// if a transport interruption prevents conclusive publication confirmation;
+    /// callers must reload the authority before retrying their idempotent intent.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the closed task-activation boundary retains its exact event, optimistic staging, signing, and publication steps"
+    )]
+    #[inline]
+    pub async fn publish_task_activation(
+        &mut self,
+        publication: TaskActivationPublication,
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (event, consistency_streams) = publication.into_event_and_consistency_streams();
         self.append(&consistency_streams, vec![event]).await

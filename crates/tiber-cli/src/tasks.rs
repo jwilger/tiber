@@ -14,9 +14,9 @@ use tiber_store_git::{
 use tiber_tasks_core::{Subtask, Task, TaskEvent, TaskId, TaskStatus};
 use tiber_tasks_service::command::{
     AcceptanceIndex, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask,
-    RepairDuplicateSubtaskId, SubtaskOccurrence, SubtaskReplacementId, TaskCommandError,
+    RepairDuplicateSubtaskId, StartTask, SubtaskOccurrence, SubtaskReplacementId, TaskCommandError,
     decide_check_acceptance, decide_check_subtask_occurrence, decide_complete_task,
-    decide_repair_duplicate_subtask_id,
+    decide_repair_duplicate_subtask_id, decide_start_task,
 };
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -60,6 +60,7 @@ pub(super) fn run(
             reference,
             occurrence,
         } => check_subtask_occurrence(repository, &reference, occurrence),
+        TaskCommand::Start { reference } => start_task(repository, &reference),
         TaskCommand::TransitionDone { reference } => complete_task(repository, &reference),
         TaskCommand::List(status) => {
             let projection = load_projection(repository)?;
@@ -82,6 +83,11 @@ pub(super) fn run(
 
 /// A completely parsed native task operation.
 enum TaskCommand {
+    /// Activates one strict-next eligible backlog task through the signed native write boundary.
+    Start {
+        /// The parsed task reference resolved after canonical history is read.
+        reference: TaskReference,
+    },
     /// Sets one current acceptance item checked through the signed native write boundary.
     AcceptanceCheck {
         /// The parsed task reference resolved after canonical history is read.
@@ -200,6 +206,73 @@ impl TaskCliError {
                 | Self::Projection(TaskProjectionError::InvalidTaskReference)
         )
     }
+
+    /// Renders safe owner recovery text for bounded activation failures.
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "matching the borrowed command error keeps activation recovery rendering non-owning at the CLI boundary"
+    )]
+    fn activation_error_message(&self) -> Option<String> {
+        match self {
+            Self::Command(TaskCommandError::TaskActivationNotBacklog { task, status }) => {
+                Some(format!(
+                    "task `{}` is currently `{}`, not `backlog`; reload with `tiber tasks show {}` before retrying",
+                    task.as_str(),
+                    status_name(*status),
+                    task.as_str()
+                ))
+            }
+            Self::Command(TaskCommandError::TaskActivationActiveTask { active_task }) => {
+                Some(format!(
+                    "task `{}` is already active; continue it or inspect `tiber tasks next` before starting another task",
+                    active_task.as_str()
+                ))
+            }
+            Self::Command(TaskCommandError::MultipleActiveTasks { active_tasks }) => {
+                Some(format!(
+                    "multiple tasks are active ({}); reload with `tiber tasks list --status in-progress` before retrying",
+                    task_ids(active_tasks)
+                ))
+            }
+            Self::Command(TaskCommandError::TaskActivationBlocked { task, blocker }) => {
+                Some(format!(
+                    "task `{}` is blocked by `{}`; reload with `tiber tasks show {}` before retrying",
+                    task.as_str(),
+                    blocker.as_str(),
+                    task.as_str()
+                ))
+            }
+            Self::Command(TaskCommandError::TaskActivationNotNextEligible { task, next }) => {
+                Some(format!(
+                    "task `{}` is not the next eligible task; run `tiber tasks start {}` or inspect `tiber tasks next` before retrying",
+                    task.as_str(),
+                    next.as_str()
+                ))
+            }
+            Self::Command(TaskCommandError::TaskActivationOrderDrift { task }) => Some(format!(
+                "task `{}` has invalid board ordering; reload with `tiber tasks show {}` before retrying",
+                task.as_str(),
+                task.as_str()
+            )),
+            Self::Command(TaskCommandError::TaskActivationMalformedHistory) => Some(
+                "the authoritative task history cannot safely decide activation; reload with `tiber tasks next` before retrying".to_owned(),
+            ),
+            Self::Command(_)
+            | Self::MissingSubcommand
+            | Self::UnknownSubcommand
+            | Self::InvalidArguments
+            | Self::InvalidArgumentEncoding
+            | Self::InvalidStatus
+            | Self::EmptySearchQuery
+            | Self::Store(_)
+            | Self::History(_)
+            | Self::Projection(_)
+            | Self::Publication(_)
+            | Self::Runtime(_)
+            | Self::StreamPattern
+            | Self::ProjectionTaskMissing => None,
+        }
+    }
 }
 
 impl fmt::Display for TaskCliError {
@@ -208,6 +281,9 @@ impl fmt::Display for TaskCliError {
         reason = "matching the borrowed typed error keeps formatting non-owning at the CLI boundary"
     )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(message) = self.activation_error_message() {
+            return f.write_str(&message);
+        }
         let message = match self {
             Self::MissingSubcommand => "a task subcommand is required",
             Self::UnknownSubcommand => "the task subcommand is not supported",
@@ -341,6 +417,12 @@ impl Error for TaskCliError {
 /// Validates the nested command grammar before accessing any repository state.
 fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, TaskCliError> {
     match subcommand {
+        "start" => match arguments {
+            [reference] => Ok(TaskCommand::Start {
+                reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+            }),
+            _ => Err(TaskCliError::InvalidArguments),
+        },
         "acceptance" => match arguments {
             [operation, reference, index] if operation == "check" => {
                 Ok(TaskCommand::AcceptanceCheck {
@@ -403,6 +485,38 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
         },
         _ => Err(TaskCliError::UnknownSubcommand),
     }
+}
+
+/// Decides and publishes one bounded task activation through the native signed boundary.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the command sequences canonical read, narrow activation decision, fixed revision fence, and one closed modeled fact with typed recovery"
+)]
+fn start_task(repository: &Path, reference: &TaskReference) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let request = StartTask::new(task.clone());
+    let Some(publication) =
+        decide_start_task(history.events(), &request).map_err(TaskCliError::Command)?
+    else {
+        return Ok(format!("{} already in progress\n", task.as_str()));
+    };
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_task_activation(publication))
+        .map_err(TaskCliError::Publication)?;
+    Ok(format!(
+        "activated {} at {}\n",
+        task.as_str(),
+        outcome.revision().as_str()
+    ))
 }
 
 /// Parses OS arguments once at the command boundary.
@@ -862,6 +976,13 @@ fn append_joined<'item>(output: &mut String, items: impl IntoIterator<Item = &'i
         }
         output.push_str(item);
     }
+}
+
+/// Renders stable task identities for a safe activation-recovery diagnostic.
+fn task_ids(tasks: &[TaskId]) -> String {
+    let mut output = String::new();
+    append_joined(&mut output, tasks.iter().map(TaskId::as_str));
+    output
 }
 
 /// Converts the closed task lifecycle type to the CLI's stable spelling.

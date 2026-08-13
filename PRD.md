@@ -15,7 +15,7 @@ named Tiber Tasks. Running `tiber` without arguments opens the current
 interactive terminal UI. Native task operations live only under `tiber tasks
 …`. The shipped task slice includes read-only `list`, `show`, `search`, and
 `next` queries over EventCore history preserved on the signed Tiber authority
-branch, plus three bounded native completion operations: `acceptance check`,
+branch, plus four bounded native operations: `start <ref>`, `acceptance check`,
 `subtask check <ref> <one-based-occurrence>`, and `transition <ref> done`.
 Each folds only the facts needed for that decision, publishes a closed modeled
 fact sequence through the exact board/task consistency boundary, signs the
@@ -27,6 +27,11 @@ general public EventCore append, legacy MCP task write, or generic task-mutation
 surface. A retained done task with stale strict-board entries receives only an
 order reconciliation, never a repeated transition. Publication reconciliation
 and workflow scheduling remain subsequent native slices.
+
+`start` is a bounded activation operation, not a general transition: it can
+activate only the current eligible next task while no other task is active. An
+exact retry for that sole active task succeeds without publishing another
+authority revision. It does not implement scheduling or a workflow loop.
 
 The native task surface also has one explicit legacy-data repair, not a general
 write: `subtask repair-duplicate`. It requires a one-based occurrence and a new

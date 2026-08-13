@@ -39,11 +39,14 @@ into native `tiber-*` crates, with no compatibility crate, second `tiber`
 binary, or legacy top-level task aliases. The default `tiber` command remains
 the TUI and task operations live at `tiber tasks …`. The native task surface
 provides read-only queries over preserved EventCore history plus only bounded
-signed completion operations: acceptance check, occurrence-safe subtask check,
-and terminal `transition <ref> done`. They consume opaque command-specific
-publication tokens at the Git adapter rather than reopening a generic append,
-generic task mutation, or former MCP write surface. Reconciliation and workflow
-scheduling remain follow-on work, not compatibility surfaces.
+signed activation and completion operations: `start <ref>`, acceptance check,
+occurrence-safe subtask check, and terminal `transition <ref> done`. `start`
+can activate only the eligible next task while no other task is active, with an
+exact retry of that sole active task as a no-op. It is not a generic transition
+or scheduler. Each operation consumes an opaque command-specific publication
+token at the Git adapter rather than reopening a generic append, generic task
+mutation, or former MCP write surface. Reconciliation and workflow scheduling
+remain follow-on work, not compatibility surfaces.
 
 One bounded exception corrects malformed retained task metadata: native Tasks
 may append a named, preconditioned duplicate-subtask identity correction. It

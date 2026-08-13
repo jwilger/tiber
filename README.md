@@ -14,14 +14,18 @@ are read-only queries over `EventCore` task history preserved on the signed
 currently advertised `tiber` commit and fetch that exact object without moving
 any caller Git ref.
 
-Tiber exposes only bounded native task-completion mutations:
-`acceptance check`, `subtask check`, and `transition <task-ref> done`. Each
-starts with canonical history, makes one command-specific pure decision, and
+Tiber exposes only bounded native task activation and completion mutations:
+`start <task-ref>`, `acceptance check`, `subtask check`, and
+`transition <task-ref> done`. Each starts with canonical history, makes one
+command-specific pure decision, and
 publishes only its opaque modeled fact sequence with the board and task-stream
 versions as its consistency boundary. Tiber creates a signed candidate and uses
 an exact-base `--force-with-lease` update of the fixed authority branch (or a
 local ref CAS when no `origin` exists), so it cannot overwrite a changed remote
 head. A post-push ambiguity is reported rather than retried automatically.
+`start` activates only the current eligible next task while no other task is
+active; an exact retry for that sole active task is a no-op. It is a bounded
+activation operation, not a generic lifecycle setter.
 `subtask check` addresses a stable one-based occurrence and carries that row's
 exact preimage, so retained duplicate IDs cannot redirect a check. `transition`
 accepts only `done`; it is a terminal completion operation, not an arbitrary
@@ -74,6 +78,7 @@ cargo run --locked -p tiber -- tasks list
 cargo run --locked -p tiber -- tasks show <task-ref>
 cargo run --locked -p tiber -- tasks search "outcome terms"
 cargo run --locked -p tiber -- tasks next
+cargo run --locked -p tiber -- tasks start <task-ref>
 cargo run --locked -p tiber -- tasks acceptance check <task-ref> <one-based-index>
 cargo run --locked -p tiber -- tasks subtask check <task-ref> <one-based-occurrence>
 cargo run --locked -p tiber -- tasks subtask repair-duplicate <task-ref> <one-based-occurrence> <replacement-id>

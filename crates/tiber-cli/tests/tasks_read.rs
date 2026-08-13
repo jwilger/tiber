@@ -21,6 +21,8 @@ mod tests {
     const PAGE_SPANNING_UPDATES: usize = 65;
     const SECOND_PRIORITY_TASK_ID: &str = "20260812-c333-first-priority";
     const CLOSED_TASK_ID: &str = "20260812-d444-closed-task";
+    const BLOCKER_TASK_ID: &str = "20260812-e555-blocking-task";
+    const BLOCKED_TASK_ID: &str = "20260812-f666-blocked-task";
     const TIBER_REF: &str = "refs/heads/tiber";
 
     struct TaskFixture {
@@ -392,6 +394,71 @@ mod tests {
             clippy::expect_used,
             clippy::implicit_return,
             clippy::single_call_fn,
+            reason = "the bounded activation refusal fixture must fail fast while constructing one signed task with one unresolved durable blocker"
+        )]
+        async fn signed_blocked_history() -> Self {
+            let (directory, repository) = signed_repository();
+            let prerequisite_stream = task_stream(BLOCKER_TASK_ID);
+            let target_stream = task_stream(BLOCKED_TASK_ID);
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(prerequisite_stream.clone(), StreamVersion::new(0))
+                .expect("blocker task stream should register")
+                .register_stream(target_stream.clone(), StreamVersion::new(0))
+                .expect("blocked task stream should register")
+                .register_stream(board_stream, StreamVersion::new(0))
+                .expect("fixture board stream should register")
+                .append(task_created(
+                    &prerequisite_stream,
+                    BLOCKER_TASK_ID,
+                    "Blocking task",
+                    "backlog",
+                ))
+                .expect("blocker task should append")
+                .append(event(json!({
+                    "event": "task_created",
+                    "stream_id": target_stream.as_ref(),
+                    "task": {
+                        "acceptance": [],
+                        "blocked_by": [BLOCKER_TASK_ID],
+                        "blocks": [],
+                        "claim": null,
+                        "committed_at": "2026-08-13T00:00:00Z",
+                        "context": "A blocker must be completed first.",
+                        "notes": [],
+                        "pr_mr_status": null,
+                        "pr_mr_url": null,
+                        "status": "backlog",
+                        "stem": BLOCKED_TASK_ID,
+                        "subtasks": [],
+                        "summary": "Blocked activation fixture.",
+                        "tags": ["native"],
+                        "title": "Blocked task"
+                    }
+                })))
+                .expect("blocked task should append")
+                .append(board_reordered(&[BLOCKED_TASK_ID]))
+                .expect("strict blocked-task order should append");
+            let store = FileEventStore::open(repository.join("eventstore"))
+                .expect("fixture event store should initialize");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("blocked task history should append");
+            drop(store);
+            commit_signed_tiber_history(&repository);
+
+            Self {
+                _directory: directory,
+                repository,
+            }
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
             reason = "the stale-order fixture deliberately extends a signed multi-task board so the public completion adapter can prove its order-only reconciliation behavior; its one named caller keeps that scenario isolated"
         )]
         async fn signed_done_task_with_duplicate_stale_board_entries() -> Self {
@@ -593,6 +660,131 @@ mod tests {
                 "{TASK_ID}\tbacklog\tPaged task revision {}\n",
                 PAGE_SPANNING_UPDATES - 1
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_start_activates_the_next_task_and_is_idempotent() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+
+        let activated = fixture.tiber(&["tasks", "start", SECOND_PRIORITY_TASK_ID]);
+
+        assert_success(&activated);
+        let after_activation = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        assert_eq!(
+            String::from_utf8_lossy(&activated.stdout),
+            format!("activated {SECOND_PRIORITY_TASK_ID} at {after_activation}\n"),
+            "a successful bounded activation must name the exact confirmed signed authority revision"
+        );
+
+        let repeated = fixture.tiber(&["tasks", "start", SECOND_PRIORITY_TASK_ID]);
+
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("{SECOND_PRIORITY_TASK_ID} already in progress\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_activation,
+            "a retry of the sole active target must not publish another authority revision"
+        );
+
+        let shown = fixture.tiber(&["tasks", "show", SECOND_PRIORITY_TASK_ID]);
+        assert_success(&shown);
+        assert!(
+            String::from_utf8_lossy(&shown.stdout).contains("status: in-progress\n"),
+            "the native activation must be visible through the public task projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_start_rejects_non_next_and_another_active_task_without_publishing() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let non_next = fixture.tiber(&["tasks", "start", FIRST_PRIORITY_TASK_ID]);
+
+        assert!(!non_next.status.success());
+        assert!(non_next.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&non_next.stderr),
+            format!(
+                "tasks_command_task_activation_not_next_eligible: task `{FIRST_PRIORITY_TASK_ID}` is not the next eligible task; run `tiber tasks start {SECOND_PRIORITY_TASK_ID}` or inspect `tiber tasks next` before retrying\n"
+            ),
+            "a priority refusal must name the strict next task and a safe native recovery command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a non-next activation refusal must not publish another authority revision"
+        );
+
+        let activated = fixture.tiber(&["tasks", "start", SECOND_PRIORITY_TASK_ID]);
+        assert_success(&activated);
+        let after_activation = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let another = fixture.tiber(&["tasks", "start", FIRST_PRIORITY_TASK_ID]);
+
+        assert!(!another.status.success());
+        assert!(another.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&another.stderr),
+            format!(
+                "tasks_command_task_activation_active_task: task `{SECOND_PRIORITY_TASK_ID}` is already active; continue it or inspect `tiber tasks next` before starting another task\n"
+            ),
+            "an active-task refusal must name the sole active task and a safe native recovery command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_activation,
+            "a second activation refusal must not publish another authority revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_start_rejects_a_blocked_task_without_publishing() {
+        let fixture = TaskFixture::signed_blocked_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "start", BLOCKED_TASK_ID]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_task_activation_blocked: task `{BLOCKED_TASK_ID}` is blocked by `{BLOCKER_TASK_ID}`; reload with `tiber tasks show {BLOCKED_TASK_ID}` before retrying\n"
+            ),
+            "a blocked activation refusal must name the first unresolved blocker and a safe native recovery command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a blocked activation refusal must not publish another authority revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_start_rejects_a_done_task_retained_in_board_order_without_publishing() {
+        let fixture = TaskFixture::signed_paged_history_with_status("done").await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "start", TASK_ID]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_task_activation_not_backlog: task `{TASK_ID}` is currently `done`, not `backlog`; reload with `tiber tasks show {TASK_ID}` before retrying\n"
+            ),
+            "a non-backlog activation refusal must name the exact terminal status and safe recovery command"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a non-backlog activation refusal must not publish another authority revision"
         );
     }
 
@@ -1163,11 +1355,21 @@ mod tests {
         fs::set_permissions(&git_sentinel, permissions)
             .expect("sentinel Git command should be executable");
 
-        for (index, reference) in ["../x", "", "task.md"].into_iter().enumerate() {
+        for (index, (operation, reference)) in [
+            ("show", "../x"),
+            ("show", ""),
+            ("show", "task.md"),
+            ("start", "../x"),
+            ("start", ""),
+            ("start", "task.md"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let marker = directory.path().join(format!("git-was-run-{index}"));
             let usage_exit_code: i32 = 2;
             let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
-                .args(["tasks", "show", reference])
+                .args(["tasks", operation, reference])
                 .current_dir(directory.path())
                 .env("PATH", &command_directory)
                 .env("TIBER_GIT_SENTINEL", &marker)
@@ -1182,7 +1384,7 @@ mod tests {
             );
             assert!(
                 !marker.exists(),
-                "invalid task reference {reference:?} must not invoke Git"
+                "invalid {operation} reference {reference:?} must not invoke Git"
             );
         }
     }
@@ -1382,7 +1584,7 @@ mod tests {
         clippy::expect_used,
         reason = "the command shell must start successfully before its public usage output can be asserted"
     )]
-    fn task_help_advertises_only_the_bounded_completion_grammar() {
+    fn task_help_advertises_only_the_bounded_activation_and_completion_grammar() {
         let directory = TempDir::new().expect("fixture directory should be created");
         let usage_exit_code: i32 = 2;
         let nested = Command::new(env!("CARGO_BIN_EXE_tiber"))
@@ -1399,6 +1601,7 @@ mod tests {
             String::from_utf8_lossy(&nested.stderr)
                 .contains("subtask check <ref> <one-based-occurrence>")
         );
+        assert!(String::from_utf8_lossy(&nested.stderr).contains("start <ref>"));
         assert!(String::from_utf8_lossy(&nested.stderr).contains("transition <ref> done"));
 
         let top_level = Command::new(env!("CARGO_BIN_EXE_tiber"))
@@ -1415,6 +1618,7 @@ mod tests {
             String::from_utf8_lossy(&top_level.stderr)
                 .contains("subtask check <ref> <one-based-occurrence>")
         );
+        assert!(String::from_utf8_lossy(&top_level.stderr).contains("start <ref>"));
         assert!(String::from_utf8_lossy(&top_level.stderr).contains("transition <ref> done"));
     }
 

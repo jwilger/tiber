@@ -23,6 +23,97 @@ use tiber_tasks_core::{
     TaskSubtaskOccurrenceChecked, TaskTransitioned,
 };
 
+/// The only publication input for activating one strict-next backlog task.
+///
+/// This opaque token carries exactly one unclaimed `InProgress` transition and
+/// the board plus addressed-task streams whose versions fenced the pure start
+/// decision. It is a named activation, not a generic lifecycle transition.
+#[derive(Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque activation token fields follow activation fact then consistency-fence transfer flow rather than alphabetical order"
+)]
+pub struct TaskActivationPublication {
+    /// The sole unclaimed in-progress fact allowed through this closed boundary.
+    transitioned_fact: TaskTransitioned,
+    /// Exact stream-version fence read by the activation command.
+    consistency_streams: [StreamId; 2],
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque activation token presents validation, inspection, then one-shot transfer in data-flow order"
+)]
+impl TaskActivationPublication {
+    /// Creates the closed activation token from one modeled command fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed command error when the modeled fact is not the exact
+    /// unclaimed activation on its required board/task consistency fence.
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the only command-local construction point validates the modeled activation fact before the closed transfer token is created"
+    )]
+    pub(crate) fn from_modeled_fact(
+        transitioned_fact: TaskTransitioned,
+        consistency_streams: [StreamId; 2],
+    ) -> Result<Self, command::TaskCommandError> {
+        let expected_streams = command::acceptance_consistency_streams(&transitioned_fact.stem)?;
+        if transitioned_fact.stream_id != consistency_streams[0]
+            || expected_streams != consistency_streams
+            || transitioned_fact.status != TaskStatus::InProgress
+            || transitioned_fact.claim.is_some()
+        {
+            return Err(command::TaskCommandError::InvalidModeledTaskActivationPublication);
+        }
+        Ok(Self {
+            transitioned_fact,
+            consistency_streams,
+        })
+    }
+
+    /// Returns the sole unclaimed in-progress fact authorized for publication.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the opaque token exposes its modeled activation fact only for adapter-boundary inspection"
+    )]
+    pub const fn transitioned_fact(&self) -> &TaskTransitioned {
+        &self.transitioned_fact
+    }
+
+    /// Returns the exact board/task stream fence read by the command.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the fixed two-stream activation fence is clearest as a borrowed token accessor"
+    )]
+    pub const fn consistency_streams(&self) -> &[StreamId; 2] {
+        &self.consistency_streams
+    }
+
+    /// Transfers the closed activation event and exact stream fence to its adapter.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot adapter transfer preserves the modeled activation fact and its fence together"
+    )]
+    pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 2]) {
+        (
+            TaskEvent::TaskTransitioned(self.transitioned_fact),
+            self.consistency_streams,
+        )
+    }
+}
+
 /// The only publication input the initial native task-write slice may emit.
 ///
 /// This opaque token carries exactly one checked acceptance fact and the board

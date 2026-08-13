@@ -188,20 +188,24 @@ The shipped native task-query surface exposes `tiber tasks list [--status
 <status>]`, `show`, `search`, and `next`. Those queries replay the full task history into a
 separate `TaskBoardProjection`; that projection is a read model, never
 EventCore command authority. The write surface remains deliberately closed:
-`tiber tasks acceptance check <ref> <one-based-index>`, `tiber tasks subtask
-check <ref> <one-based-occurrence>`, and `tiber tasks transition <ref> done`.
-Each is a command-specific pure fold that consumes only an opaque modeled
+`tiber tasks start <ref>`, `tiber tasks acceptance check <ref>
+<one-based-index>`, `tiber tasks subtask check <ref> <one-based-occurrence>`,
+and `tiber tasks transition <ref> done`. Each is a command-specific pure fold
+that consumes only an opaque modeled
 publication token at the signed Git adapter; no adapter exposes a generic
-append. The occurrence check carries the exact current subtask at its immutable
-position, so duplicate legacy IDs cannot redirect it. The transition grammar
-accepts only `done`, therefore no arbitrary lifecycle transition enters the
-native surface. When retained lifecycle state is already `Done` but strict
+append. `start` can activate only the current eligible next task when no other
+task is active; an exact retry of that sole active task is a no-op. It is a
+bounded activation operation rather than generic lifecycle mutation or a
+scheduler. The occurrence check carries the exact current subtask at its
+immutable position, so duplicate legacy IDs cannot redirect it. The transition
+grammar accepts only `done`, therefore no arbitrary lifecycle transition enters
+the native surface. When retained lifecycle state is already `Done` but strict
 board order still names the task, the command publishes only the closed order
 repair and never re-emits a transition. Every publication declares only the
-board and addressed task stream as its consistency boundary. Publication reconciliation, workflow core
-and service adapters, scheduling, and TUI task integration remain subsequent
-vertical slices. Internal actions never call legacy MCP or shell back into the
-`tiber` executable.
+board and addressed task stream as its consistency boundary. Publication
+reconciliation, workflow core and service adapters, scheduling, and TUI task
+integration remain subsequent vertical slices. Internal actions never call
+legacy MCP or shell back into the `tiber` executable.
 
 The same closed publication boundary admits one exceptional history-repair
 fact: `tiber tasks subtask repair-duplicate <ref> <occurrence> <replacement-id>`.
