@@ -195,6 +195,15 @@ reconciliation, workflow core and service adapters, scheduling, and TUI task
 integration remain subsequent vertical slices. Internal actions never call MCP
 or shell back into the `tiber` executable.
 
+The same closed publication boundary admits one exceptional history-repair
+fact: `tiber tasks subtask repair-duplicate <ref> <occurrence> <replacement-id>`.
+It is not generic subtask mutation. Its pure decision captures the exact
+one-based occurrence, complete current subtask preimage, replacement identity,
+and board/task consistency boundary, then publishes only a named
+`TaskSubtaskIdCorrected` fact. Replay verifies that preimage and changes only
+the selected occurrence, preserving all historical bytes and leaving any
+prerequisite references intact.
+
 ## Third-party MCP
 
 The harness-owned client uses a pinned official Rust RMCP dependency. Initial

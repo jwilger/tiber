@@ -372,6 +372,47 @@ pub struct TaskSubtaskChecked {
     pub checked: bool,
 }
 
+/// Durable source-event payload for correcting one malformed legacy subtask identity.
+///
+/// The insertion position and complete preimage deliberately make this a
+/// one-occurrence correction rather than another ambiguous mutation by ID.
+/// Existing task history remains immutable; this fact is appended only after
+/// the command has fenced the board and task streams at one authority revision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct TaskSubtaskIdCorrected {
+    /// Stream receiving the correction fact.
+    pub stream_id: StreamId,
+    /// Task owning the corrected subtask occurrence.
+    pub stem: TaskId,
+    /// Zero-based immutable insertion position of the corrected occurrence.
+    pub index: usize,
+    /// Exact current occurrence required before applying the correction.
+    pub expected: Subtask,
+    /// Replacement identity for the one corrected occurrence.
+    pub replacement_id: String,
+}
+
+impl TaskSubtaskIdCorrected {
+    /// Creates one named, preconditioned duplicate-subtask identity correction.
+    #[must_use]
+    pub fn new(
+        stream_id: StreamId,
+        stem: TaskId,
+        index: usize,
+        expected: Subtask,
+        replacement_id: String,
+    ) -> Self {
+        Self {
+            stream_id,
+            stem,
+            index,
+            expected,
+            replacement_id,
+        }
+    }
+}
+
 /// Durable source-event payload for editable task details.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -549,6 +590,8 @@ pub enum TaskEvent {
     TaskSubtaskAdded(TaskSubtaskAdded),
     /// A subtask check state changed.
     TaskSubtaskChecked(TaskSubtaskChecked),
+    /// A malformed legacy subtask identity was corrected at one exact occurrence.
+    TaskSubtaskIdCorrected(TaskSubtaskIdCorrected),
     /// Editable task details changed.
     TaskDetailsUpdated(TaskDetailsUpdated),
     /// Historical claim-only fact retained for event replay.
@@ -593,6 +636,7 @@ impl TaskEvent {
             | Self::TaskLinksChanged(TaskLinksChanged { stream_id, .. })
             | Self::TaskSubtaskAdded(TaskSubtaskAdded { stream_id, .. })
             | Self::TaskSubtaskChecked(TaskSubtaskChecked { stream_id, .. })
+            | Self::TaskSubtaskIdCorrected(TaskSubtaskIdCorrected { stream_id, .. })
             | Self::TaskDetailsUpdated(TaskDetailsUpdated { stream_id, .. })
             | Self::HistoricalTaskClaimChanged(HistoricalTaskClaimChanged { stream_id, .. })
             | Self::TaskPullRequestChanged(TaskPullRequestChanged { stream_id, .. })

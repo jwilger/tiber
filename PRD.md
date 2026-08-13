@@ -22,6 +22,13 @@ and uses an exact-base lease to publish to the fixed authority ref. Other task
 mutations, publication reconciliation, and workflow scheduling remain
 subsequent native slices.
 
+The native task surface also has one explicit legacy-data repair, not a general
+write: `subtask repair-duplicate`. It requires a one-based occurrence and a new
+identity, folds the exact current subtask as a precondition, and appends a typed
+correction fact through the same board/task lease. This lets an owner repair a
+malformed duplicate subtask ID without rewriting signed history or ambiguously
+changing the first matching row.
+
 ## Problem
 
 An inference client cannot safely serve as the authority for durable task,

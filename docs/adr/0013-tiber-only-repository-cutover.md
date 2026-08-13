@@ -42,6 +42,11 @@ surface provides read-only queries over preserved EventCore history and one
 narrow signed acceptance-check mutation; broader task writes, reconciliation,
 and workflow scheduling remain follow-on work, not compatibility surfaces.
 
+One bounded exception corrects malformed retained task metadata: native Tasks
+may append a named, preconditioned duplicate-subtask identity correction. It
+targets a specific occurrence and never edits historical transactions or
+restores generic legacy task mutation.
+
 ## Consequences
 
 - Existing marketplace installations remain end-of-life snapshots on

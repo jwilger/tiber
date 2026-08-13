@@ -11,9 +11,11 @@ use tiber_store_git::publication::{TiberEventPublisher, TiberPublicationError};
 use tiber_store_git::{
     GitStoreError, TiberEventStore, TiberRevision, TransactionEventPage, TransactionHistoryError,
 };
-use tiber_tasks_core::{Task, TaskEvent, TaskId, TaskStatus};
+use tiber_tasks_core::{Subtask, Task, TaskEvent, TaskId, TaskStatus};
 use tiber_tasks_service::command::{
-    AcceptanceIndex, CheckAcceptance, TaskCommandError, decide_check_acceptance,
+    AcceptanceIndex, CheckAcceptance, RepairDuplicateSubtaskId, SubtaskOccurrence,
+    SubtaskReplacementId, TaskCommandError, decide_check_acceptance,
+    decide_repair_duplicate_subtask_id,
 };
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -48,6 +50,11 @@ pub(super) fn run(
         TaskCommand::AcceptanceCheck { reference, index } => {
             check_acceptance(repository, &reference, index)
         }
+        TaskCommand::SubtaskRepairDuplicate {
+            reference,
+            occurrence,
+            replacement_id,
+        } => repair_duplicate_subtask(repository, &reference, occurrence, replacement_id),
         TaskCommand::List(status) => {
             let projection = load_projection(repository)?;
             Ok(list_tasks(&projection, status))
@@ -67,7 +74,7 @@ pub(super) fn run(
     }
 }
 
-/// A completely parsed native read-only task query.
+/// A completely parsed native task operation.
 enum TaskCommand {
     /// Sets one current acceptance item checked through the signed native write boundary.
     AcceptanceCheck {
@@ -75,6 +82,15 @@ enum TaskCommand {
         reference: TaskReference,
         /// The parsed human-facing one-based acceptance position.
         index: AcceptanceIndex,
+    },
+    /// Corrects one exact malformed duplicate subtask identity through the signed native write boundary.
+    SubtaskRepairDuplicate {
+        /// The parsed task reference resolved after canonical history is read.
+        reference: TaskReference,
+        /// The parsed human-facing one-based immutable subtask occurrence.
+        occurrence: SubtaskOccurrence,
+        /// The validated replacement identity for that exact occurrence.
+        replacement_id: SubtaskReplacementId,
     },
     /// Lists all current tasks, optionally restricted to one status.
     List(Option<TaskStatus>),
@@ -158,7 +174,11 @@ impl TaskCliError {
                 | Self::InvalidArgumentEncoding
                 | Self::InvalidStatus
                 | Self::EmptySearchQuery
-                | Self::Command(TaskCommandError::InvalidAcceptanceIndex)
+                | Self::Command(
+                    TaskCommandError::InvalidAcceptanceIndex
+                        | TaskCommandError::InvalidSubtaskOccurrence
+                        | TaskCommandError::InvalidSubtaskReplacementId
+                )
                 | Self::Projection(TaskProjectionError::InvalidTaskReference)
         )
     }
@@ -185,8 +205,14 @@ impl fmt::Display for TaskCliError {
             Self::Command(TaskCommandError::InvalidAcceptanceIndex) => {
                 "acceptance index must be a positive integer"
             }
+            Self::Command(TaskCommandError::InvalidSubtaskOccurrence) => {
+                "subtask occurrence must be a positive integer"
+            }
+            Self::Command(TaskCommandError::InvalidSubtaskReplacementId) => {
+                "replacement subtask ID must be non-empty and contain no control characters"
+            }
             Self::Command(_) => {
-                "the authoritative Tiber task history could not decide that acceptance change"
+                "the authoritative Tiber task history could not decide that task change"
             }
             Self::Publication(_) => "the authoritative Tiber task update could not be published",
             Self::Runtime(_) => "the local task runtime could not be started",
@@ -253,6 +279,20 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
                 Ok(TaskCommand::AcceptanceCheck {
                     reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
                     index: AcceptanceIndex::parse_one_based(index)
+                        .map_err(TaskCliError::Command)?,
+                })
+            }
+            _ => Err(TaskCliError::InvalidArguments),
+        },
+        "subtask" => match arguments {
+            [operation, reference, occurrence, replacement_id]
+                if operation == "repair-duplicate" =>
+            {
+                Ok(TaskCommand::SubtaskRepairDuplicate {
+                    reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+                    occurrence: SubtaskOccurrence::parse_one_based(occurrence)
+                        .map_err(TaskCliError::Command)?,
+                    replacement_id: SubtaskReplacementId::parse(replacement_id)
                         .map_err(TaskCliError::Command)?,
                 })
             }
@@ -360,6 +400,104 @@ fn check_acceptance(
         task.as_str(),
         outcome.revision().as_str()
     ))
+}
+
+/// Decides and publishes one exact duplicate-subtask identity correction through the native signed boundary.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the command sequences canonical read, exact preimage selection, narrow pure decision, fixed revision fence, and one bounded append with typed recovery"
+)]
+fn repair_duplicate_subtask(
+    repository: &Path,
+    reference: &TaskReference,
+    occurrence: SubtaskOccurrence,
+    replacement_id: SubtaskReplacementId,
+) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let expected =
+        corrected_subtask_preimage(history.events(), &task, occurrence, replacement_id.as_str())
+            .or_else(|| {
+                projection
+                    .task(&task)
+                    .and_then(|current| current.subtasks.get(occurrence.zero_based_value()))
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                TaskCliError::Command(TaskCommandError::SubtaskOccurrenceMissing {
+                    task: task.clone(),
+                    occurrence,
+                })
+            })?;
+    let request = RepairDuplicateSubtaskId::new(task.clone(), occurrence, expected, replacement_id);
+    let displayed_occurrence = occurrence.zero_based_value().saturating_add(1);
+    let Some(publication) = decide_repair_duplicate_subtask_id(history.events(), &request)
+        .map_err(TaskCliError::Command)?
+    else {
+        return Ok(format!(
+            "duplicate subtask {} already corrected for {}\n",
+            displayed_occurrence,
+            task.as_str()
+        ));
+    };
+    let old_id = publication.corrected_fact().expected.id.clone();
+    let new_id = publication.corrected_fact().replacement_id.clone();
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_subtask_id_correction(publication))
+        .map_err(TaskCliError::Publication)?;
+    Ok(format!(
+        "corrected duplicate subtask {} for {}: {} -> {} at {}\n",
+        displayed_occurrence,
+        task.as_str(),
+        old_id,
+        new_id,
+        outcome.revision().as_str()
+    ))
+}
+
+/// Finds the original preimage for an already-published exact correction retry.
+///
+/// The command state revalidates this historical preimage and current replay
+/// before returning its idempotent no-op. This lookup only lets a retry name
+/// the same prior intent after its visible occurrence has already become the
+/// replacement ID; it cannot bypass the pure command's durable checks. A task
+/// removal or creation bounds the lookup to the current task lifetime.
+#[expect(
+    clippy::implicit_return,
+    clippy::pattern_type_mismatch,
+    clippy::single_call_fn,
+    clippy::wildcard_enum_match_arm,
+    reason = "the retry-only lookup keeps the exact event-pattern preimage selection isolated from the CLI effect boundary and deliberately ignores unrelated future durable facts"
+)]
+fn corrected_subtask_preimage(
+    events: &[TaskEvent],
+    task: &TaskId,
+    occurrence: SubtaskOccurrence,
+    replacement_id: &str,
+) -> Option<Subtask> {
+    for event in events.iter().rev() {
+        match event {
+            TaskEvent::TaskSubtaskIdCorrected(corrected)
+                if &corrected.stem == task
+                    && corrected.index == occurrence.zero_based_value()
+                    && corrected.replacement_id == replacement_id =>
+            {
+                return Some(corrected.expected.clone());
+            }
+            TaskEvent::HistoricalTaskRemoved(removed) if &removed.stem == task => return None,
+            TaskEvent::TaskCreated(created) if &created.task.stem == task => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 #[expect(
@@ -510,6 +648,23 @@ fn render_task(task: &Task) -> String {
             output.push_str(if item.checked { "x" } else { " " });
             output.push_str("] ");
             output.push_str(&item.text);
+            output.push('\n');
+        }
+    }
+    if !task.subtasks.is_empty() {
+        output.push_str("subtasks:\n");
+        for (index, subtask) in task.subtasks.iter().enumerate() {
+            output.push_str(&index.saturating_add(1).to_string());
+            output.push_str(". [");
+            output.push_str(if subtask.checked { "x" } else { " " });
+            output.push_str("] ");
+            output.push_str(&subtask.id);
+            output.push(' ');
+            output.push_str(&subtask.title);
+            if !subtask.after.is_empty() {
+                output.push_str(" \u{2014} after: ");
+                append_joined(&mut output, subtask.after.iter().map(String::as_str));
+            }
             output.push('\n');
         }
     }

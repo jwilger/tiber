@@ -15,7 +15,7 @@ use std::{
 use eventcore_fs::{FileEventStore, FsConfig, FsyncPolicy};
 use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamWrites};
 use tempfile::TempDir;
-use tiber_tasks_service::AcceptanceCheckPublication;
+use tiber_tasks_service::{AcceptanceCheckPublication, SubtaskIdCorrectionPublication};
 
 use crate::{
     EVENT_STORE_DIRECTORY, EVENTS_DIRECTORY, GitOperation, GitStoreError, ResolvedAuthority,
@@ -261,6 +261,31 @@ impl TiberEventPublisher {
     pub async fn publish_acceptance_check(
         &mut self,
         publication: AcceptanceCheckPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, consistency_streams) = publication.into_event_and_consistency_streams();
+        self.append(&consistency_streams, vec![event]).await
+    }
+
+    /// Publishes the only modeled fact accepted by the duplicate-subtask repair boundary.
+    ///
+    /// The opaque service token can represent only a preconditioned correction
+    /// for one exact subtask occurrence and the board plus addressed-task
+    /// streams whose versions fenced that pure decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed conflict without overwriting authority when a concurrent
+    /// writer advances the fixed branch. Returns [`TiberPublicationError::Ambiguous`]
+    /// if a transport interruption prevents conclusive publication confirmation;
+    /// callers must reload the authority before retrying their idempotent intent.
+    #[expect(
+        clippy::implicit_return,
+        reason = "the closed correction boundary retains its exact event, optimistic staging, signing, and publication steps"
+    )]
+    #[inline]
+    pub async fn publish_subtask_id_correction(
+        &mut self,
+        publication: SubtaskIdCorrectionPublication,
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (event, consistency_streams) = publication.into_event_and_consistency_streams();
         self.append(&consistency_streams, vec![event]).await

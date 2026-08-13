@@ -159,6 +159,7 @@ mod tests {
             TaskEvent::TaskPullRequestChanged(_) => "task_pull_request_changed",
             TaskEvent::TaskSubtaskAdded(_) => "task_subtask_added",
             TaskEvent::TaskSubtaskChecked(_) => "task_subtask_checked",
+            TaskEvent::TaskSubtaskIdCorrected(_) => "task_subtask_id_corrected",
             TaskEvent::TaskTransitioned(_) => "task_transitioned",
             TaskEvent::TaskValidationRepaired(_) => "task_validation_repaired",
             TaskEvent::TasksClosedFromCommitTrailers(_) => "tasks_closed_from_commit_trailers",

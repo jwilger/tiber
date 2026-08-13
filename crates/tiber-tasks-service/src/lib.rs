@@ -19,7 +19,7 @@ use eventcore_types::StreamId;
 use tiber_tasks_core::{
     Task, TaskAcceptanceAdded, TaskAcceptanceChecked, TaskAcceptanceRemoved, TaskCreated,
     TaskDetailsUpdated, TaskEvent, TaskId, TaskLinksChanged, TaskOrder, TaskPullRequestChanged,
-    TaskStatus, TaskSubtaskAdded, TaskSubtaskChecked, TaskTransitioned,
+    TaskStatus, TaskSubtaskAdded, TaskSubtaskChecked, TaskSubtaskIdCorrected, TaskTransitioned,
 };
 
 /// The only publication input the initial native task-write slice may emit.
@@ -105,6 +105,97 @@ impl AcceptanceCheckPublication {
     pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 2]) {
         (
             TaskEvent::TaskAcceptanceChecked(self.checked_fact),
+            self.consistency_streams,
+        )
+    }
+}
+
+/// The only publication input for correcting one duplicate legacy subtask identity.
+///
+/// This opaque token carries exactly one preconditioned correction fact and
+/// the board plus addressed-task streams whose versions fenced its pure command
+/// decision. It does not authorize general task mutation.
+#[derive(Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque correction token fields follow fact-then-fence transfer flow rather than alphabetical order"
+)]
+pub struct SubtaskIdCorrectionPublication {
+    /// The sole correction fact allowed through this closed boundary.
+    corrected_fact: TaskSubtaskIdCorrected,
+    /// Exact stream-version fence read by the correction command.
+    consistency_streams: [StreamId; 2],
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque correction token presents validation, inspection, then one-shot transfer in data-flow order"
+)]
+impl SubtaskIdCorrectionPublication {
+    /// Creates a closed correction token from one modeled command fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed command error when the modeled fact is not an exact
+    /// board-side correction with the required board/task consistency fence.
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the only command-local construction point validates the modeled fact before the closed transfer token is created"
+    )]
+    pub(crate) fn from_modeled_fact(
+        corrected_fact: TaskSubtaskIdCorrected,
+        consistency_streams: [StreamId; 2],
+    ) -> Result<Self, command::TaskCommandError> {
+        let expected_streams = command::acceptance_consistency_streams(&corrected_fact.stem)?;
+        if corrected_fact.stream_id != consistency_streams[0]
+            || expected_streams != consistency_streams
+            || corrected_fact.expected.id == corrected_fact.replacement_id
+            || corrected_fact.replacement_id.trim().is_empty()
+        {
+            return Err(command::TaskCommandError::InvalidModeledSubtaskCorrectionPublication);
+        }
+        Ok(Self {
+            corrected_fact,
+            consistency_streams,
+        })
+    }
+
+    /// Returns the sole preconditioned correction fact authorized for publication.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the opaque token exposes its modeled correction only for adapter-boundary inspection"
+    )]
+    pub const fn corrected_fact(&self) -> &TaskSubtaskIdCorrected {
+        &self.corrected_fact
+    }
+
+    /// Returns the exact board/task stream fence read by the correction command.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the fixed two-stream correction fence is clearest as a borrowed token accessor"
+    )]
+    pub const fn consistency_streams(&self) -> &[StreamId; 2] {
+        &self.consistency_streams
+    }
+
+    /// Transfers the closed correction event and exact stream fence to the publication adapter.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot adapter transfer preserves the modeled correction and its fence together"
+    )]
+    pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 2]) {
+        (
+            TaskEvent::TaskSubtaskIdCorrected(self.corrected_fact),
             self.consistency_streams,
         )
     }
@@ -240,6 +331,34 @@ pub enum TaskProjectionError {
         /// The absent subtask identity.
         subtask: String,
     },
+    /// A correction referenced an absent immutable subtask occurrence.
+    SubtaskOccurrenceMissing {
+        /// The owning task identity.
+        task: TaskId,
+        /// The zero-based absent occurrence position.
+        index: usize,
+    },
+    /// A correction's recorded preimage did not match the current occurrence.
+    SubtaskCorrectionPreimageMismatch {
+        /// The owning task identity.
+        task: TaskId,
+        /// The zero-based corrected occurrence position.
+        index: usize,
+    },
+    /// A correction attempted to rename an identity that was not duplicated.
+    SubtaskCorrectionIdNotDuplicate {
+        /// The owning task identity.
+        task: TaskId,
+        /// The zero-based corrected occurrence position.
+        index: usize,
+    },
+    /// A correction would introduce another duplicate subtask identity.
+    SubtaskCorrectionDuplicateId {
+        /// The owning task identity.
+        task: TaskId,
+        /// The already-present replacement identity.
+        subtask: String,
+    },
     /// An acceptance mutation referenced an absent list position.
     AcceptanceItemMissing {
         /// The owning task identity.
@@ -273,6 +392,16 @@ impl TaskProjectionError {
             Self::DuplicateTaskCreation { .. } => "tasks_projection_duplicate_task_creation",
             Self::TaskMissing { .. } => "tasks_projection_task_missing",
             Self::SubtaskMissing { .. } => "tasks_projection_subtask_missing",
+            Self::SubtaskOccurrenceMissing { .. } => "tasks_projection_subtask_occurrence_missing",
+            Self::SubtaskCorrectionPreimageMismatch { .. } => {
+                "tasks_projection_subtask_correction_preimage_mismatch"
+            }
+            Self::SubtaskCorrectionIdNotDuplicate { .. } => {
+                "tasks_projection_subtask_correction_id_not_duplicate"
+            }
+            Self::SubtaskCorrectionDuplicateId { .. } => {
+                "tasks_projection_subtask_correction_duplicate_id"
+            }
             Self::AcceptanceItemMissing { .. } => "tasks_projection_acceptance_item_missing",
             Self::MultipleActiveTasks { .. } => "tasks_projection_multiple_active_tasks",
             Self::UnsupportedTaskEvent => "tasks_projection_unsupported_task_event",
@@ -369,6 +498,9 @@ impl TaskBoardProjection {
             TaskEvent::TaskLinksChanged(changed) => self.apply_links_changed(changed)?,
             TaskEvent::TaskSubtaskAdded(added) => self.apply_subtask_added(added)?,
             TaskEvent::TaskSubtaskChecked(checked) => self.apply_subtask_checked(checked)?,
+            TaskEvent::TaskSubtaskIdCorrected(corrected) => {
+                self.apply_subtask_id_corrected(corrected)?;
+            }
             TaskEvent::TaskDetailsUpdated(updated) => self.apply_details_updated(updated)?,
             TaskEvent::HistoricalTaskClaimChanged(changed) => {
                 self.task_mut(&changed.stem)?
@@ -683,6 +815,58 @@ impl TaskBoardProjection {
                 subtask: checked.subtask_id.clone(),
             })?;
         subtask.checked = checked.checked;
+        Ok(())
+    }
+
+    /// Corrects precisely one malformed legacy subtask identity after checking its preimage.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the narrow append-only correction validates one indexed preimage and preserves typed projection failures"
+    )]
+    fn apply_subtask_id_corrected(
+        &mut self,
+        corrected: &TaskSubtaskIdCorrected,
+    ) -> Result<(), TaskProjectionError> {
+        let task = self.task_mut(&corrected.stem)?;
+        let current = task.subtasks.get(corrected.index).ok_or_else(|| {
+            TaskProjectionError::SubtaskOccurrenceMissing {
+                task: corrected.stem.clone(),
+                index: corrected.index,
+            }
+        })?;
+        if current != &corrected.expected {
+            return Err(TaskProjectionError::SubtaskCorrectionPreimageMismatch {
+                task: corrected.stem.clone(),
+                index: corrected.index,
+            });
+        }
+        let duplicate_count = task
+            .subtasks
+            .iter()
+            .filter(|subtask| subtask.id == corrected.expected.id)
+            .count();
+        if duplicate_count < 2 {
+            return Err(TaskProjectionError::SubtaskCorrectionIdNotDuplicate {
+                task: corrected.stem.clone(),
+                index: corrected.index,
+            });
+        }
+        if task.subtasks.iter().enumerate().any(|(index, subtask)| {
+            index != corrected.index && subtask.id == corrected.replacement_id
+        }) {
+            return Err(TaskProjectionError::SubtaskCorrectionDuplicateId {
+                task: corrected.stem.clone(),
+                subtask: corrected.replacement_id.clone(),
+            });
+        }
+        let Some(target) = task.subtasks.get_mut(corrected.index) else {
+            return Err(TaskProjectionError::SubtaskOccurrenceMissing {
+                task: corrected.stem.clone(),
+                index: corrected.index,
+            });
+        };
+        target.id.clone_from(&corrected.replacement_id);
         Ok(())
     }
 

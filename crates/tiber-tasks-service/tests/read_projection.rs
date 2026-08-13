@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    use core::mem::size_of;
+
     use serde_json::{Value, json};
     use tiber_tasks_core::{TaskEvent, TaskId, TaskStatus};
     use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError};
@@ -183,6 +185,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![open],
             "the default board view is open-only even when terminal transitions follow its latest order fact"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the malformed durable correction scenario uses a direct public replay error assertion"
+    )]
+    fn rejects_a_correction_that_would_rename_a_unique_subtask_identity() {
+        let id = "20260810-a111-duplicate-correction-fence";
+        let history = TaskHistory::from_ordered_events(vec![
+            created(id, "Duplicate correction fence", "backlog"),
+            event(json!({
+                "event": "task_subtask_added", "stream_id": "tiber:board", "stem": id,
+                "subtask": {"after": [], "checked": false, "id": "s1", "title": "first"}
+            })),
+            event(json!({
+                "event": "task_subtask_added", "stream_id": "tiber:board", "stem": id,
+                "subtask": {"after": [], "checked": false, "id": "s2", "title": "unique"}
+            })),
+            event(json!({
+                "event": "task_subtask_id_corrected", "stream_id": "tiber:board", "stem": id,
+                "index": size_of::<u8>(),
+                "expected": {"after": [], "checked": false, "id": "s2", "title": "unique"},
+                "replacement_id": "s3"
+            })),
+        ]);
+
+        assert_eq!(
+            TaskBoardProjection::replay(&history)
+                .expect_err("a correction is valid only for a currently duplicated identity")
+                .code(),
+            "tasks_projection_subtask_correction_id_not_duplicate"
         );
     }
 

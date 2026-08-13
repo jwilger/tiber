@@ -35,6 +35,8 @@ const ISOLATED_CONFIG: &str = include_str!("../../../config/app-server.toml");
 const TUI_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Maximum observations applied before terminal input is polled again.
 const MAX_OBSERVATIONS_PER_FRAME: usize = 16;
+/// Complete grammar accepted after the `tiber tasks` command prefix.
+const TASKS_COMMAND_GRAMMAR: &str = "list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | acceptance check <ref> <one-based-index> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id>";
 #[expect(
     clippy::print_stderr,
     reason = "a command-line adapter intentionally writes its result and diagnostics"
@@ -474,7 +476,7 @@ fn tiber_codex_home() -> Option<PathBuf> {
 /// Prints the supported command grammar.
 fn usage() {
     eprintln!(
-        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <list [--status <backlog|in-progress|done|abandoned>]|show <ref>|search <query>|next>]"
+        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <{TASKS_COMMAND_GRAMMAR}>]"
     );
 }
 
@@ -484,9 +486,7 @@ fn usage() {
 )]
 /// Prints the supported native task grammar.
 fn tasks_usage() {
-    eprintln!(
-        "usage: tiber tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | acceptance check <ref> <one-based-index>>"
-    );
+    eprintln!("usage: tiber tasks <{TASKS_COMMAND_GRAMMAR}>");
 }
 
 #[cfg(test)]

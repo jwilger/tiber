@@ -52,6 +52,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::arbitrary_source_item_ordering,
+        reason = "the signed fixture helpers are arranged by shared base, distinct scenario, then public CLI behavior rather than alphabetically"
+    )]
     impl TaskFixture {
         #[expect(
             clippy::expect_used,
@@ -83,6 +87,152 @@ mod tests {
                 .append_events(writes)
                 .await
                 .expect("fixture acceptance fact should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            reason = "the duplicate-identity fixture deliberately fails fast while constructing the signed authority state exercised by the public repair command"
+        )]
+        async fn signed_duplicate_subtask_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(task_subtask_added(
+                    &board_stream,
+                    TASK_ID,
+                    "s1",
+                    "Bootstrap",
+                    &[],
+                ))
+                .expect("first fixture subtask should append")
+                .append(task_subtask_added(
+                    &board_stream,
+                    TASK_ID,
+                    "s2",
+                    "Authenticate",
+                    &["s1"],
+                ))
+                .expect("second fixture subtask should append")
+                .append(task_subtask_added(
+                    &board_stream,
+                    TASK_ID,
+                    "s3",
+                    "Present",
+                    &["s2"],
+                ))
+                .expect("third fixture subtask should append")
+                .append(task_subtask_added(
+                    &board_stream,
+                    TASK_ID,
+                    "s4",
+                    "Protect native review orchestration",
+                    &["s3"],
+                ))
+                .expect("first duplicate fixture subtask should append")
+                .append(task_subtask_added(
+                    &board_stream,
+                    TASK_ID,
+                    "s4",
+                    "Disable legacy eval execution",
+                    &["s4"],
+                ))
+                .expect("second duplicate fixture subtask should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture duplicate subtasks should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the recreated-task fixture deliberately retains a prior valid correction while making the current duplicate's complete preimage distinct"
+        )]
+        async fn signed_recreated_duplicate_subtask_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let task_stream = StreamId::try_new(format!("tiber:task:{TASK_ID}"))
+                .expect("fixture task stream should be valid");
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(
+                    task_stream.clone(),
+                    StreamVersion::new(PAGE_SPANNING_UPDATES + 1),
+                )
+                .expect("fixture task stream should register at its current version")
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(task_subtask_added(
+                    &board_stream,
+                    TASK_ID,
+                    "s4",
+                    "Original first duplicate",
+                    &[],
+                ))
+                .expect("first original duplicate should append")
+                .append(task_subtask_added(
+                    &board_stream,
+                    TASK_ID,
+                    "s4",
+                    "Original second duplicate",
+                    &[],
+                ))
+                .expect("second original duplicate should append")
+                .append(task_subtask_id_corrected(
+                    &board_stream,
+                    TASK_ID,
+                    1,
+                    "s4",
+                    "Original second duplicate",
+                    "s5",
+                ))
+                .expect("original correction should append")
+                .append(task_removed(&board_stream, TASK_ID))
+                .expect("historical task removal should append")
+                .append(event(json!({
+                    "event": "task_created",
+                    "stream_id": task_stream.as_ref(),
+                    "task": {
+                        "acceptance": [],
+                        "blocked_by": [],
+                        "blocks": [],
+                        "claim": null,
+                        "committed_at": "2026-08-13T00:00:00Z",
+                        "context": "Recreated task context.",
+                        "notes": [],
+                        "pr_mr_status": null,
+                        "pr_mr_url": null,
+                        "status": "backlog",
+                        "stem": TASK_ID,
+                        "subtasks": [
+                            {"after": [], "checked": false, "id": "s4", "title": "Recreated first duplicate"},
+                            {"after": [], "checked": false, "id": "s4", "title": "Recreated second duplicate"}
+                        ],
+                        "summary": "Recreated task summary.",
+                        "tags": ["native"],
+                        "title": "Recreated duplicate task"
+                    }
+                })))
+                .expect("recreated task should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture recreated task history should persist");
             drop(store);
             commit_signed_tiber_history(&fixture.repository);
             fixture
@@ -361,6 +511,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tasks_subtask_repair_corrects_only_the_selected_duplicate_occurrence() {
+        let fixture = TaskFixture::signed_duplicate_subtask_history().await;
+
+        let before = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&before);
+        let before_text = String::from_utf8_lossy(&before.stdout);
+        assert!(
+            before_text
+                .contains("4. [ ] s4 Protect native review orchestration \u{2014} after: s3")
+        );
+        assert!(before_text.contains("5. [ ] s4 Disable legacy eval execution \u{2014} after: s4"));
+
+        let repaired = fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "5", "s5"]);
+        assert_success(&repaired);
+        assert!(
+            String::from_utf8_lossy(&repaired.stdout).starts_with(&format!(
+                "corrected duplicate subtask 5 for {TASK_ID}: s4 -> s5 at "
+            ))
+        );
+
+        let repeated = fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "5", "s5"]);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("duplicate subtask 5 already corrected for {TASK_ID}\n")
+        );
+
+        let after = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&after);
+        let after_text = String::from_utf8_lossy(&after.stdout);
+        assert!(
+            after_text.contains("4. [ ] s4 Protect native review orchestration \u{2014} after: s3")
+        );
+        assert!(after_text.contains("5. [ ] s5 Disable legacy eval execution \u{2014} after: s4"));
+    }
+
+    #[tokio::test]
+    async fn tasks_subtask_repair_canonicalizes_a_whitespace_padded_replacement_for_retry() {
+        let fixture = TaskFixture::signed_duplicate_subtask_history().await;
+
+        let repaired =
+            fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "5", " s5 "]);
+        assert_success(&repaired);
+        assert!(
+            String::from_utf8_lossy(&repaired.stdout).starts_with(&format!(
+                "corrected duplicate subtask 5 for {TASK_ID}: s4 -> s5 at "
+            ))
+        );
+
+        let repeated =
+            fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "5", " s5 "]);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("duplicate subtask 5 already corrected for {TASK_ID}\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_subtask_repair_uses_only_the_current_task_lifetime_preimage() {
+        let fixture = TaskFixture::signed_recreated_duplicate_subtask_history().await;
+
+        let repaired = fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "2", "s5"]);
+
+        assert_success(&repaired);
+        assert!(
+            String::from_utf8_lossy(&repaired.stdout).starts_with(&format!(
+                "corrected duplicate subtask 2 for {TASK_ID}: s4 -> s5 at "
+            ))
+        );
+
+        let shown = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&shown);
+        let shown_text = String::from_utf8_lossy(&shown.stdout);
+        assert!(shown_text.contains("1. [ ] s4 Recreated first duplicate"));
+        assert!(shown_text.contains("2. [ ] s5 Recreated second duplicate"));
+    }
+
+    #[tokio::test]
+    async fn tasks_subtask_repair_failure_uses_neutral_task_change_language() {
+        let fixture = TaskFixture::signed_paged_history().await;
+
+        let output = fixture.tiber(&["tasks", "subtask", "repair-duplicate", TASK_ID, "1", "s5"]);
+
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.starts_with(
+            "tasks_command_subtask_occurrence_missing: the authoritative Tiber task history could not decide that task change"
+        ));
+        assert!(
+            !stderr.contains("acceptance change"),
+            "a duplicate-subtask error must not name the unrelated acceptance command: {stderr}"
+        );
+    }
+
+    #[tokio::test]
     async fn tasks_show_displays_ordered_acceptance_with_current_checked_state() {
         let fixture = TaskFixture::signed_acceptance_history().await;
 
@@ -576,6 +823,91 @@ mod tests {
         }
     }
 
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the sentinel fixture must fail fast while proving malformed duplicate-repair input cannot trigger a Git authority read"
+    )]
+    fn invalid_subtask_repair_replacement_ids_fail_before_any_git_command() {
+        let directory = TempDir::new().expect("fixture directory should be created");
+        let command_directory = directory.path().join("commands");
+        fs::create_dir_all(&command_directory)
+            .expect("sentinel command directory should be created");
+        let git_sentinel = command_directory.join("git");
+        fs::write(
+            &git_sentinel,
+            "#!/bin/sh\n: > \"$TIBER_GIT_SENTINEL\"\nexit 99\n",
+        )
+        .expect("sentinel Git command should be written");
+        let mut permissions = fs::metadata(&git_sentinel)
+            .expect("sentinel Git command metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&git_sentinel, permissions)
+            .expect("sentinel Git command should be executable");
+
+        for (index, replacement_id) in ["", "s5\u{0007}"].into_iter().enumerate() {
+            let marker = directory.path().join(format!("git-was-run-{index}"));
+            let usage_exit_code: i32 = 2;
+            let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+                .args([
+                    "tasks",
+                    "subtask",
+                    "repair-duplicate",
+                    TASK_ID,
+                    "5",
+                    replacement_id,
+                ])
+                .current_dir(directory.path())
+                .env("PATH", &command_directory)
+                .env("TIBER_GIT_SENTINEL", &marker)
+                .output()
+                .expect("Tiber CLI should execute");
+
+            assert_eq!(output.status.code(), Some(usage_exit_code));
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .starts_with("tasks_invalid_subtask_replacement_id:"),
+                "invalid replacement input must report the stable usage code"
+            );
+            assert!(
+                !marker.exists(),
+                "invalid replacement ID {replacement_id:?} must not invoke Git"
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the command shell must start successfully before its public usage output can be asserted"
+    )]
+    fn task_help_advertises_the_duplicate_repair_grammar() {
+        let directory = TempDir::new().expect("fixture directory should be created");
+        let usage_exit_code: i32 = 2;
+        let nested = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(["tasks", "subtask"])
+            .current_dir(directory.path())
+            .output()
+            .expect("Tiber CLI should execute");
+        assert_eq!(nested.status.code(), Some(usage_exit_code));
+        assert!(
+            String::from_utf8_lossy(&nested.stderr)
+                .contains("subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id>")
+        );
+
+        let top_level = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("unsupported")
+            .current_dir(directory.path())
+            .output()
+            .expect("Tiber CLI should execute");
+        assert_eq!(top_level.status.code(), Some(usage_exit_code));
+        assert!(
+            String::from_utf8_lossy(&top_level.stderr)
+                .contains("subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id>")
+        );
+    }
+
     #[expect(
         clippy::implicit_return,
         reason = "the static event fixture returns its decoded wire representation directly"
@@ -614,6 +946,63 @@ mod tests {
             "stream_id": stream_id.as_ref(),
             "stem": task_id,
             "item": {"checked": false, "text": text}
+        }))
+    }
+
+    #[expect(
+        clippy::implicit_return,
+        reason = "the duplicate-subtask fixture returns its decoded durable task fact directly"
+    )]
+    fn task_subtask_added(
+        stream_id: &StreamId,
+        task_id: &str,
+        id: &str,
+        title: &str,
+        after: &[&str],
+    ) -> TaskEvent {
+        event(json!({
+            "event": "task_subtask_added",
+            "stream_id": stream_id.as_ref(),
+            "stem": task_id,
+            "subtask": {"after": after, "checked": false, "id": id, "title": title}
+        }))
+    }
+
+    #[expect(
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the recreated-history fixture keeps its one signed-correction payload explicit and returns its decoded retained fact directly"
+    )]
+    fn task_subtask_id_corrected(
+        stream_id: &StreamId,
+        task_id: &str,
+        index: usize,
+        expected_id: &str,
+        expected_title: &str,
+        replacement_id: &str,
+    ) -> TaskEvent {
+        event(json!({
+            "event": "task_subtask_id_corrected",
+            "stream_id": stream_id.as_ref(),
+            "stem": task_id,
+            "index": index,
+            "expected": {
+                "after": [], "checked": false, "id": expected_id, "title": expected_title
+            },
+            "replacement_id": replacement_id
+        }))
+    }
+
+    #[expect(
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the recreated-history fixture returns its decoded task-removal fact directly"
+    )]
+    fn task_removed(stream_id: &StreamId, task_id: &str) -> TaskEvent {
+        event(json!({
+            "event": "task_removed",
+            "stream_id": stream_id.as_ref(),
+            "stem": task_id
         }))
     }
 

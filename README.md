@@ -24,6 +24,14 @@ head. A post-push ambiguity is reported rather than retried automatically. Other
 task mutations, publication reconciliation, and workflow scheduling remain later
 native slices.
 
+`tiber tasks show <task-ref>` renders subtasks by stable one-based occurrence,
+identity, status, title, and prerequisites. The narrowly scoped
+`tiber tasks subtask repair-duplicate <task-ref> <occurrence> <replacement-id>`
+corrects one malformed legacy duplicate identity only: it records the exact
+current subtask as a precondition, changes only that occurrence, and appends a
+new named fact rather than rewriting preserved history. It is not a general
+subtask-edit surface.
+
 `tiber tasks list` shows open work in board priority order with its status: one
 item may be `in-progress` while the remaining queued work is `backlog`.
 
@@ -60,6 +68,7 @@ cargo run --locked -p tiber -- tasks show <task-ref>
 cargo run --locked -p tiber -- tasks search "outcome terms"
 cargo run --locked -p tiber -- tasks next
 cargo run --locked -p tiber -- tasks acceptance check <task-ref> <one-based-index>
+cargo run --locked -p tiber -- tasks subtask repair-duplicate <task-ref> <one-based-occurrence> <replacement-id>
 ```
 
 Read [`AGENTS.md`](AGENTS.md) before making a change.
