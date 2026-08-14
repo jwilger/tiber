@@ -25,6 +25,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Enable user namespaces for Bubblewrap
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
