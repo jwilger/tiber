@@ -26,6 +26,14 @@ Fix warnings where practical. Permit only narrowly scoped
 `#[expect(clippy::lint_name, reason = "…")]`. Blanket
 `#[allow(clippy::…)]`, unreasoned suppression, and grandfathered fork source
 are prohibited. Workspace exceptions require an amendment to this ADR.
+The pinned RMCP 3.1.2 `ClientHandler` API leaves three required callbacks
+deprecated without a supported replacement: `create_message` for explicit
+sampling refusal, `list_roots` for Tiber-owned roots, and
+`on_logging_message` for bounded untrusted logging. Only those exact callback
+implementations in `tiber-rmcp-client` may carry item-level
+`#[allow(deprecated)]`, each with a nearby explanation naming this upstream
+constraint and the ADR-0008 behavior it preserves. No other Rust lint allow is
+authorized by this exception.
 `clippy.toml` may set deterministic thresholds but cannot disable categories;
 nursery lints are selected individually.
 

@@ -48,6 +48,26 @@ and CLI do not yet run this workflow—app-server tools remain inert—and
 scheduler, effect reconciliation, durable interactive sessions, and UI
 integration remain later slices.
 
+## External-tools boundary (S1)
+
+The workspace now contains a real but unconnected third-party MCP boundary.
+`tiber-external-tools-core` is a pure authority contract: all six policy layers
+and the configured `IntegrationId` must permit an opaque authorization for a
+tool list or call, Tiber-owned root declaration, optional resource list/read,
+or optional prompt list/get. Roots are disclosed only by the dedicated root
+authorization. Server metadata plus resource and prompt outputs stay bounded,
+untrusted data.
+
+`tiber-rmcp-client` pins RMCP 3.1.2 and interprets only bounded absolute
+direct-argv stdio or loopback Streamable HTTP sessions. It uses no proxy,
+redirect, automatic replay or reinitialization, or SSE resumption. Mutations
+carry an idempotency identity and an unknown result enters reconciliation;
+sampling, elicitation, MCP tasks, resource templates, subscriptions, cache
+directives, and interactive continuations are refused. This is not yet a
+workflow `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler, or runner
+integration, and it does not claim live external-service validation. Hindsight
+S2 and audit/integration S3 remain pending.
+
 `tiber tasks show <task-ref>` renders subtasks by stable one-based occurrence,
 identity, status, title, and prerequisites. The narrowly scoped
 `tiber tasks subtask repair-duplicate <task-ref> <occurrence> <replacement-id>`

@@ -53,6 +53,27 @@ correction fact through the same board/task lease. This lets an owner repair a
 malformed duplicate subtask ID without rewriting signed history or ambiguously
 changing the first matching row.
 
+### Current external-tools S1 boundary
+
+The external-tools boundary is now implemented but is not connected to a
+workflow. `tiber-external-tools-core` is pure: the global, workflow-mode,
+agent-role, session, assignment, and effect-policy grants all intersect and
+bind to one `IntegrationId` before they mint opaque authorizations for tool
+list/call, Tiber-owned root declaration, optional resource list/read, or
+optional prompt list/get. A root URI can leave the core only through the
+dedicated root authorization; server metadata and resource/prompt outputs stay
+bounded and untrusted.
+
+`tiber-rmcp-client` pins RMCP 3.1.2 and interprets only bounded absolute
+direct-argv stdio and loopback Streamable HTTP. It rejects proxies, redirects,
+automatic replay or reinitialization, SSE resumption, resource templates,
+subscriptions, cache directives, and interactive continuations. Mutating tool
+calls carry an idempotency identity and ambiguous outcomes enter
+reconciliation. Sampling, elicitation, and MCP tasks are explicit refusals.
+This slice adds no `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler,
+or runner integration and makes no live external-service validation claim.
+Hindsight S2 and audit/integration S3 remain pending.
+
 ## Problem
 
 An inference client cannot safely serve as the authority for durable task,

@@ -239,14 +239,38 @@ prerequisite references intact.
 
 ## Third-party MCP
 
-The harness-owned client uses a pinned official Rust RMCP dependency. Initial
-transports are absolute direct-argv stdio and localhost Streamable HTTP. It
-supports initialization, capability negotiation, tool listing/invocation,
-tool-list changes, progress, logging, cancellation, roots, and optional
-resources/prompts. Sampling, elicitation, and MCP tasks are excluded initially.
+`tiber-external-tools-core` is the pure authority boundary for configured
+third-party MCP integrations. A capability must pass the global, workflow-mode,
+agent-role, session, assignment, and effect-policy grants, all bound to the
+configured `IntegrationId`, before it mints an opaque authorization. The named
+operations are configured tool list/call, Tiber-owned root declaration,
+optional resource list/read, and optional prompt list/get. Roots remain hidden
+from ordinary tokens and can be disclosed only by the dedicated root
+authorization. Descriptions, schemas, server notifications, and resource or
+prompt outputs are bounded untrusted payloads; they never grant authority.
 
-Descriptions, schemas, and results are untrusted. Mutating calls require stable
-idempotency; unknown results enter reconciliation rather than automatic retry.
+`tiber-rmcp-client` is the imperative adapter pinned to RMCP 3.1.2. It admits
+only bounded absolute direct-argv stdio and loopback Streamable HTTP sessions,
+with capability negotiation, cancellation, tool/resource/prompt operations,
+roots, and bounded tool/resource/prompt/progress/log/change observations. Its
+HTTP client uses no proxy, redirects, automatic retry, automatic
+reinitialization, or SSE resume. Resource templates, subscriptions, cache
+directives, and input-required continuations are refused. Sampling,
+elicitation, and MCP tasks are explicit refusals.
+
+For bounded safety, the adapter rejects a negotiated protocol version at or
+above `ProtocolVersion::STANDARD_HEADERS` (`2026-07-28`) before an operational
+request. RMCP 3.1.2 standard-header mode retains tool schemas without a Tiber
+bound while constructing later request headers. This is a deliberate
+compatibility ceiling pending an upstream-safe bounded path, not a retry or a
+generic protocol change.
+
+Mutating calls require stable idempotency; an unknown result enters the
+configured read-only reconciliation operation rather than an automatic replay.
+This S1 boundary is not connected to workflow `TiberEffect`, EventCore, CLI,
+TUI, app-server, scheduler, or runner code, and no live external-service
+validation is claimed. Hindsight S2 and audit/integration S3 remain subsequent
+slices.
 
 ## Memory
 
