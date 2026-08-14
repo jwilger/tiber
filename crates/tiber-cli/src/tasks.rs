@@ -24,6 +24,13 @@ use tokio::runtime::Builder as RuntimeBuilder;
 /// Maximum number of durable facts fetched by one explicit `EventCore` page.
 const TASK_HISTORY_PAGE_SIZE: usize = 64;
 
+/// Complete grammar accepted after the `tiber tasks` command prefix.
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "the parent command shell consumes the one canonical task grammar without widening it to the crate"
+)]
+pub(super) const TASKS_COMMAND_GRAMMAR: &str = "list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
+
 /// The exact durable stream patterns that comprise native Tiber Tasks history.
 ///
 /// The preserved task history uses a closed union rather than every legacy
@@ -37,17 +44,26 @@ const TASK_HISTORY_STREAM_PATTERNS: [&str; 3] = ["tiber:repository", "tiber:boar
     clippy::question_mark_used,
     reason = "the imperative CLI boundary uses typed railway propagation and direct-parent visibility to avoid widening parsing and projection failures"
 )]
-/// Executes one native `tiber tasks` invocation against the current repository.
-pub(super) fn run(
-    repository: &Path,
+/// Parses one native `tiber tasks` invocation before repository state is accessed.
+pub(super) fn parse(
     arguments: impl Iterator<Item = OsString>,
-) -> Result<String, TaskCliError> {
+) -> Result<TaskCommand, TaskCliError> {
     let arguments = parse_arguments(arguments)?;
     let Some((subcommand, remaining)) = arguments.split_first() else {
         return Err(TaskCliError::MissingSubcommand);
     };
-    let command = parse_command(subcommand, remaining)?;
+    parse_command(subcommand, remaining)
+}
+
+/// Executes one parsed native `tiber tasks` invocation against the current repository.
+#[expect(
+    clippy::pub_with_shorthand,
+    clippy::question_mark_used,
+    reason = "the imperative execution boundary uses typed propagation and direct-parent visibility after parsing completes"
+)]
+pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, TaskCliError> {
     match command {
+        TaskCommand::Help => Ok(help_output()),
         TaskCommand::AcceptanceCheck { reference, index } => {
             check_acceptance(repository, &reference, index)
         }
@@ -82,7 +98,13 @@ pub(super) fn run(
 }
 
 /// A completely parsed native task operation.
-enum TaskCommand {
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "the parent command shell owns repository acquisition after this module's parse boundary"
+)]
+pub(super) enum TaskCommand {
+    /// Renders the supported native task grammar without accessing repository state.
+    Help,
     /// Activates one strict-next eligible backlog task through the signed native write boundary.
     Start {
         /// The parsed task reference resolved after canonical history is read.
@@ -124,6 +146,23 @@ enum TaskCommand {
     Search(String),
     /// Selects the task to continue under the one-active-task workflow policy.
     Next,
+}
+
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "the parent command shell renders the one repository-independent nested help response"
+)]
+/// Returns static task help when a parsed invocation needs no repository state.
+pub(super) fn context_free_output(command: &TaskCommand) -> Option<String> {
+    if matches!(command, TaskCommand::Help) {
+        return Some(help_output());
+    }
+    None
+}
+
+/// Renders the canonical native task grammar for explicit help.
+fn help_output() -> String {
+    format!("usage: tiber tasks <{TASKS_COMMAND_GRAMMAR}>\n")
 }
 
 /// Stable typed failures from the read-only task adapter.
@@ -417,6 +456,7 @@ impl Error for TaskCliError {
 /// Validates the nested command grammar before accessing any repository state.
 fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, TaskCliError> {
     match subcommand {
+        "-h" | "--help" if arguments.is_empty() => Ok(TaskCommand::Help),
         "start" => match arguments {
             [reference] => Ok(TaskCommand::Start {
                 reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,

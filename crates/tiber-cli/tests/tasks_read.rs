@@ -1622,6 +1622,104 @@ mod tests {
         assert!(String::from_utf8_lossy(&top_level.stderr).contains("transition <ref> done"));
     }
 
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the command shell must start successfully before its public help boundary can be asserted"
+    )]
+    fn explicit_help_flags_succeed_without_an_error_diagnostic() {
+        let directory = TempDir::new().expect("fixture directory should be created");
+        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
+        let tasks_usage = "usage: tiber tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
+        let usage_exit_code: i32 = 2;
+        let cases: &[(&[&str], &str)] = &[
+            (&["--help"], root_usage),
+            (&["-h"], root_usage),
+            (&["tasks", "--help"], tasks_usage),
+            (&["tasks", "-h"], tasks_usage),
+        ];
+
+        for &(arguments, expected_stdout) in cases {
+            let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+                .args(arguments)
+                .current_dir(directory.path())
+                .output()
+                .expect("Tiber CLI should execute");
+
+            assert!(
+                output.status.success(),
+                "explicit help must be successful for {arguments:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).is_empty(),
+                "explicit help must not emit an error diagnostic for {arguments:?}"
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                stdout, *expected_stdout,
+                "unexpected help for {arguments:?}"
+            );
+        }
+
+        let invalid_cases: &[(&[&str], &str)] = &[
+            (
+                &["--help", "unexpected"],
+                "explicit help accepts no further arguments\nusage: tiber [",
+            ),
+            (
+                &["tasks", "--help", "unexpected"],
+                "tiber_tasks_unknown_subcommand: ",
+            ),
+            (
+                &["tasks", "-h", "unexpected"],
+                "tiber_tasks_unknown_subcommand: ",
+            ),
+        ];
+        for &(arguments, expected_stderr_prefix) in invalid_cases {
+            let invalid = Command::new(env!("CARGO_BIN_EXE_tiber"))
+                .args(arguments)
+                .current_dir(directory.path())
+                .output()
+                .expect("Tiber CLI should execute");
+            assert_eq!(invalid.status.code(), Some(usage_exit_code));
+            assert!(String::from_utf8_lossy(&invalid.stdout).is_empty());
+            assert!(
+                String::from_utf8_lossy(&invalid.stderr).starts_with(expected_stderr_prefix),
+                "unexpected invalid-help diagnostic for {arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the process-level fixture must fail fast if its deliberately removed working directory cannot be prepared"
+    )]
+    fn nested_help_does_not_require_a_resolvable_current_directory() {
+        let directory = TempDir::new().expect("fixture directory should be created");
+        let removed_current_directory = directory.path().join("removed-current-directory");
+        fs::create_dir_all(&removed_current_directory)
+            .expect("removed-current-directory fixture should be created");
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                "cd \"$1\" && rmdir \"$1\" && exec \"$2\" tasks --help",
+                "tiber-help-fixture",
+            ])
+            .arg(&removed_current_directory)
+            .arg(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(directory.path())
+            .output()
+            .expect("Tiber CLI should execute from its removed current directory");
+
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "usage: tiber tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
+        );
+    }
+
     #[expect(
         clippy::implicit_return,
         reason = "the static event fixture returns its decoded wire representation directly"

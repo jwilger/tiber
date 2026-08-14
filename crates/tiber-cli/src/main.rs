@@ -35,8 +35,6 @@ const ISOLATED_CONFIG: &str = include_str!("../../../config/app-server.toml");
 const TUI_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Maximum observations applied before terminal input is polled again.
 const MAX_OBSERVATIONS_PER_FRAME: usize = 16;
-/// Complete grammar accepted after the `tiber tasks` command prefix.
-const TASKS_COMMAND_GRAMMAR: &str = "list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
 #[expect(
     clippy::print_stderr,
     reason = "a command-line adapter intentionally writes its result and diagnostics"
@@ -53,6 +51,14 @@ fn main() {
         "auth" => run_auth(arguments),
         "converse" => run_conversation(arguments),
         "tasks" => run_tasks(arguments),
+        "-h" | "--help" => {
+            if arguments.next().is_some() {
+                eprintln!("explicit help accepts no further arguments");
+                usage();
+                process::exit(2);
+            }
+            print_help();
+        }
         _ => {
             eprintln!("unknown command: {}", command.to_string_lossy());
             usage();
@@ -68,21 +74,36 @@ fn main() {
 )]
 /// Runs one native task query or narrow signed task mutation against the current repository.
 fn run_tasks(arguments: impl Iterator<Item = std::ffi::OsString>) {
+    let command = match tasks::parse(arguments) {
+        Ok(command) => command,
+        Err(error) => exit_for_task_error(&error),
+    };
+    if let Some(output) = tasks::context_free_output(&command) {
+        print!("{output}");
+        return;
+    }
     let repository = env::current_dir().unwrap_or_else(|_error| {
         eprintln!("tiber_tasks_repository_unavailable: current directory could not be read");
         process::exit(1);
     });
-    match tasks::run(&repository, arguments) {
+    match tasks::run(&repository, command) {
         Ok(output) => print!("{output}"),
-        Err(error) => {
-            eprintln!("{}: {error}", error.code());
-            if error.is_usage_error() {
-                tasks_usage();
-                process::exit(2);
-            }
-            process::exit(1);
-        }
+        Err(error) => exit_for_task_error(&error),
     }
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "the command shell renders stable task diagnostics before its terminal exit status"
+)]
+/// Renders one task failure and terminates with its stable command-line status.
+fn exit_for_task_error(error: &tasks::TaskCliError) -> ! {
+    eprintln!("{}: {error}", error.code());
+    if error.is_usage_error() {
+        tasks_usage();
+        process::exit(2);
+    }
+    process::exit(1);
 }
 
 /// Runs the interactive projection-only terminal presentation.
@@ -476,7 +497,20 @@ fn tiber_codex_home() -> Option<PathBuf> {
 /// Prints the supported command grammar.
 fn usage() {
     eprintln!(
-        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <{TASKS_COMMAND_GRAMMAR}>]"
+        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <{}>]",
+        tasks::TASKS_COMMAND_GRAMMAR
+    );
+}
+
+#[expect(
+    clippy::print_stdout,
+    reason = "an explicit help request intentionally renders the supported command grammar to standard output"
+)]
+/// Prints the supported command grammar for an explicit help request.
+fn print_help() {
+    println!(
+        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <{}>]",
+        tasks::TASKS_COMMAND_GRAMMAR
     );
 }
 
@@ -486,7 +520,7 @@ fn usage() {
 )]
 /// Prints the supported native task grammar.
 fn tasks_usage() {
-    eprintln!("usage: tiber tasks <{TASKS_COMMAND_GRAMMAR}>");
+    eprintln!("usage: tiber tasks <{}>", tasks::TASKS_COMMAND_GRAMMAR);
 }
 
 #[cfg(test)]
