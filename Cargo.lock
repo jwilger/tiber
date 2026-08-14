@@ -1333,6 +1333,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiber-workflow-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiber-workflow-service"
+version = "0.1.0"
+dependencies = [
+ "eventcore",
+ "eventcore-memory",
+ "eventcore-types",
+ "futures",
+ "serde",
+ "tiber-workflow-core",
+]
+
+[[package]]
 name = "time"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"

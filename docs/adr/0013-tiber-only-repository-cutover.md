@@ -46,7 +46,16 @@ exact retry of that sole active task as a no-op. It is not a generic transition
 or scheduler. Each operation consumes an opaque command-specific publication
 token at the Git adapter rather than reopening a generic append, generic task
 mutation, or former MCP write surface. Reconciliation and workflow scheduling
-remain follow-on work, not compatibility surfaces.
+remain follow-on work, not compatibility surfaces. The first native workflow
+foundation is now also present: `tiber-workflow-core` owns semantic identities,
+one closed `Infer` effect, and a serializable total trampoline, while
+`tiber-workflow-service` provides only command-specific EventCore decisions to
+initialize, request, record, and advance it. Recording an `EffectObserved` fact
+is a distinct durable transaction before any later advance may request,
+complete, or stop; there is no generic workflow append or effect executor.
+Workflow scheduling, effect interpretation and reconciliation, durable
+interactive sessions, and app-server/CLI/TUI runner integration remain
+follow-on work, not compatibility surfaces.
 
 One bounded exception corrects malformed retained task metadata: native Tasks
 may append a named, preconditioned duplicate-subtask identity correction. It

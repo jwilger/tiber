@@ -1,0 +1,20 @@
+[package]
+name = "tiber-workflow-service"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+eventcore.workspace = true
+serde.workspace = true
+tiber-workflow-core = { path = "../tiber-workflow-core" }
+
+[dev-dependencies]
+eventcore = { version = "=2.0.0", features = ["experimental-model-check"] }
+eventcore-memory = "=2.0.0"
+eventcore-types.workspace = true
+futures = "=0.3.32"
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "tiber-workflow-core"
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

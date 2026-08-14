@@ -33,6 +33,19 @@ activate only the current eligible next task while no other task is active. An
 exact retry for that sole active task succeeds without publishing another
 authority revision. It does not implement scheduling or a workflow loop.
 
+The first native workflow slice is deliberately internal.
+`tiber-workflow-core` provides serializable semantic identities, a total
+`step(state, observation)` trampoline, and one closed `Infer` effect with
+bounded deadline, provenance, and idempotency data.
+`tiber-workflow-service` provides command-specific EventCore decisions to
+initialize a workflow, request the effect, record its observation, and advance
+the trampoline. Recording an observation persists `EffectObserved` in its own
+transaction; only a later advance decision may call `step` to request, complete,
+or stop. The service exposes neither a generic workflow append nor an effect
+executor. It is not yet connected to the app-server, TUI, or CLI; app-server
+tools remain inert, while scheduling, effect reconciliation, durable interactive
+sessions, and UI integration remain later native slices.
+
 The native task surface also has one explicit legacy-data repair, not a general
 write: `subtask repair-duplicate`. It requires a one-based occurrence and a new
 identity, folds the exact current subtask as a precondition, and appends a typed

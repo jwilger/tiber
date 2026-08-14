@@ -35,6 +35,19 @@ does not re-emit a lifecycle transition. There is no general public EventCore
 append, legacy MCP task write, or generic task-mutation surface. Publication
 reconciliation and workflow scheduling remain later native slices.
 
+The first native workflow slice is deliberately internal.
+`tiber-workflow-core` defines serializable semantic identities, a total
+`step(state, observation)` trampoline, and one closed `Infer` effect with
+bounded deadline, provenance, and idempotency data.
+`tiber-workflow-service` provides only command-specific EventCore decisions to
+initialize a workflow, request that effect, record its observation, and advance
+the trampoline. Recording an observation persists `EffectObserved` by itself;
+only a later advance decision may call `step` to request, complete, or stop.
+There is no generic workflow append or effect executor. The app-server, TUI,
+and CLI do not yet run this workflow—app-server tools remain inert—and
+scheduler, effect reconciliation, durable interactive sessions, and UI
+integration remain later slices.
+
 `tiber tasks show <task-ref>` renders subtasks by stable one-based occurrence,
 identity, status, title, and prerequisites. The narrowly scoped
 `tiber tasks subtask repair-duplicate <task-ref> <occurrence> <replacement-id>`

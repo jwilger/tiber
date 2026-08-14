@@ -16,14 +16,27 @@ serialization, process, authorization, and recovery boundaries.
 ## Decision
 
 Extract `tiber-tasks-core`, `tiber-tasks-service`, `tiber-workflow-core`, and
-`tiber-workflow-service`. CLI, MCP,
-and TUI integration points are adapters. Internal task and workflow actions
-call native typed services and never loop back through MCP or shell.
+`tiber-workflow-service`. The first workflow extraction now provides a pure,
+serializable trampoline and semantic identities in `tiber-workflow-core`, with
+one closed `Infer` effect. `tiber-workflow-service` exposes only
+command-specific EventCore decisions to initialize a workflow, request its
+effect, record an observation, and advance it. Observation recording is its own
+durable transaction: only a later advance decision may invoke the trampoline to
+request, complete, or stop. The service provides neither a generic workflow
+append nor an effect executor.
+
+CLI, MCP, and TUI integration points are adapters. Internal task and workflow
+actions call native typed services and never loop back through MCP or shell.
+This initial workflow boundary does not yet add a scheduler, effect runner, or
+app-server/CLI/TUI integration; the app-server remains transport-only and its
+tool requests remain inert.
 
 ## Consequences
 
 All adapters share one domain contract and EventCore history. Extraction work
-must preserve existing behavior and store compatibility.
+must preserve existing behavior and store compatibility. Scheduling, effect
+reconciliation, durable interactive sessions, and runner integration remain
+follow-on work rather than reasons to reopen a generic mutation surface.
 
 ## Alternatives considered
 

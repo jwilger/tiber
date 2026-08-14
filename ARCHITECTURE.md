@@ -57,7 +57,11 @@ semantic types; invalid states are not constructible. Expected failures are
 typed values with a stable code, structured context, retained cause, and
 retryability.
 
-The core emits a closed `TiberEffect` vocabulary:
+The shipped workflow core currently has one closed effect variant:
+`TiberEffect::Infer`. Its immutable envelope carries semantic session, agent,
+workflow, assignment, context-receipt, policy-decision, and effect identities,
+plus bounded deadline and idempotency data. Future variants must be explicit
+additions to the closed `TiberEffect` vocabulary:
 
 ```text
 Infer | Authenticate | ReadRepository | MutateRepository | RunProcess
@@ -81,6 +85,12 @@ function returning one of:
 
 There are no closures as continuations. The shell interprets one effect,
 records its observation or ambiguous outcome, and feeds it to the next step.
+For the shipped workflow foundation, `RecordObservation` records an
+`EffectObserved` fact in a transaction distinct from `RequestNextEffect`.
+After the observation is durable, a later `RequestNextEffect` may invoke
+`step` and emit `EffectRequested`, `WorkflowCompleted`, or `WorkflowStopped`;
+observation persistence cannot be combined with the successor decision. The
+service exposes neither a generic workflow append nor an effect executor.
 Every loop has explicit turn, tool, retry-by-error-class, elapsed-time, token,
 cost where applicable, and no-progress bounds. Cancellation checkpoints are
 durable.
@@ -168,11 +178,21 @@ The initial TUI slice renders those typed events and emits only typed composer
 intents. A cancellable inference worker keeps terminal input responsive during
 turn startup and streaming; durable conversation state and protocol-level turn
 interruption remain subsequent vertical slices.
+The app-server remains a transport-only boundary: it is not an
+`tiber-workflow-service` effect runner, and its tool requests remain inert
+structured data. No CLI or TUI workflow runner is connected in this slice.
 
 ## Native workflow and Tiber Tasks
 
 `tiber-tasks-core` defines the task vocabulary and
 `tiber-tasks-service` folds its immutable history into the query projection.
+`tiber-workflow-core` provides the pure, serializable workflow state, semantic
+identities, one closed `Infer` effect, and total trampoline step. Its
+`tiber-workflow-service` boundary provides command-specific EventCore decisions
+to initialize the workflow, request its effect, record an observation, and
+advance. Recording `EffectObserved` is one durable transaction; only a later
+advance may invoke the trampoline to request, complete, or stop. It provides no
+generic workflow append and executes no effect.
 `tiber-store-git` resolves the exact signed authority revision: when an
 `origin` remote is configured, it retrieves the currently advertised fixed
 `tiber` commit without moving a caller Git ref; without `origin`, it reads only
@@ -203,9 +223,10 @@ the native surface. When retained lifecycle state is already `Done` but strict
 board order still names the task, the command publishes only the closed order
 repair and never re-emits a transition. Every publication declares only the
 board and addressed task stream as its consistency boundary. Publication
-reconciliation, workflow core and service adapters, scheduling, and TUI task
-integration remain subsequent vertical slices. Internal actions never call
-legacy MCP or shell back into the `tiber` executable.
+reconciliation, workflow scheduling, effect interpretation, durable interactive
+session binding, and app-server/CLI/TUI workflow-runner integration remain
+subsequent vertical slices. Internal actions never call legacy MCP or shell
+back into the `tiber` executable.
 
 The same closed publication boundary admits one exceptional history-repair
 fact: `tiber tasks subtask repair-duplicate <ref> <occurrence> <replacement-id>`.
@@ -301,10 +322,10 @@ evidence identities; a closed serializable review-fact vocabulary; deterministic
 command-specific event folds; exact assignment-provenance checks; bounded
 material-delta iterations; verified finding resolution; and the clean-review
 transition. It is a pure domain crate with no inference, filesystem, process,
-network, UI, MCP, or store dependency. Ticket 4 will bind these commands to the
-native scheduler; the contract intentionally lands first so that migration
-cannot collapse the shipped multi-agent behavior into one model call or ambient
-shared context.
+network, UI, MCP, or store dependency. A later Ticket 4 scheduler slice will
+bind these commands to the native scheduler; the initial workflow core/service
+slice deliberately does not do so, preserving the contract before it reaches
+an imperative runner or shared context.
 
 ## Observability and deferred qualitative evaluation
 

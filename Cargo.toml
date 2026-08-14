@@ -7,6 +7,8 @@ members = [
   "crates/tiber-tasks-core",
   "crates/tiber-tasks-service",
   "crates/tiber-tui",
+  "crates/tiber-workflow-core",
+  "crates/tiber-workflow-service",
 ]
 exclude = ["old-code-for-reference"]
 resolver = "3"
