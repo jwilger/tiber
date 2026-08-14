@@ -48,6 +48,30 @@ and CLI do not yet run this workflow—app-server tools remain inert—and
 scheduler, effect reconciliation, durable interactive sessions, and UI
 integration remain later slices.
 
+## Repository-mutation boundary (S1)
+
+`tiber-repository-core` is a pure, unconnected authority contract for narrow
+assignment-bound repository file mutations. An opaque authorization permits a
+write with an absent-file or exact-digest precondition, or a delete with an
+exact-digest precondition. Typed mutation receipts and failures plus read-only
+reconciliation carry the bounded operation; no filesystem, Git, process, or
+network I/O occurs in S1.
+
+Authorization requires matching workflow provenance, repository identity,
+component-aware assignment scope, trusted policy, and an opaque
+`RepositoryMutationApproval` bound to that exact safe proposal identity and
+policy/assignment context.
+
+An unknown mutation outcome is reconciled by stable mutation identity rather than
+automatically replayed. This does not create a generic filesystem or shell
+runner, and it does not generalize `tiber-store-git`, which remains the fixed
+signed `tiber` authority-branch publisher. S2 will add the isolated x86_64
+Linux executor; S3 will add durable recovery, crash/restart and stale/corrupt
+state reconciliation, concurrency evidence, and clean-machine packaging. No
+workflow, EventCore, CLI, TUI, app-server, scheduler, runner, operational
+request-options, timeout, or cancellation surface is connected yet; S2 owns
+those operational controls.
+
 ## External-tools boundary (S1)
 
 The workspace now contains a real but unconnected third-party MCP boundary.

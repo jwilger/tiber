@@ -1,0 +1,17 @@
+[package]
+name = "tiber-repository-core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+tiber-workflow-core = { path = "../tiber-workflow-core" }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

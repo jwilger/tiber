@@ -237,6 +237,34 @@ and board/task consistency boundary, then publishes only a named
 the selected occurrence, preserving all historical bytes and leaving any
 prerequisite references intact.
 
+## Assignment-bound repository mutation
+
+`tiber-repository-core` is a pure, unconnected authority boundary for narrow
+repository file mutations made within one assignment. An opaque authorization
+permits only a write with either an absent-file or exact-digest precondition, or
+a delete with an exact-digest precondition. The core models typed mutation
+receipts and failures plus a read-only reconciliation handle; it performs no
+filesystem, Git, process, or network I/O.
+
+Authorization requires complete workflow provenance, repository identity, and
+component-aware assignment scope to agree with the trusted mutation policy and
+an opaque `RepositoryMutationApproval` bound to that exact safe proposal
+identity and policy/assignment context. A raw proposal cannot reach a repository
+adapter.
+
+An unknown mutation outcome must be reconciled by its stable mutation identity
+before a later layer can decide what to do next. It is never auto-replayed.
+The boundary is not a generic filesystem or shell runner, and it does not
+generalize `tiber-store-git`: that adapter remains the narrowly scoped signed
+publisher for the fixed `tiber` EventCore authority branch.
+
+S1 adds no workflow `TiberEffect`, EventCore fact, CLI, TUI, scheduler, runner,
+platform adapter, operational request options, timeout, or cancellation
+surface. S2 will interpret the bounded authorized operations behind the x86_64
+Linux isolation port and own their operational timeout and cancellation
+controls; S3 will add durable recovery, crash/restart, stale/corrupt-state
+reconciliation, concurrency evidence, and clean-machine packaging evidence.
+
 ## Third-party MCP
 
 `tiber-external-tools-core` is the pure authority boundary for configured
@@ -336,11 +364,14 @@ agent, gates, memory, and integration health, with `/tasks`, `/memory`, and
 
 ## Isolation and process execution
 
-Linux-specific filesystem, process, and network controls sit behind a platform
-port. The v1 implementation and packaging target only x86_64 Linux; the port
-keeps future Apple silicon support possible without weakening v1 evidence.
-Processes receive explicit argv, cwd, environment allowlists, resource bounds,
-timeouts, cancellation, cleanup, and receipts.
+Linux-specific filesystem, process, and network controls will sit behind a
+platform port. S2 will interpret only the bounded
+`tiber-repository-core` authorization through that port, rather than exposing a
+generic filesystem or shell executor. The v1 implementation and packaging
+target only x86_64 Linux; the port keeps future Apple silicon support possible
+without weakening v1 evidence. Processes receive explicit argv, cwd,
+environment allowlists, resource bounds, timeouts, cancellation, cleanup, and
+receipts.
 
 ## Recovery, verification, and delivery
 

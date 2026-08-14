@@ -53,6 +53,32 @@ correction fact through the same board/task lease. This lets an owner repair a
 malformed duplicate subtask ID without rewriting signed history or ambiguously
 changing the first matching row.
 
+### Current repository-mutation S1 boundary
+
+`tiber-repository-core` is a real but unconnected pure authority boundary for
+narrow assignment-bound repository file mutations. Its opaque authorization
+permits a write with an absent-file or exact-digest precondition, or a delete
+with an exact-digest precondition. It models typed mutation receipts and
+failures plus read-only reconciliation without performing filesystem, Git,
+process, or network I/O.
+
+Authorization requires the complete workflow provenance, repository identity,
+and component-aware assignment scope to match the trusted mutation policy and
+an opaque `RepositoryMutationApproval` bound to that exact safe proposal
+identity and policy/assignment context. A raw proposal cannot reach a repository
+adapter.
+
+An unknown mutation outcome is reconciled by stable mutation identity before any
+later decision; it is never auto-replayed. This is neither a generic filesystem
+nor shell-runner API, and it does not extend `tiber-store-git` beyond its fixed
+signed `tiber` authority-branch publication role. S1 adds no `TiberEffect`,
+EventCore, CLI, TUI, app-server, scheduler, runner, or Linux adapter
+integration, operational request options, timeout, or cancellation surface. S2
+will supply the x86_64 Linux isolated executor and operational timeout and
+cancellation controls; S3 will supply durable recovery, crash/restart and
+stale/corrupt-state reconciliation, concurrency evidence, and clean-machine
+packaging evidence.
+
 ### Current external-tools S1 boundary
 
 The external-tools boundary is now implemented but is not connected to a
