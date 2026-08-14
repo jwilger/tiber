@@ -1,4 +1,4 @@
-//! Bounded HTTP adapter for Hindsight 0.8.3.
+//! Bounded HTTP adapter for verified Hindsight 0.8.3 and 0.8.4 contracts.
 //!
 //! Provider DTOs remain private. The public surface accepts only the
 //! provider-independent, provenance-carrying contracts from
@@ -29,8 +29,9 @@ use tiber_memory_core::{
 };
 use tokio::time::{Instant, sleep, sleep_until};
 
-/// Exact vendor API version owned by these private DTOs.
-const HINDSIGHT_API_VERSION: &str = "0.8.3";
+/// Explicit vendor versions whose adapter-used public schemas were verified
+/// equivalent against the private DTO contract.
+const HINDSIGHT_API_VERSIONS: [&str; 2] = ["0.8.3", "0.8.4"];
 /// Maximum untrusted response bytes retained before decoding.
 const MAX_RESPONSE_BODY_BYTES: usize = 128 * 1024;
 /// Response bound represented in the HTTP content-length domain.
@@ -43,15 +44,15 @@ const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(2);
 struct VersionResponseDto {
     /// Exact API version string.
     api_version: String,
-    /// Exact required 0.8.3 capability fields.
+    /// Required capability fields shared by the supported API versions.
     features: FeaturesInfoDto,
 }
 
-/// Required Hindsight 0.8.3 feature shape.
+/// Required Hindsight feature shape shared by the supported API versions.
 #[derive(Deserialize)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "the private DTO mirrors Hindsight's required closed 0.8.3 boolean feature schema"
+    reason = "the private DTO mirrors Hindsight's required closed feature schema for the explicitly supported API versions"
 )]
 struct FeaturesInfoDto {
     /// Audit-log capability, decoded to require the exact schema.
@@ -385,7 +386,7 @@ impl fmt::Display for HindsightSetupError {
     }
 }
 
-/// Direct, non-replaying Hindsight 0.8.3 HTTP adapter.
+/// Direct, non-replaying Hindsight 0.8.3/0.8.4 HTTP adapter.
 #[derive(Clone, Debug)]
 pub struct HindsightHttp {
     /// Fixed no-proxy, no-redirect, no-retry HTTP handle.
@@ -791,7 +792,8 @@ impl HindsightHttp {
         }
     }
 
-    /// Requires the exact DTO-owned API version within the operation budget.
+    /// Requires an explicitly schema-verified DTO-owned API version within the
+    /// operation budget.
     async fn probe_version(
         &self,
         operation: MemoryOperationKind,
@@ -813,7 +815,7 @@ impl HindsightHttp {
             .read_json(response)
             .await
             .map_err(|failure| read_failure(operation, failure))?;
-        if version.api_version != HINDSIGHT_API_VERSION
+        if !HINDSIGHT_API_VERSIONS.contains(&version.api_version.as_str())
             || !version.features.worker
             || !version.features.store_document_text
         {
@@ -1615,6 +1617,10 @@ mod tests {
         HindsightEndpoint::parse("http://[2001:db8::1]:8000/")
             .expect_err("remote IPv6 plain HTTP is unsafe");
         HindsightEndpoint::parse("https://example.com/").expect("remote HTTPS is safe");
+        HindsightEndpoint::parse("http://localhost:8000/")
+            .expect_err("plain HTTP requires a literal loopback IP");
+        HindsightEndpoint::parse("http://127.0.0.1:8000/mcp/codex/")
+            .expect_err("an MCP endpoint path is not the Hindsight REST origin");
     }
 
     fn response_tags(turn_id: Option<&str>) -> Value {
@@ -1687,6 +1693,43 @@ mod tests {
                 "kind:turn-summary",
                 "turn:turn-1"
             ])
+        );
+        task.await.expect("fixture completes");
+    }
+
+    #[tokio::test]
+    async fn retain_probes_084_before_dispatching_the_same_strict_contract() {
+        let (endpoint, mut requests, task) = server(vec![
+            version_response("0.8.4", true),
+            response(
+                "200 OK",
+                json!({"success":true,"bank_id":"tiber-repository-repo","items_count":1,"async":true,"operation_id":"op-1"}),
+            ),
+        ])
+        .await;
+        let client = HindsightHttp::new(endpoint).expect("client builds");
+        let request = RetainRequest::new(
+            scope(),
+            parsed("document-1", MemoryDocumentId::parse),
+            parsed("turn-1", TurnId::parse),
+            parsed("durable decision", MemoryText::parse),
+            parsed("Tiber turn transcript", MemoryText::parse),
+        );
+
+        let outcome = client
+            .retain(&request, &options(1_000))
+            .await
+            .expect("0.8.4 is an explicitly supported contract");
+        assert_eq!(outcome.operation_id().as_str(), "op-1");
+        let probe = requests.recv().await.expect("version request recorded");
+        let retain = requests.recv().await.expect("retain request recorded");
+        assert_eq!(
+            (probe.method.as_str(), probe.path.as_str()),
+            ("GET", "/version")
+        );
+        assert_eq!(
+            (retain.method.as_str(), retain.path.as_str()),
+            ("POST", "/v1/default/banks/tiber-repository-repo/memories")
         );
         task.await.expect("fixture completes");
     }
@@ -1808,6 +1851,29 @@ mod tests {
             .retain(&request, &options(1_000))
             .await
             .expect_err("unsupported version is refused");
+        assert_eq!(error.kind(), MemoryBackendErrorKind::Unsupported);
+        let probe_request = requests.recv().await.expect("version request recorded");
+        assert_eq!(probe_request.path, "/version");
+        task.await.expect("fixture completes");
+        assert!(requests.try_recv().is_err(), "retain was never dispatched");
+    }
+
+    #[tokio::test]
+    async fn newer_api_version_refuses_retain_before_dispatch() {
+        let (endpoint, mut requests, task) = server(vec![version_response("0.8.5", true)]).await;
+        let client = HindsightHttp::new(endpoint).expect("client builds");
+        let request = RetainRequest::new(
+            scope(),
+            parsed("document-1", MemoryDocumentId::parse),
+            parsed("turn-1", TurnId::parse),
+            parsed("durable decision", MemoryText::parse),
+            parsed("Tiber turn transcript", MemoryText::parse),
+        );
+
+        let error = client
+            .retain(&request, &options(1_000))
+            .await
+            .expect_err("unsupported newer version is refused");
         assert_eq!(error.kind(), MemoryBackendErrorKind::Unsupported);
         let probe_request = requests.recv().await.expect("version request recorded");
         assert_eq!(probe_request.path, "/version");

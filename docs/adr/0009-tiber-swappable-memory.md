@@ -16,8 +16,9 @@ fallible, and not authoritative workflow state.
 ## Decision
 
 Define a swappable `MemoryBackend` port in `tiber-memory-core` and make
-`tiber-hindsight-http` its first adapter. Keep Hindsight HTTP API 0.8.3 DTOs
-inside that adapter. Its bounded operation vocabulary is asynchronous retain,
+`tiber-hindsight-http` its first adapter. Keep private DTOs for the
+schema-verified Hindsight HTTP API 0.8.3 and 0.8.4 contracts inside that
+adapter. Its bounded operation vocabulary is asynchronous retain,
 operation status, cancellation, forget, recall, and named read-only
 reconciliation.
 
@@ -32,7 +33,7 @@ advisory, untrusted context, never authority for a workflow or effect.
 
 Tiber connects only to an explicit Hindsight endpoint. It does not install or
 globally configure Hindsight, retry requests, manage Hindsight authentication,
-or claim live-service validation. The S3 audit DTOs retain trusted provenance,
+or claim generic or deployment-service validation. The S3 audit DTOs retain trusted provenance,
 stable bounded outcomes, reconciliation identity, and retain evidence while
 excluding raw retained text, recall queries, and recalled content. They are not
 EventCore publications, durable receipts, or workflow, CLI, TUI, app-server,
@@ -46,8 +47,10 @@ Deterministic local fake-server coverage checks scoped lifecycle and
 hostile-input behavior without network access. An ignored live test is an
 explicit operator check only: it requires exact `TIBER_RUN_LIVE_HINDSIGHT=1`
 and a nonempty `TIBER_HINDSIGHT_ENDPOINT`, uses nonce-isolated synthetic data,
-and attempts exact-document cleanup. Default CI remains network-free, and this
-ADR does not claim that a live Hindsight service has been executed.
+and attempts exact-document cleanup. Default CI remains network-free. The
+explicit check passed against a local loopback Hindsight 0.8.4 service on
+2026-08-14; this ADR makes no deployment claim or support claim beyond the
+schema-verified API versions.
 
 ## Alternatives considered
 

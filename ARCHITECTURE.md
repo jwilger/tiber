@@ -275,12 +275,13 @@ that execution boundary.
 ## Memory
 
 `tiber-memory-core` defines a swappable `MemoryBackend` port. The first
-adapter, `tiber-hindsight-http`, contains Hindsight HTTP API 0.8.3 DTOs and
+adapter, `tiber-hindsight-http`, contains private DTOs for the schema-verified
+Hindsight HTTP API 0.8.3 and 0.8.4 contracts and
 supports only asynchronous retain, operation status, cancellation, forget,
 recall, and named read-only reconciliation. Tiber connects only to an explicit
 endpoint; it never installs or
 globally configures Hindsight, retries a request, manages Hindsight
-authentication, or claims live-service validation.
+authentication, or claims generic or deployment-service validation.
 
 Memory operations carry strict owner and repository provenance. Banks are
 owner-global or repository-scoped; typed tags include repository, agent,

@@ -71,12 +71,13 @@ and audit/integration S3 is now a pure, unconnected audit-fact boundary.
 ## Memory boundary (S2)
 
 `tiber-memory-core` defines a swappable `MemoryBackend` port. Its first
-adapter, `tiber-hindsight-http`, owns the Hindsight HTTP API 0.8.3 DTOs and
+adapter, `tiber-hindsight-http`, owns private DTOs for the schema-verified
+Hindsight HTTP API 0.8.3 and 0.8.4 contracts and
 only supports asynchronous retain, operation status, cancellation, forget,
 recall, and named read-only reconciliation. It connects only to an explicitly
 configured endpoint: it neither
 installs nor globally configures Hindsight, retries requests, manages
-authentication, or claims live-service validation.
+authentication, or claims generic or deployment-service validation.
 
 Memory writes and recalls carry strict owner/repository provenance and typed
 tags for repository, agent, session, task, and memory kind. Retained document
@@ -106,8 +107,10 @@ lifecycle and hostile-input behavior. The Hindsight adapter also provides an
 ignored live test that runs only when both
 `TIBER_RUN_LIVE_HINDSIGHT=1` and a nonempty `TIBER_HINDSIGHT_ENDPOINT` are
 supplied. It uses a nonce-isolated synthetic lifecycle and exact-document
-cleanup. Default CI remains network-free; this test is provided as an explicit
-operator check and has not been used to claim external-service execution.
+cleanup. Default CI remains network-free; this explicit operator check passed
+against a local loopback Hindsight 0.8.4 service on 2026-08-14. That evidence
+does not claim a deployed service or compatibility beyond the verified API
+versions.
 
 `tiber tasks show <task-ref>` renders subtasks by stable one-based occurrence,
 identity, status, title, and prerequisites. The narrowly scoped

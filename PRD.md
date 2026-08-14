@@ -77,12 +77,14 @@ The completed S3 audit boundary remains pure and unconnected.
 ### Current memory S2 boundary
 
 `tiber-memory-core` provides a swappable `MemoryBackend` port;
-`tiber-hindsight-http` is its first adapter and keeps Hindsight HTTP API 0.8.3
-DTOs at that boundary. The adapter supports only asynchronous retain,
+`tiber-hindsight-http` is its first adapter and keeps private DTOs for the
+schema-verified Hindsight HTTP API 0.8.3 and 0.8.4 contracts at that boundary.
+The adapter supports only asynchronous retain,
 operation status, cancellation, forget, recall, and named read-only
 reconciliation. It uses an explicit
 endpoint only: Tiber does not install or globally configure Hindsight, retry
-requests, manage Hindsight authentication, or claim live-service validation.
+requests, manage Hindsight authentication, or claim generic or deployment
+service validation.
 
 Every memory operation is scoped by strict owner and repository provenance,
 with typed repository, agent, session, task, and memory-kind tags. Backend
@@ -112,8 +114,9 @@ hostile-input handling. An ignored Hindsight live test is available only with
 both `TIBER_RUN_LIVE_HINDSIGHT=1` and a nonempty
 `TIBER_HINDSIGHT_ENDPOINT`; it uses nonce-isolated synthetic data and
 exact-document cleanup. It is not part of default CI, which remains
-network-free, and this document makes no claim that an external service was
-executed.
+network-free. The explicit check passed against a local loopback Hindsight
+0.8.4 service on 2026-08-14; this is not a deployment claim or support beyond
+the schema-verified API versions.
 
 ## Problem
 
@@ -179,10 +182,10 @@ it never grants authority.
   a tool.
 - Own Tiber Tasks and development-workflow operations through native services.
 - Execute configured third-party MCP servers through a harness-owned client.
-- Provide a swappable memory port with Hindsight HTTP API 0.8.3 as the first
-  adapter, bounded asynchronous retain/status/cancel/forget/recall/reconciliation
-  operations, strict owner/repository provenance and tags, and advisory
-  untrusted recall.
+- Provide a swappable memory port with the schema-verified Hindsight HTTP API
+  0.8.3 and 0.8.4 contracts as the first adapter, bounded asynchronous
+  retain/status/cancel/forget/recall/reconciliation operations, strict
+  owner/repository provenance and tags, and advisory untrusted recall.
 - Isolate repository and process effects behind an x86_64 Linux platform port.
 - Record durable facts and receipts for decisions, mutations, tests, memory,
   retries, cancellation, reconciliation, verification, and delivery.
