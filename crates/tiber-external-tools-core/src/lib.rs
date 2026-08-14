@@ -9,6 +9,7 @@
 extern crate alloc;
 
 use alloc::{
+    boxed::Box,
     collections::{BTreeMap, BTreeSet},
     string::String,
     vec::Vec,
@@ -56,6 +57,53 @@ macro_rules! semantic_text {
                 }
                 Ok(Self(value.to_owned()))
             }
+        }
+    };
+}
+
+/// Generates the identical safe provenance inspectors for reconciliation outcomes and failures.
+macro_rules! reconciliation_provenance_accessors {
+    () => {
+        /// Returns the owner approval bound to the originating mutation.
+        #[must_use]
+        #[inline]
+        pub fn approval(&self) -> Option<&OwnerApprovalId> {
+            self.provenance.approval.as_ref()
+        }
+
+        /// Returns the exact authority tuple bound by pure authorization.
+        #[must_use]
+        #[inline]
+        pub fn authorization(&self) -> &AuthorizationContext {
+            &self.provenance.authorization
+        }
+
+        /// Returns the stable mutation identity checked by reconciliation.
+        #[must_use]
+        #[inline]
+        pub fn idempotency_key(&self) -> &IdempotencyKey {
+            &self.provenance.idempotency_key
+        }
+
+        /// Returns the trusted integration identity without configuration.
+        #[must_use]
+        #[inline]
+        pub fn integration_id(&self) -> &IntegrationId {
+            &self.provenance.integration_id
+        }
+
+        /// Returns the exact mutating tool whose outcome was checked.
+        #[must_use]
+        #[inline]
+        pub fn originating_tool(&self) -> &ToolName {
+            &self.provenance.originating_tool
+        }
+
+        /// Returns the exact configured read-only status tool used by reconciliation.
+        #[must_use]
+        #[inline]
+        pub fn status_tool(&self) -> &ToolName {
+            &self.provenance.status_tool
         }
     };
 }
@@ -1295,6 +1343,8 @@ pub struct AuthorizedToolCall {
     approval: Option<OwnerApprovalId>,
     /// Bounded raw JSON passed verbatim to the imperative adapter.
     arguments: ToolArguments,
+    /// Exact trusted authority tuple that produced this opaque token.
+    authorization: AuthorizationContext,
     /// Trusted configured side-effect classification.
     class: ToolClass,
     /// Stable deduplication identity for a mutating call.
@@ -1305,12 +1355,159 @@ pub struct AuthorizedToolCall {
     tool: ToolName,
 }
 
+/// Exact sanitized transcript of one refused tool-call authorization decision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ToolCallDenial {
+    /// Exact trusted authority tuple evaluated by policy.
+    authorization: AuthorizationContext,
+    /// Configured effect class when the requested tool was known.
+    class: Option<ToolClass>,
+    /// Stable refusal produced by the authorization decision.
+    error: ExternalToolError,
+    /// Requested integration identity without transport or other configuration.
+    integration_id: IntegrationId,
+    /// Exact requested tool name.
+    tool: ToolName,
+}
+
+#[expect(
+    clippy::implicit_return,
+    reason = "denial accessors use idiomatic tail expressions"
+)]
+impl ToolCallDenial {
+    /// Returns the exact trusted authority tuple evaluated by policy.
+    #[must_use]
+    #[inline]
+    pub fn authorization(&self) -> &AuthorizationContext {
+        &self.authorization
+    }
+
+    /// Returns the configured effect class when the requested tool was known.
+    #[must_use]
+    #[inline]
+    pub const fn class(&self) -> Option<ToolClass> {
+        self.class
+    }
+
+    /// Returns the stable refusal code without serializing the error enum.
+    #[must_use]
+    #[inline]
+    pub const fn code(&self) -> &'static str {
+        self.error.code()
+    }
+
+    /// Returns the stable policy or mutation-fence refusal.
+    #[must_use]
+    #[inline]
+    pub const fn error(&self) -> ExternalToolError {
+        self.error
+    }
+
+    /// Returns only the requested trusted integration identity.
+    #[must_use]
+    #[inline]
+    pub fn integration_id(&self) -> &IntegrationId {
+        &self.integration_id
+    }
+
+    /// Returns the exact requested tool name.
+    #[must_use]
+    #[inline]
+    pub fn tool(&self) -> &ToolName {
+        &self.tool
+    }
+}
+
+/// Complete pure decision for one proposed configured tool invocation.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "every tool-call authorization decision must remain explicit"
+)]
+pub enum ToolCallAuthorizationDecision {
+    /// All policy and mutation fences produced an opaque invocation token.
+    Authorized(AuthorizedToolCall),
+    /// Authorization was refused with an exact sanitized decision transcript.
+    Denied(ToolCallDenial),
+}
+
+#[expect(
+    clippy::implicit_return,
+    reason = "the compatibility projection is a direct total decision match"
+)]
+impl ToolCallAuthorizationDecision {
+    /// Projects the complete decision into the original authorization API.
+    ///
+    /// # Errors
+    ///
+    /// Returns the exact stable refusal retained by a denied decision.
+    #[inline]
+    pub fn into_result(self) -> Result<AuthorizedToolCall, ExternalToolError> {
+        match self {
+            Self::Authorized(call) => Ok(call),
+            Self::Denied(denial) => Err(denial.error),
+        }
+    }
+}
+
+/// Refusal to bind an adapter outcome to its exact originating authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "every provenance-binding failure must remain an explicit closed case"
+)]
+pub enum ToolCallOutcomeBindingError {
+    /// An ambiguous recovery token did not originate from the supplied call authorization.
+    ReconciliationMismatch,
+    /// An observed payload carried no originating authorization identity.
+    UnattributedObservation,
+}
+
+impl ToolCallOutcomeBindingError {
+    /// Returns the stable code for this provenance-binding refusal.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the stable code is a direct total projection"
+    )]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ReconciliationMismatch => "external_tools_reconciliation_mismatch",
+            Self::UnattributedObservation => "external_tools_unattributed_observation",
+        }
+    }
+}
+
+impl fmt::Display for ToolCallOutcomeBindingError {
+    #[expect(
+        clippy::implicit_return,
+        reason = "display delegates to the stable closed error code"
+    )]
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "the closed binding error has no lower-level cause"
+)]
+impl Error for ToolCallOutcomeBindingError {}
+
 #[expect(
     clippy::arbitrary_source_item_ordering,
     clippy::implicit_return,
     reason = "accessors follow invocation and recovery flow rather than alphabetical order"
 )]
 impl AuthorizedToolCall {
+    /// Returns the exact trusted authority tuple that produced this token.
+    #[must_use]
+    #[inline]
+    pub fn authorization(&self) -> &AuthorizationContext {
+        &self.authorization
+    }
+
     /// Returns the approved invocation's JSON argument payload.
     ///
     /// Mutating calls contain the canonical reserved `idempotencyKey` member
@@ -1373,8 +1570,11 @@ impl AuthorizedToolCall {
             None => return None,
         };
         Some(AuthorizedReconciliation {
+            authorization: Box::new(self.authorization.clone()),
             idempotency_key,
-            integration: self.integration.clone(),
+            integration: Box::new(self.integration.clone()),
+            originating_tool: self.tool.clone(),
+            owner_approval: self.approval.clone(),
             status_tool,
         })
     }
@@ -1395,27 +1595,125 @@ impl AuthorizedToolCall {
             None => return None,
         };
         Some(ToolCallOutcome::OutcomeUnknown(AuthorizedReconciliation {
+            authorization: Box::new(self.authorization),
             idempotency_key,
-            integration: self.integration,
+            integration: Box::new(self.integration),
+            originating_tool: self.tool,
+            owner_approval: self.approval,
             status_tool,
         }))
+    }
+
+    /// Binds an adapter result to this exact authorization for safe downstream projection.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an ambiguous result whose reconciliation authority did not
+    /// originate from this exact authorization context and mutation identity.
+    #[inline]
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "borrowing the closed outcome is required before moving it into the bound transcript"
+    )]
+    pub fn bind_outcome(
+        self,
+        outcome: ToolCallOutcome,
+    ) -> Result<BoundToolCallOutcome, ToolCallOutcomeBindingError> {
+        match &outcome {
+            ToolCallOutcome::Observed(_) => {
+                return Err(ToolCallOutcomeBindingError::UnattributedObservation);
+            }
+            ToolCallOutcome::OutcomeUnknown(reconciliation)
+                if self.reconciliation().as_ref() != Some(reconciliation) =>
+            {
+                return Err(ToolCallOutcomeBindingError::ReconciliationMismatch);
+            }
+            ToolCallOutcome::OutcomeUnknown(_) => {}
+        }
+        Ok(BoundToolCallOutcome {
+            outcome,
+            provenance: self.into_provenance(),
+        })
+    }
+
+    /// Consumes this exact authorization and binds the payload observed by its adapter call.
+    ///
+    /// This is an adapter-implementation boundary, not independent proof that
+    /// dispatch occurred. Application callers must use their configured adapter
+    /// call API and retain only the bound outcome returned by that operation.
+    #[must_use]
+    #[inline]
+    pub fn bind_observation(self, payload: UntrustedPayload) -> BoundToolCallOutcome {
+        BoundToolCallOutcome {
+            outcome: ToolCallOutcome::Observed(payload),
+            provenance: self.into_provenance(),
+        }
+    }
+
+    /// Consumes this mutation authorization into its only possible ambiguous transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns safe provenance without replay authority when the token is not a
+    /// fully fenced mutating authorization.
+    #[inline]
+    #[expect(
+        clippy::result_large_err,
+        reason = "failure must return the complete safe provenance after consuming replay authority"
+    )]
+    pub fn bind_ambiguity(self) -> Result<BoundToolCallOutcome, BoundToolCallFailure> {
+        let Some(reconciliation) = self.reconciliation() else {
+            return Err(self.bind_failure());
+        };
+        Ok(BoundToolCallOutcome {
+            outcome: ToolCallOutcome::OutcomeUnknown(reconciliation),
+            provenance: self.into_provenance(),
+        })
+    }
+
+    /// Consumes invocation authority into safe failure provenance with no replay route.
+    #[must_use]
+    #[inline]
+    pub fn bind_failure(self) -> BoundToolCallFailure {
+        BoundToolCallFailure {
+            provenance: self.into_provenance(),
+        }
+    }
+
+    /// Removes arguments and integration configuration from a consumed authorization.
+    fn into_provenance(self) -> ToolCallProvenance {
+        ToolCallProvenance {
+            approval: self.approval,
+            authorization: self.authorization,
+            class: self.class,
+            idempotency_key: self.idempotency_key,
+            integration_id: self.integration.id().clone(),
+            tool: self.tool,
+        }
     }
 }
 
 /// Opaque authorization to reconcile one ambiguous mutating tool invocation.
 #[derive(Debug, Eq, PartialEq, Serialize)]
 pub struct AuthorizedReconciliation {
+    /// Exact trusted authority tuple that produced the original mutation token.
+    authorization: Box<AuthorizationContext>,
     /// Stable deduplication identity whose outcome is being checked.
     idempotency_key: IdempotencyKey,
     /// Trusted integration selected by the original policy decision.
-    integration: McpIntegration,
+    integration: Box<McpIntegration>,
+    /// Exact mutating tool whose outcome is being reconciled.
+    originating_tool: ToolName,
+    /// Explicit approval bound to the original mutating call.
+    owner_approval: Option<OwnerApprovalId>,
     /// Exact configured read-only status tool.
     status_tool: ToolName,
 }
 
 #[expect(
+    clippy::arbitrary_source_item_ordering,
     clippy::implicit_return,
-    reason = "opaque reconciliation accessors use idiomatic tail expressions"
+    reason = "recovery binding methods remain next to the authority accessor that supplies their provenance"
 )]
 impl AuthorizedReconciliation {
     /// Returns the exact bounded JSON object passed to the configured status tool.
@@ -1427,6 +1725,38 @@ impl AuthorizedReconciliation {
             IDEMPOTENCY_KEY_ARGUMENT,
             serde_json::Value::String(self.idempotency_key.as_str().to_owned())
         ))
+    }
+
+    /// Returns the exact trusted authority tuple that produced the original mutation token.
+    #[must_use]
+    #[inline]
+    pub fn authorization(&self) -> &AuthorizationContext {
+        &self.authorization
+    }
+
+    /// Binds one observed status outcome to this exact recovery authorization.
+    ///
+    /// The returned transcript contains no integration configuration, status
+    /// arguments, payload, or invocation replay authority.
+    #[must_use]
+    #[inline]
+    pub fn bind_outcome(&self, outcome: ReconciliationOutcome) -> BoundReconciliationOutcome {
+        BoundReconciliationOutcome {
+            outcome,
+            provenance: self.provenance(),
+        }
+    }
+
+    /// Binds a sanitized adapter failure to this exact recovery authorization.
+    ///
+    /// The returned transcript contains no integration configuration, status
+    /// arguments, payload, or invocation replay authority.
+    #[must_use]
+    #[inline]
+    pub fn bind_failure(&self) -> BoundReconciliationFailure {
+        BoundReconciliationFailure {
+            provenance: self.provenance(),
+        }
     }
 
     /// Returns the stable idempotency identity used by the status operation.
@@ -1443,11 +1773,37 @@ impl AuthorizedReconciliation {
         &self.integration
     }
 
+    /// Returns the exact mutating tool whose outcome is being reconciled.
+    #[must_use]
+    #[inline]
+    pub fn originating_tool(&self) -> &ToolName {
+        &self.originating_tool
+    }
+
+    /// Returns the approval bound to the original mutation.
+    #[must_use]
+    #[inline]
+    pub fn owner_approval(&self) -> Option<&OwnerApprovalId> {
+        self.owner_approval.as_ref()
+    }
+
     /// Returns the configured read-only status tool and not an arbitrary caller choice.
     #[must_use]
     #[inline]
     pub fn status_tool(&self) -> &ToolName {
         &self.status_tool
+    }
+
+    /// Copies only safe recovery provenance out of the opaque authorization.
+    fn provenance(&self) -> ReconciliationProvenance {
+        ReconciliationProvenance {
+            approval: self.owner_approval.clone(),
+            authorization: (*self.authorization).clone(),
+            idempotency_key: self.idempotency_key.clone(),
+            integration_id: self.integration.id().clone(),
+            originating_tool: self.originating_tool.clone(),
+            status_tool: self.status_tool.clone(),
+        }
     }
 }
 
@@ -1466,6 +1822,68 @@ pub enum ReconciliationOutcome {
     StillUnknown,
 }
 
+/// Safe provenance-bound result of one authorized read-only reconciliation.
+///
+/// This opaque transcript deliberately retains neither status arguments nor
+/// integration transport configuration, and it carries no invocation replay
+/// authority.
+pub struct BoundReconciliationOutcome {
+    /// Closed status observed by the concrete adapter.
+    outcome: ReconciliationOutcome,
+    /// Exact safe identity of the recovery authorization used by the adapter.
+    provenance: ReconciliationProvenance,
+}
+
+/// Safe provenance for one authorized reconciliation attempt that failed.
+///
+/// This opaque transcript deliberately retains neither status arguments nor
+/// integration transport configuration, and it carries no invocation replay
+/// authority.
+pub struct BoundReconciliationFailure {
+    /// Exact safe identity of the recovery authorization used by the adapter.
+    provenance: ReconciliationProvenance,
+}
+
+/// Shared safe identity extracted from one recovery authorization.
+struct ReconciliationProvenance {
+    /// Explicit owner approval identity from the originating mutation.
+    approval: Option<OwnerApprovalId>,
+    /// Exact trusted authority tuple that produced the mutation authorization.
+    authorization: AuthorizationContext,
+    /// Stable identity of the mutation whose outcome is being checked.
+    idempotency_key: IdempotencyKey,
+    /// Trusted integration identity without configuration.
+    integration_id: IntegrationId,
+    /// Exact mutating tool whose outcome is being checked.
+    originating_tool: ToolName,
+    /// Exact configured read-only status tool used for reconciliation.
+    status_tool: ToolName,
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    clippy::implicit_return,
+    reason = "the result state follows the shared provenance accessors for audit projection readability"
+)]
+impl BoundReconciliationOutcome {
+    reconciliation_provenance_accessors!();
+
+    /// Returns the closed status observed by the concrete adapter.
+    #[must_use]
+    #[inline]
+    pub const fn outcome(&self) -> ReconciliationOutcome {
+        self.outcome
+    }
+}
+
+#[expect(
+    clippy::implicit_return,
+    reason = "bound reconciliation failure accessors use idiomatic tail expressions"
+)]
+impl BoundReconciliationFailure {
+    reconciliation_provenance_accessors!();
+}
+
 /// A bounded observation from one authorized tool invocation.
 #[derive(Debug, Eq, PartialEq, Serialize)]
 #[expect(
@@ -1477,6 +1895,174 @@ pub enum ToolCallOutcome {
     Observed(UntrustedPayload),
     /// The adapter cannot determine a mutation outcome and must reconcile it before any retry.
     OutcomeUnknown(AuthorizedReconciliation),
+}
+
+impl ToolCallOutcome {
+    /// Returns the bounded untrusted payload when the adapter observed a response.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        clippy::pattern_type_mismatch,
+        reason = "the read-only projection matches directly over the borrowed closed outcome"
+    )]
+    pub fn observed_payload(&self) -> Option<&UntrustedPayload> {
+        match self {
+            Self::Observed(payload) => Some(payload),
+            Self::OutcomeUnknown(_) => None,
+        }
+    }
+}
+
+/// Safe provenance binding between one authorized call and its adapter outcome.
+///
+/// This opaque value deliberately retains neither invocation arguments nor
+/// integration transport configuration. It also deliberately omits `Debug`
+/// and `Serialize` because an observed outcome still contains untrusted payload.
+pub struct BoundToolCallOutcome {
+    /// Adapter result bound to the authorization.
+    outcome: ToolCallOutcome,
+    /// Safe originating identity with all invocation authority removed.
+    provenance: ToolCallProvenance,
+}
+
+/// Safe provenance for one authorized call that failed before an outcome was observed.
+///
+/// This opaque value deliberately retains neither invocation arguments nor
+/// integration transport configuration. It also deliberately omits `Debug`
+/// and `Serialize` so failure handling cannot accidentally expose authority.
+pub struct BoundToolCallFailure {
+    /// Safe originating identity with all invocation authority removed.
+    provenance: ToolCallProvenance,
+}
+
+/// Shared safe identity extracted by consuming one invocation authorization.
+struct ToolCallProvenance {
+    /// Explicit owner approval identity, when present on the authorization.
+    approval: Option<OwnerApprovalId>,
+    /// Exact trusted authority tuple that produced the authorization.
+    authorization: AuthorizationContext,
+    /// Trusted configured side-effect classification.
+    class: ToolClass,
+    /// Stable mutation idempotency identity, when present.
+    idempotency_key: Option<IdempotencyKey>,
+    /// Trusted integration identity without configuration.
+    integration_id: IntegrationId,
+    /// Exact trusted configured tool name.
+    tool: ToolName,
+}
+
+#[expect(
+    clippy::implicit_return,
+    reason = "bound-outcome accessors use idiomatic tail expressions"
+)]
+impl BoundToolCallOutcome {
+    /// Returns explicit owner approval identity when bound to the call.
+    #[must_use]
+    #[inline]
+    pub fn approval(&self) -> Option<&OwnerApprovalId> {
+        self.provenance.approval.as_ref()
+    }
+
+    /// Returns the exact authority tuple bound by pure authorization.
+    #[must_use]
+    #[inline]
+    pub fn authorization(&self) -> &AuthorizationContext {
+        &self.provenance.authorization
+    }
+
+    /// Returns the trusted configured effect class.
+    #[must_use]
+    #[inline]
+    pub const fn class(&self) -> ToolClass {
+        self.provenance.class
+    }
+
+    /// Returns the stable mutation idempotency identity when present.
+    #[must_use]
+    #[inline]
+    pub fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        self.provenance.idempotency_key.as_ref()
+    }
+
+    /// Returns the trusted integration identity without configuration.
+    #[must_use]
+    #[inline]
+    pub fn integration_id(&self) -> &IntegrationId {
+        &self.provenance.integration_id
+    }
+
+    /// Consumes an ambiguous outcome into its exact non-replayable recovery token.
+    #[must_use]
+    #[inline]
+    pub fn into_reconciliation(self) -> Option<AuthorizedReconciliation> {
+        match self.outcome {
+            ToolCallOutcome::Observed(_) => None,
+            ToolCallOutcome::OutcomeUnknown(reconciliation) => Some(reconciliation),
+        }
+    }
+
+    /// Returns the adapter outcome for sanitized downstream projection.
+    #[must_use]
+    #[inline]
+    pub fn outcome(&self) -> &ToolCallOutcome {
+        &self.outcome
+    }
+
+    /// Returns the exact trusted configured tool name.
+    #[must_use]
+    #[inline]
+    pub fn tool(&self) -> &ToolName {
+        &self.provenance.tool
+    }
+}
+
+#[expect(
+    clippy::implicit_return,
+    reason = "bound-failure accessors use idiomatic tail expressions"
+)]
+impl BoundToolCallFailure {
+    /// Returns explicit owner approval identity when bound to the failed call.
+    #[must_use]
+    #[inline]
+    pub fn approval(&self) -> Option<&OwnerApprovalId> {
+        self.provenance.approval.as_ref()
+    }
+
+    /// Returns the exact authority tuple bound by pure authorization.
+    #[must_use]
+    #[inline]
+    pub fn authorization(&self) -> &AuthorizationContext {
+        &self.provenance.authorization
+    }
+
+    /// Returns the trusted configured effect class.
+    #[must_use]
+    #[inline]
+    pub const fn class(&self) -> ToolClass {
+        self.provenance.class
+    }
+
+    /// Returns the stable mutation idempotency identity when present.
+    #[must_use]
+    #[inline]
+    pub fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        self.provenance.idempotency_key.as_ref()
+    }
+
+    /// Returns the trusted integration identity without configuration.
+    #[must_use]
+    #[inline]
+    pub fn integration_id(&self) -> &IntegrationId {
+        &self.provenance.integration_id
+    }
+
+    /// Returns the exact trusted configured tool name.
+    #[must_use]
+    #[inline]
+    pub fn tool(&self) -> &ToolName {
+        &self.provenance.tool
+    }
 }
 
 /// One server notification kind that may be exposed only with a matching policy capability.
@@ -1754,6 +2340,55 @@ pub fn authorize_tool_call(
     proposal: ToolCallProposal,
     approval: Option<OwnerApprovalId>,
 ) -> Result<AuthorizedToolCall, ExternalToolError> {
+    decide_tool_call(integration, policy, context, proposal, approval).into_result()
+}
+
+/// Intersects policy and trusted configuration while retaining a sanitized exact denial.
+///
+/// Unlike [`authorize_tool_call`], this decision preserves the trusted context,
+/// requested identities, configured class, and stable refusal for audit consumers.
+/// It never retains proposal arguments or integration transport configuration in
+/// the denial transcript.
+#[must_use]
+#[inline]
+#[expect(
+    clippy::implicit_return,
+    reason = "the complete decision is the function's direct final projection"
+)]
+pub fn decide_tool_call(
+    integration: &McpIntegration,
+    policy: &PolicyIntersection,
+    context: &AuthorizationContext,
+    proposal: ToolCallProposal,
+    approval: Option<OwnerApprovalId>,
+) -> ToolCallAuthorizationDecision {
+    let requested_tool = proposal.tool.clone();
+    let class = integration.tool_class(&requested_tool);
+    match authorize_tool_call_inner(integration, policy, context, proposal, approval) {
+        Ok(call) => ToolCallAuthorizationDecision::Authorized(call),
+        Err(error) => ToolCallAuthorizationDecision::Denied(ToolCallDenial {
+            authorization: context.clone(),
+            class,
+            error,
+            integration_id: integration.id().clone(),
+            tool: requested_tool,
+        }),
+    }
+}
+
+/// Performs the original ordered authorization checks for both public projections.
+#[expect(
+    clippy::implicit_return,
+    clippy::single_call_fn,
+    reason = "one shared implementation preserves exact error precedence across the Result and transcript APIs"
+)]
+fn authorize_tool_call_inner(
+    integration: &McpIntegration,
+    policy: &PolicyIntersection,
+    context: &AuthorizationContext,
+    proposal: ToolCallProposal,
+    approval: Option<OwnerApprovalId>,
+) -> Result<AuthorizedToolCall, ExternalToolError> {
     match policy.permit_integration(integration) {
         Ok(()) => {}
         Err(error) => return Err(error),
@@ -1805,6 +2440,7 @@ pub fn authorize_tool_call(
     Ok(AuthorizedToolCall {
         approval,
         arguments,
+        authorization: context.clone(),
         class,
         idempotency_key,
         integration: integration.clone(),
@@ -2056,6 +2692,7 @@ mod tests {
     #[test]
     #[expect(
         clippy::expect_used,
+        clippy::indexing_slicing,
         clippy::panic,
         reason = "the positive authorization fixture must fail loudly when its required opaque reconciliation outcome is absent"
     )]
@@ -2074,18 +2711,41 @@ mod tests {
         )
         .expect("all six policy layers and mutation fences authorize the call");
 
+        let serialized = serde_json::to_value(&approved).expect("authorization serializes");
+        assert_eq!(
+            serialized["authorization"],
+            serde_json::json!({
+                "agent_role": "reviewer",
+                "assignment": "assignment-1",
+                "policy_decision": "policy-1",
+                "session": "session-1",
+                "workflow_mode": "review"
+            })
+        );
+
         assert_eq!(approved.class(), ToolClass::Mutate);
+        assert_eq!(approved.authorization(), &context);
         assert_eq!(approved.tool().as_str(), "apply_change");
         assert_eq!(
             approved.arguments().as_json(),
             r#"{"fixture":true,"idempotencyKey":"invocation-1"}"#
         );
+        let preview_reconciliation = approved
+            .reconciliation()
+            .expect("mutations retain a reconciliation request");
+        assert_eq!(preview_reconciliation.authorization(), &context);
         assert_eq!(
-            approved
-                .reconciliation()
-                .expect("mutations retain a reconciliation request")
-                .status_tool()
-                .as_str(),
+            preview_reconciliation.originating_tool().as_str(),
+            "apply_change"
+        );
+        assert_eq!(
+            preview_reconciliation
+                .owner_approval()
+                .map(OwnerApprovalId::as_str),
+            Some("owner-approval-1")
+        );
+        assert_eq!(
+            preview_reconciliation.status_tool().as_str(),
             "mutation_status"
         );
         let Some(ToolCallOutcome::OutcomeUnknown(reconciliation)) = approved.into_outcome_unknown()
@@ -2095,6 +2755,321 @@ mod tests {
         assert_eq!(
             reconciliation.arguments().as_json(),
             r#"{"idempotencyKey":"invocation-1"}"#
+        );
+        assert_eq!(reconciliation.authorization(), &context);
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "trusted provenance-binding fixtures must fail loudly"
+    )]
+    fn outcome_binding_refuses_reconciliation_from_another_authority_context() {
+        let integration = integration();
+        let first_context = context();
+        let other_context = AuthorizationContext::new(
+            text(WorkflowMode::parse, "review"),
+            text(AgentRole::parse, "reviewer"),
+            text(SessionId::parse, "session-other"),
+            text(AssignmentId::parse, "assignment-1"),
+            text(PolicyDecisionId::parse, "policy-1"),
+        );
+        let first_call = authorize_tool_call(
+            &integration,
+            &policy(&integration, &first_context),
+            &first_context,
+            proposal(
+                "apply_change",
+                Some(text(IdempotencyKey::parse, "invocation-1")),
+            ),
+            Some(text(OwnerApprovalId::parse, "approval-first")),
+        )
+        .expect("first authority permits its mutation");
+        let other_outcome = authorize_tool_call(
+            &integration,
+            &policy(&integration, &other_context),
+            &other_context,
+            proposal(
+                "apply_change",
+                Some(text(IdempotencyKey::parse, "invocation-1")),
+            ),
+            Some(text(OwnerApprovalId::parse, "approval-other")),
+        )
+        .expect("other authority permits its own mutation")
+        .into_outcome_unknown()
+        .expect("mutation produces reconciliation authority");
+
+        assert!(matches!(
+            first_call.bind_outcome(other_outcome),
+            Err(ToolCallOutcomeBindingError::ReconciliationMismatch)
+        ));
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
+        reason = "the cohesive identity-dimension table uses trusted fixtures and a concise authorization closure"
+    )]
+    fn outcome_binding_refuses_each_mismatched_reconciliation_identity_dimension() {
+        let integration = McpIntegration::new(
+            text(IntegrationId::parse, "multi-mutation-tools"),
+            McpTransport::Stdio {
+                program: AbsoluteProgram::parse("/usr/bin/example")
+                    .expect("fixture program is absolute"),
+                arguments: vec![],
+            },
+            [
+                ConfiguredTool::new(tool("apply_change"), ToolClass::Mutate),
+                ConfiguredTool::new(tool("apply_other"), ToolClass::Mutate),
+                ConfiguredTool::new(tool("mutation_status"), ToolClass::Observe),
+            ],
+            Some(tool("mutation_status")),
+        )
+        .expect("multi-mutation integration is valid");
+        let current = context();
+        let grant = PermissionGrant::new(
+            [
+                tool("apply_change"),
+                tool("apply_other"),
+                tool("mutation_status"),
+            ],
+            [
+                ExternalToolCapability::InvokeTools,
+                ExternalToolCapability::ReconcileMutations,
+            ],
+        );
+        let policy = PolicyIntersection::new(
+            &integration,
+            grant.clone(),
+            ScopedPermission::new(current.workflow_mode.clone(), grant.clone()),
+            ScopedPermission::new(current.agent_role.clone(), grant.clone()),
+            ScopedPermission::new(current.session.clone(), grant.clone()),
+            ScopedPermission::new(current.assignment.clone(), grant.clone()),
+            ScopedPermission::new(current.policy_decision.clone(), grant),
+        );
+        let authorized = |name: &str, key: &str, approval: &str| {
+            authorize_tool_call(
+                &integration,
+                &policy,
+                &current,
+                proposal(name, Some(text(IdempotencyKey::parse, key))),
+                Some(text(OwnerApprovalId::parse, approval)),
+            )
+            .expect("identity-dimension fixture is authorized")
+        };
+
+        for (dimension, other_tool, other_key, other_approval) in [
+            (
+                "owner approval",
+                "apply_change",
+                "invocation-exact",
+                "approval-other",
+            ),
+            (
+                "idempotency key",
+                "apply_change",
+                "invocation-other",
+                "approval-exact",
+            ),
+            (
+                "originating mutation tool",
+                "apply_other",
+                "invocation-exact",
+                "approval-exact",
+            ),
+        ] {
+            let exact_call = authorized("apply_change", "invocation-exact", "approval-exact");
+            let mismatched_outcome = authorized(other_tool, other_key, other_approval)
+                .into_outcome_unknown()
+                .expect("mismatched mutation still has its own reconciliation token");
+
+            assert!(
+                matches!(
+                    exact_call.bind_outcome(mismatched_outcome),
+                    Err(ToolCallOutcomeBindingError::ReconciliationMismatch)
+                ),
+                "binding must refuse a mismatched {dimension}"
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "trusted bound-transcript fixtures must fail loudly"
+    )]
+    fn outcome_binding_exposes_only_safe_call_provenance_and_the_exact_outcome() {
+        let integration = integration();
+        let current = context();
+        let call = authorize_tool_call(
+            &integration,
+            &policy(&integration, &current),
+            &current,
+            proposal(
+                "apply_change",
+                Some(text(IdempotencyKey::parse, "invocation-bound")),
+            ),
+            Some(text(OwnerApprovalId::parse, "approval-bound")),
+        )
+        .expect("authority permits the bound mutation");
+        let outcome = ToolCallOutcome::OutcomeUnknown(
+            call.reconciliation()
+                .expect("mutation carries exact reconciliation identity"),
+        );
+
+        let bound = call
+            .bind_outcome(outcome)
+            .expect("the call accepts its own exact reconciliation identity");
+
+        assert_eq!(bound.authorization(), &current);
+        assert_eq!(bound.integration_id(), integration.id());
+        assert_eq!(bound.tool().as_str(), "apply_change");
+        assert_eq!(bound.class(), ToolClass::Mutate);
+        assert_eq!(
+            bound.approval().map(OwnerApprovalId::as_str),
+            Some("approval-bound")
+        );
+        assert_eq!(
+            bound.idempotency_key().map(IdempotencyKey::as_str),
+            Some("invocation-bound")
+        );
+        assert!(matches!(
+            bound.outcome(),
+            ToolCallOutcome::OutcomeUnknown(reconciliation)
+                if reconciliation.authorization() == &current
+                    && reconciliation.originating_tool().as_str() == "apply_change"
+                    && reconciliation.owner_approval().map(OwnerApprovalId::as_str)
+                        == Some("approval-bound")
+        ));
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the observed-payload substitution fixture uses trusted bounded inputs"
+    )]
+    fn generic_outcome_binding_refuses_an_unattributed_observation() {
+        let integration = integration();
+        let current = context();
+        let call = authorize_tool_call(
+            &integration,
+            &policy(&integration, &current),
+            &current,
+            proposal("read_status", None),
+            None,
+        )
+        .expect("read-only call is authorized");
+        let unattributed = ToolCallOutcome::Observed(
+            UntrustedPayload::bounded("payload-from-another-call")
+                .expect("observed payload is bounded"),
+        );
+
+        assert!(
+            call.bind_outcome(unattributed).is_err(),
+            "a generic outcome cannot prove which call observed its payload"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "trusted success and failure provenance fixtures must fail loudly"
+    )]
+    fn consumed_authorizations_bind_observation_and_failure_without_replay_authority() {
+        let integration = integration();
+        let current = context();
+        let observed_call = authorize_tool_call(
+            &integration,
+            &policy(&integration, &current),
+            &current,
+            proposal("read_status", None),
+            None,
+        )
+        .expect("read-only call is authorized");
+        let bound = observed_call.bind_observation(
+            UntrustedPayload::bounded("payload-observed-by-this-call")
+                .expect("observed payload is bounded"),
+        );
+
+        assert_eq!(bound.authorization(), &current);
+        assert_eq!(bound.integration_id(), integration.id());
+        assert_eq!(bound.tool().as_str(), "read_status");
+        assert!(matches!(
+            bound.outcome(),
+            ToolCallOutcome::Observed(payload)
+                if payload.as_str() == "payload-observed-by-this-call"
+        ));
+
+        let failed_call = authorize_tool_call(
+            &integration,
+            &policy(&integration, &current),
+            &current,
+            proposal(
+                "apply_change",
+                Some(text(IdempotencyKey::parse, "invocation-failed")),
+            ),
+            Some(text(OwnerApprovalId::parse, "approval-failed")),
+        )
+        .expect("mutation call is authorized");
+        let failure = failed_call.bind_failure();
+
+        assert_eq!(failure.authorization(), &current);
+        assert_eq!(failure.integration_id(), integration.id());
+        assert_eq!(failure.tool().as_str(), "apply_change");
+        assert_eq!(failure.class(), ToolClass::Mutate);
+        assert_eq!(
+            failure.approval().map(OwnerApprovalId::as_str),
+            Some("approval-failed")
+        );
+        assert_eq!(
+            failure.idempotency_key().map(IdempotencyKey::as_str),
+            Some("invocation-failed")
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::panic,
+        reason = "the denial transcript fixture must fail loudly and remain exhaustive"
+    )]
+    fn complete_decision_retains_exact_safe_denial_and_result_error_precedence() {
+        let integration = integration();
+        let current = context();
+        let secret_arguments =
+            ToolArguments::parse(r#"{"secret_argument":"must-not-enter-denial-transcript"}"#)
+                .expect("denial fixture arguments are valid JSON");
+        let decision = decide_tool_call(
+            &integration,
+            &policy(&integration, &current),
+            &current,
+            ToolCallProposal::new(tool("not_configured"), secret_arguments, None),
+            None,
+        );
+        let ToolCallAuthorizationDecision::Denied(denial) = decision else {
+            panic!("unknown tool must produce a denial transcript");
+        };
+
+        assert_eq!(denial.authorization(), &current);
+        assert_eq!(denial.integration_id(), integration.id());
+        assert_eq!(denial.tool().as_str(), "not_configured");
+        assert_eq!(denial.class(), None);
+        assert_eq!(denial.error(), ExternalToolError::UnknownTool);
+        assert_eq!(denial.code(), "external_tools_unknown_tool");
+        let serialized = serde_json::to_string(&denial).expect("safe denial serializes");
+        assert!(!serialized.contains("must-not-enter-denial-transcript"));
+        assert!(!serialized.contains("/usr/bin/example"));
+
+        assert_eq!(
+            authorize_tool_call(
+                &integration,
+                &policy(&integration, &current),
+                &current,
+                proposal("not_configured", None),
+                None,
+            ),
+            Err(ExternalToolError::UnknownTool)
         );
     }
 

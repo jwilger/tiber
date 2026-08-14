@@ -72,7 +72,7 @@ calls carry an idempotency identity and ambiguous outcomes enter
 reconciliation. Sampling, elicitation, and MCP tasks are explicit refusals.
 This slice adds no `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler,
 or runner integration and makes no live external-service validation claim.
-Audit/integration S3 remains pending.
+The completed S3 audit boundary remains pure and unconnected.
 
 ### Current memory S2 boundary
 
@@ -94,6 +94,26 @@ Retain requests name their source turn, and recall requests never admit that
 same turn. Memory
 failures are visible and normally nonfatal. This S2 boundary has no EventCore,
 workflow, CLI, TUI, app-server, or scheduler integration.
+
+### Current audit and integration S3 boundary
+
+`tiber-integration-audit` defines provider-neutral, serializable facts for
+memory and external-tool interactions. Its facts retain trusted provenance,
+stable policy/operation outcomes, reconciliation identities, and bounded
+evidence—not raw memory text, recall queries or recalled content, tool
+arguments, integration configuration, transport detail, or server payloads.
+Observed external payloads contribute only a byte count and domain-separated
+digest. The DTOs neither publish EventCore facts nor create workflow,
+scheduler, CLI, TUI, app-server, or runner authority.
+
+Local deterministic fake-server tests cover no-I/O policy denial, sanitized
+tool observation/ambiguity/reconciliation, and scoped memory lifecycle plus
+hostile-input handling. An ignored Hindsight live test is available only with
+both `TIBER_RUN_LIVE_HINDSIGHT=1` and a nonempty
+`TIBER_HINDSIGHT_ENDPOINT`; it uses nonce-isolated synthetic data and
+exact-document cleanup. It is not part of default CI, which remains
+network-free, and this document makes no claim that an external service was
+executed.
 
 ## Problem
 

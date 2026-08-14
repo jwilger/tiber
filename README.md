@@ -66,7 +66,7 @@ sampling, elicitation, MCP tasks, resource templates, subscriptions, cache
 directives, and interactive continuations are refused. This is not yet a
 workflow `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler, or runner
 integration, and it does not claim live external-service validation. Hindsight
-audit/integration S3 remains pending.
+and audit/integration S3 is now a pure, unconnected audit-fact boundary.
 
 ## Memory boundary (S2)
 
@@ -88,6 +88,26 @@ name their source turn, and recall requests never admit that same turn. Visible
 memory failures remain nonfatal unless a
 future workflow expressly requires memory. This boundary is not yet connected
 to EventCore, workflow execution, the CLI, TUI, app-server, or scheduler.
+
+## Audit facts and integration evidence (S3)
+
+`tiber-integration-audit` supplies provider-neutral, serializable audit facts
+for the memory and external-tool boundaries. They retain trusted provenance,
+stable policy and operation outcomes, reconciliation identities, and bounded
+evidence. Memory facts exclude raw retained text, recall queries, and recalled
+content. External-tool facts exclude arguments, transport/configuration, and
+server payloads; an observed payload is represented only by its byte count and
+a domain-separated digest. These immutable DTOs do not publish EventCore facts
+or add workflow, scheduler, CLI, TUI, app-server, or runner integration.
+
+Deterministic local fake-server coverage exercises policy denial without server
+I/O, sanitized observed/ambiguous/reconciled tool outcomes, and scoped memory
+lifecycle and hostile-input behavior. The Hindsight adapter also provides an
+ignored live test that runs only when both
+`TIBER_RUN_LIVE_HINDSIGHT=1` and a nonempty `TIBER_HINDSIGHT_ENDPOINT` are
+supplied. It uses a nonce-isolated synthetic lifecycle and exact-document
+cleanup. Default CI remains network-free; this test is provided as an explicit
+operator check and has not been used to claim external-service execution.
 
 `tiber tasks show <task-ref>` renders subtasks by stable one-based occurrence,
 identity, status, title, and prerequisites. The narrowly scoped

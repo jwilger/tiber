@@ -1228,6 +1228,8 @@ impl RecalledMemory {
 /// Bounded recall output, preserving backend rank order after mandatory filtering.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RecallResult {
+    /// Authoritative estimated-token total computed while admitting memories.
+    admitted_tokens: usize,
     /// Rank-preserving memories that passed scope, turn, and budget filtering.
     memories: Vec<RecalledMemory>,
 }
@@ -1238,6 +1240,12 @@ pub struct RecallResult {
     reason = "filtering is intentionally shown before result inspection"
 )]
 impl RecallResult {
+    /// Returns the authoritative estimated-token total for admitted memories.
+    #[must_use]
+    pub const fn admitted_tokens(&self) -> usize {
+        self.admitted_tokens
+    }
+
     /// Filters candidates by trusted scope, current-turn exclusion, and budgets.
     #[must_use]
     pub fn from_candidates(request: &RecallRequest, candidates: Vec<RecallCandidate>) -> Self {
@@ -1275,7 +1283,10 @@ impl RecallResult {
                 text: candidate.text,
             });
         }
-        Self { memories }
+        Self {
+            admitted_tokens: consumed_tokens,
+            memories,
+        }
     }
 
     /// Returns rank-preserving advisory memories.
@@ -1980,6 +1991,11 @@ mod tests {
         assert_eq!(
             result.memories().first().map(|memory| memory.id().as_str()),
             Some("valid")
+        );
+        let serialized = serde_json::to_value(&result).expect("recall result serializes");
+        assert_eq!(
+            serialized.get("admitted_tokens"),
+            Some(&serde_json::Value::from(result.admitted_tokens()))
         );
     }
 

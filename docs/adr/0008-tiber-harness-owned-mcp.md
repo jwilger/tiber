@@ -46,8 +46,17 @@ Tiber can intersect all authority policies and treat MCP data as untrusted.
 Protocol compatibility and ambiguous mutations become Tiber responsibilities.
 The S1 boundary adds no workflow `TiberEffect`, EventCore, CLI, TUI,
 app-server, scheduler, or runner integration and makes no live
-external-service validation claim. Hindsight S2 and audit/integration S3 remain
-pending.
+external-service validation claim. Hindsight S2 and the pure S3 audit-fact
+boundary are available without changing that execution scope.
+
+S3's provider-neutral DTOs bind policy outcomes to trusted authorization and
+configured identities, retain reconciliation identity, and redact tool
+arguments, transport/configuration, and server payloads. Observed payloads are
+represented only by a byte count and domain-separated digest. Deterministic
+local fake-server tests prove that policy denial produces no server I/O and
+that observed, ambiguous, and reconciled outcomes stay sanitized. These facts
+are not EventCore publications or durable receipts, and add no workflow,
+scheduler, CLI, TUI, app-server, or runner wiring.
 
 ## Alternatives considered
 

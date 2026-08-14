@@ -19,6 +19,7 @@ tokio-util = { version = "=0.7.18", default-features = false, features = ["rt"] 
 tracing = "=0.1.44"
 
 [dev-dependencies]
+tiber-integration-audit = { path = "../tiber-integration-audit" }
 tokio = { version = "=1.53.1", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [lints]

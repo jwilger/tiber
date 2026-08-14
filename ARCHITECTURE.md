@@ -269,7 +269,8 @@ Mutating calls require stable idempotency; an unknown result enters the
 configured read-only reconciliation operation rather than an automatic replay.
 This S1 boundary is not connected to workflow `TiberEffect`, EventCore, CLI,
 TUI, app-server, scheduler, or runner code, and no live external-service
-validation is claimed. Audit/integration S3 remains a subsequent slice.
+validation is claimed. The S3 audit-fact boundary is pure and does not change
+that execution boundary.
 
 ## Memory
 
@@ -292,6 +293,26 @@ untrusted, provenance-carrying, and bounded by item and token budgets. It
 cannot grant authority. Failure is visible and nonfatal unless a future
 workflow explicitly requires memory. This boundary is not connected to
 EventCore, workflow execution, CLI, TUI, app-server, or scheduler.
+
+## Audit facts and integration evidence
+
+`tiber-integration-audit` is a functional-core boundary that constructs
+provider-neutral, serializable audit DTOs. It records trusted provenance,
+stable policy and operation outcomes, reconciliation identities, and bounded
+evidence. It never retains raw memory text, recall queries, recalled content,
+tool arguments, integration/transport configuration, or server payloads. An
+observed external payload becomes only a byte count and domain-separated digest.
+The facts are not EventCore publications or durable receipts yet and grant no
+workflow, scheduler, CLI, TUI, app-server, or runner authority.
+
+Deterministic fake-server coverage crosses both adapters: a policy denial
+performs no server I/O, and tool observation, ambiguity, reconciliation,
+scoped memory lifecycle, and hostile inputs yield only sanitized facts. The
+Hindsight adapter also carries an ignored, explicit-only live check. It runs
+only with `TIBER_RUN_LIVE_HINDSIGHT=1` plus a nonempty
+`TIBER_HINDSIGHT_ENDPOINT`, uses a nonce-isolated synthetic lifecycle, and
+forgets its exact document during cleanup. Default CI is network-free; the
+existence of this check is not evidence of a deployed service run.
 
 ## TUI
 

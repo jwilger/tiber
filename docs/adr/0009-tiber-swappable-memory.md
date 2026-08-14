@@ -32,13 +32,22 @@ advisory, untrusted context, never authority for a workflow or effect.
 
 Tiber connects only to an explicit Hindsight endpoint. It does not install or
 globally configure Hindsight, retry requests, manage Hindsight authentication,
-or claim live-service validation. This boundary is not EventCore, workflow,
-CLI, TUI, app-server, or scheduler integration.
+or claim live-service validation. The S3 audit DTOs retain trusted provenance,
+stable bounded outcomes, reconciliation identity, and retain evidence while
+excluding raw retained text, recall queries, and recalled content. They are not
+EventCore publications, durable receipts, or workflow, CLI, TUI, app-server,
+or scheduler integration.
 
 ## Consequences
 
 Memory is replaceable and failures are visible but normally nonfatal. EventCore
 remains authoritative and Hindsight `reflect` is not primary v1 reasoning.
+Deterministic local fake-server coverage checks scoped lifecycle and
+hostile-input behavior without network access. An ignored live test is an
+explicit operator check only: it requires exact `TIBER_RUN_LIVE_HINDSIGHT=1`
+and a nonempty `TIBER_HINDSIGHT_ENDPOINT`, uses nonce-isolated synthetic data,
+and attempts exact-document cleanup. Default CI remains network-free, and this
+ADR does not claim that a live Hindsight service has been executed.
 
 ## Alternatives considered
 

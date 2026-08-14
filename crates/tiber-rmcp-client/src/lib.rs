@@ -58,10 +58,11 @@ use sse_stream::{Sse, SseStream};
 use tiber_external_tools_core::{
     AuthorizedPromptGet, AuthorizedPromptListing, AuthorizedReconciliation,
     AuthorizedResourceListing, AuthorizedResourceRead, AuthorizedRootDeclaration,
-    AuthorizedServerObservation, AuthorizedToolCall, AuthorizedToolListing, LiteralArgument,
-    MAX_CONFIGURED_TOOLS, MAX_SEMANTIC_TEXT_BYTES, McpIntegration, McpTransport,
-    ReconciliationOutcome, ServerObservationKind, ToolArguments, ToolCallOutcome, ToolClass,
-    ToolName, UntrustedPayload,
+    AuthorizedServerObservation, AuthorizedToolCall, AuthorizedToolListing,
+    BoundReconciliationFailure, BoundReconciliationOutcome, BoundToolCallFailure,
+    BoundToolCallOutcome, LiteralArgument, MAX_CONFIGURED_TOOLS, MAX_SEMANTIC_TEXT_BYTES,
+    McpIntegration, McpTransport, ReconciliationOutcome, ServerObservationKind, ToolArguments,
+    ToolClass, ToolName, UntrustedPayload,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
@@ -643,6 +644,155 @@ impl Error for RmcpClientError {
             } => Some(cause),
             Self { cause: None, .. } => None,
         }
+    }
+}
+
+/// A sanitized adapter failure bound to the exact consumed call authorization.
+///
+/// The provenance transcript contains no arguments, integration configuration,
+/// or replay authority. This wrapper deliberately omits derived `Debug` so
+/// diagnostics cannot expose future provenance fields by accident.
+pub struct RmcpToolCallError {
+    /// Stable sanitized adapter error.
+    error: RmcpClientError,
+    /// Safe originating call identity with all invocation authority removed.
+    provenance: BoundToolCallFailure,
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    clippy::implicit_return,
+    reason = "the private constructor precedes the public safe inspectors in lifecycle order"
+)]
+impl RmcpToolCallError {
+    /// Binds an adapter failure to consumed, non-replayable call provenance.
+    const fn new(error: RmcpClientError, provenance: BoundToolCallFailure) -> Self {
+        Self { error, provenance }
+    }
+
+    /// Returns the stable sanitized adapter error.
+    #[must_use]
+    #[inline]
+    pub const fn error(&self) -> &RmcpClientError {
+        &self.error
+    }
+
+    /// Returns safe originating provenance with no invocation authority.
+    #[must_use]
+    #[inline]
+    pub const fn provenance(&self) -> &BoundToolCallFailure {
+        &self.provenance
+    }
+}
+
+impl fmt::Debug for RmcpToolCallError {
+    #[expect(
+        clippy::implicit_return,
+        reason = "debug deliberately exposes only the stable sanitized adapter error"
+    )]
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RmcpToolCallError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for RmcpToolCallError {
+    #[expect(
+        clippy::implicit_return,
+        reason = "display delegates only to the stable sanitized adapter error"
+    )]
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "the sanitized adapter error is the only meaningful causal override"
+)]
+impl Error for RmcpToolCallError {
+    #[expect(
+        clippy::implicit_return,
+        reason = "the sanitized adapter error is the only exposed causal source"
+    )]
+    #[inline]
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// A sanitized adapter failure bound to the exact recovery authorization.
+///
+/// The provenance transcript contains no arguments, integration configuration,
+/// payload, or invocation replay authority. This wrapper deliberately omits
+/// derived `Debug` so diagnostics cannot expose future provenance fields by
+/// accident.
+pub struct RmcpReconciliationError {
+    /// Stable sanitized adapter error.
+    error: RmcpClientError,
+    /// Safe originating recovery identity with all invocation authority removed.
+    provenance: BoundReconciliationFailure,
+}
+
+#[expect(
+    clippy::implicit_return,
+    reason = "the public safe inspectors return direct references to the redacted transcript"
+)]
+impl RmcpReconciliationError {
+    /// Returns the stable sanitized adapter error.
+    #[must_use]
+    #[inline]
+    pub const fn error(&self) -> &RmcpClientError {
+        &self.error
+    }
+
+    /// Returns exact safe recovery provenance with no invocation authority.
+    #[must_use]
+    #[inline]
+    pub const fn provenance(&self) -> &BoundReconciliationFailure {
+        &self.provenance
+    }
+}
+
+impl fmt::Debug for RmcpReconciliationError {
+    #[expect(
+        clippy::implicit_return,
+        reason = "debug deliberately exposes only the stable sanitized adapter error"
+    )]
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RmcpReconciliationError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for RmcpReconciliationError {
+    #[expect(
+        clippy::implicit_return,
+        reason = "display delegates only to the stable sanitized adapter error"
+    )]
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "the sanitized adapter error is the only meaningful causal override"
+)]
+impl Error for RmcpReconciliationError {
+    #[expect(
+        clippy::implicit_return,
+        reason = "the sanitized adapter error is the only exposed causal source"
+    )]
+    #[inline]
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -1908,50 +2058,59 @@ impl RmcpClient {
 
     /// Invokes exactly one opaque authorized tool call without any replay route.
     ///
+    /// The authorization is consumed and every result carries only its safe
+    /// originating provenance, so neither success nor failure can replay it.
+    ///
     /// # Errors
     ///
-    /// Returns a stable error for an invalid read-only operation. A dispatched
-    /// mutating operation instead returns its required reconciliation outcome.
+    /// Returns a stable provenance-bound error for an invalid operation. A
+    /// dispatched mutating operation instead returns its required ambiguous
+    /// outcome bound to the exact consumed authorization.
     #[inline]
     pub async fn call(
         &mut self,
         authorization: AuthorizedToolCall,
         options: RequestOptions,
-    ) -> Result<ToolCallOutcome, RmcpClientError> {
+    ) -> Result<BoundToolCallOutcome, RmcpToolCallError> {
         let operation = RmcpClientOperation::InvokeTool;
         let failure = |kind| RmcpClientError::new(kind, operation);
         let deadline = match operation_deadline(&options, operation) {
             Ok(deadline) => deadline,
             Err(error) => {
                 self.close_if_connection_failure(error).await;
-                return Err(error);
+                return Err(RmcpToolCallError::new(error, authorization.bind_failure()));
             }
         };
         if let Err(error) = self.ensure_timeout(&options, operation) {
             self.close_if_connection_failure(error).await;
-            return Err(error);
+            return Err(RmcpToolCallError::new(error, authorization.bind_failure()));
         }
         if authorization.integration() != &self.integration {
-            return Err(failure(RmcpClientErrorKind::IntegrationMismatch));
+            return Err(RmcpToolCallError::new(
+                failure(RmcpClientErrorKind::IntegrationMismatch),
+                authorization.bind_failure(),
+            ));
         }
         let class = authorization.class();
         let request = match call_request(authorization.tool(), authorization.arguments(), operation)
         {
             Ok(request) => request,
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(RmcpToolCallError::new(error, authorization.bind_failure()));
+            }
         };
         let request_options = match remaining_options(&options, deadline, operation) {
             Ok(remaining) => remaining,
             Err(error) => {
                 self.close_if_connection_failure(error).await;
-                return Err(error);
+                return Err(RmcpToolCallError::new(error, authorization.bind_failure()));
             }
         };
         let request_result = self.request(request, &request_options, operation).await;
         match request_result {
             Ok(ServerResult::CallToolResult(call_result)) => {
                 match bounded_call_result(&call_result, operation) {
-                    Ok(payload) => Ok(ToolCallOutcome::Observed(payload)),
+                    Ok(payload) => Ok(authorization.bind_observation(payload)),
                     Err(error) => self.ambiguous_or_error(authorization, class, error).await,
                 }
             }
@@ -1975,32 +2134,40 @@ impl RmcpClient {
     }
 
     /// Reconciles one opaque ambiguous mutation through its configured status tool only.
+    /// Every success or failure is bound to that exact recovery authorization.
     ///
     /// # Errors
     ///
-    /// Returns a stable error when the authorization targets another integration
-    /// or the operation cannot be started; an invalid status is `StillUnknown`.
+    /// Returns a stable provenance-bound error when the authorization targets
+    /// another integration or the operation cannot be started; an invalid
+    /// status is a provenance-bound `StillUnknown` outcome.
     #[inline]
     pub async fn reconcile(
         &mut self,
-        authorization: AuthorizedReconciliation,
+        authorization: &AuthorizedReconciliation,
         options: RequestOptions,
-    ) -> Result<ReconciliationOutcome, RmcpClientError> {
+    ) -> Result<BoundReconciliationOutcome, RmcpReconciliationError> {
         let operation = RmcpClientOperation::ReconcileMutation;
         let failure = |kind| RmcpClientError::new(kind, operation);
+        let bind_failure = |error| RmcpReconciliationError {
+            error,
+            provenance: authorization.bind_failure(),
+        };
         let deadline = match operation_deadline(&options, operation) {
             Ok(deadline) => deadline,
             Err(error) => {
                 self.close_if_connection_failure(error).await;
-                return Err(error);
+                return Err(bind_failure(error));
             }
         };
         if let Err(error) = self.ensure_timeout(&options, operation) {
             self.close_if_connection_failure(error).await;
-            return Err(error);
+            return Err(bind_failure(error));
         }
         if authorization.integration() != &self.integration {
-            return Err(failure(RmcpClientErrorKind::IntegrationMismatch));
+            return Err(bind_failure(failure(
+                RmcpClientErrorKind::IntegrationMismatch,
+            )));
         }
         let request = match call_request(
             authorization.status_tool(),
@@ -2008,13 +2175,13 @@ impl RmcpClient {
             operation,
         ) {
             Ok(request) => request,
-            Err(error) => return Err(error),
+            Err(error) => return Err(bind_failure(error)),
         };
         let request_options = match remaining_options(&options, deadline, operation) {
             Ok(remaining) => remaining,
             Err(error) => {
                 self.close_if_connection_failure(error).await;
-                return Err(error);
+                return Err(bind_failure(error));
             }
         };
         let reconciliation_result = if let Ok(ServerResult::CallToolResult(call_result)) =
@@ -2023,18 +2190,19 @@ impl RmcpClient {
             call_result
         } else {
             self.close_inner().await;
-            return Ok(ReconciliationOutcome::StillUnknown);
+            return Ok(authorization.bind_outcome(ReconciliationOutcome::StillUnknown));
         };
         if bounded_call_result(&reconciliation_result, operation).is_err() {
             self.close_inner().await;
-            return Ok(ReconciliationOutcome::StillUnknown);
+            return Ok(authorization.bind_outcome(ReconciliationOutcome::StillUnknown));
         }
         let reconciliation_status = StrictReconciliationStatus::from(&reconciliation_result);
-        Ok(match reconciliation_status {
+        let outcome = match reconciliation_status {
             StrictReconciliationStatus::Committed => ReconciliationOutcome::Committed,
             StrictReconciliationStatus::NotCommitted => ReconciliationOutcome::NotCommitted,
             StrictReconciliationStatus::StillUnknown => ReconciliationOutcome::StillUnknown,
-        })
+        };
+        Ok(authorization.bind_outcome(outcome))
     }
 
     /// Cancels the service and explicitly kills and reaps a spawned stdio child.
@@ -2507,18 +2675,20 @@ impl RmcpClient {
         }
     }
 
-    /// Converts a post-dispatch mutating failure into its move-only reconciliation outcome.
+    /// Converts a post-dispatch mutating failure into its exact reconciliation outcome.
     async fn ambiguous_or_error(
         &mut self,
         authorization: AuthorizedToolCall,
         class: ToolClass,
         error: RmcpClientError,
-    ) -> Result<ToolCallOutcome, RmcpClientError> {
+    ) -> Result<BoundToolCallOutcome, RmcpToolCallError> {
         self.close_inner().await;
         if class == ToolClass::Mutate {
-            return authorization.into_outcome_unknown().ok_or(error);
+            return authorization
+                .bind_ambiguity()
+                .map_err(|provenance| RmcpToolCallError::new(error, provenance));
         }
-        Err(error)
+        Err(RmcpToolCallError::new(error, authorization.bind_failure()))
     }
 
     /// Cancels active work, closes RMCP, and reaps a direct stdio child.
@@ -3515,14 +3685,14 @@ mod tests {
     use serde_json::{Value, json};
     use tiber_external_tools_core::{
         AbsoluteProgram, AgentRole, AssignmentId, AuthorizationContext, AuthorizedPromptGet,
-        AuthorizedResourceListing, AuthorizedResourceRead, AuthorizedServerObservation,
-        AuthorizedToolCall, AuthorizedToolListing, ConfiguredTool, ExternalToolCapability,
-        ExternalToolError, IdempotencyKey, IntegrationId, LiteralArgument, LoopbackEndpoint,
-        MAX_UNTRUSTED_PAYLOAD_BYTES, McpIntegration, McpTransport, OwnerApprovalId,
-        PermissionGrant, PolicyDecisionId, PolicyIntersection, PromptArguments, PromptGetProposal,
-        PromptName, ReconciliationOutcome, ResourceReadProposal, ResourceUri, ScopedPermission,
-        ServerObservationKind, SessionId, TiberOwnedRoot, ToolArguments, ToolCallOutcome,
-        ToolCallProposal, ToolClass, ToolName, WorkflowMode, authorize_prompt_get,
+        AuthorizedReconciliation, AuthorizedResourceListing, AuthorizedResourceRead,
+        AuthorizedServerObservation, AuthorizedToolCall, AuthorizedToolListing, ConfiguredTool,
+        ExternalToolCapability, ExternalToolError, IdempotencyKey, IntegrationId, LiteralArgument,
+        LoopbackEndpoint, MAX_UNTRUSTED_PAYLOAD_BYTES, McpIntegration, McpTransport,
+        OwnerApprovalId, PermissionGrant, PolicyDecisionId, PolicyIntersection, PromptArguments,
+        PromptGetProposal, PromptName, ReconciliationOutcome, ResourceReadProposal, ResourceUri,
+        ScopedPermission, ServerObservationKind, SessionId, TiberOwnedRoot, ToolArguments,
+        ToolCallOutcome, ToolCallProposal, ToolClass, ToolName, WorkflowMode, authorize_prompt_get,
         authorize_prompt_listing, authorize_resource_listing, authorize_resource_read,
         authorize_root_declaration, authorize_server_observation, authorize_tool_call,
         authorize_tool_listing,
@@ -3846,6 +4016,31 @@ mod tests {
 
     #[expect(
         clippy::expect_used,
+        clippy::single_call_fn,
+        reason = "the concrete failure-path fixture must fail loudly if invalid options are accepted"
+    )]
+    async fn assert_invalid_reconciliation_is_provenance_bound(
+        client: &mut RmcpClient,
+        reconciliation: &AuthorizedReconciliation,
+    ) {
+        let failure = client
+            .reconcile(
+                reconciliation,
+                RequestOptions::new(Duration::ZERO, CancellationToken::new()),
+            )
+            .await
+            .err()
+            .expect("invalid timeout returns bound reconciliation failure");
+        assert_eq!(failure.error().kind(), RmcpClientErrorKind::InvalidTimeout);
+        assert_eq!(
+            failure.provenance().idempotency_key(),
+            reconciliation.idempotency_key()
+        );
+        assert_eq!(failure.provenance().originating_tool().as_str(), "mutate");
+    }
+
+    #[expect(
+        clippy::expect_used,
         clippy::implicit_return,
         reason = "the deterministic protocol fixture must fail loudly on malformed input"
     )]
@@ -4146,7 +4341,6 @@ mod tests {
         clippy::absolute_paths,
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::panic,
         clippy::too_many_lines,
         reason = "the end-to-end stdio transcript deliberately uses direct runtime calls, JSON field assertions, and a single readable scenario"
     )]
@@ -4288,9 +4482,10 @@ mod tests {
             .call(call_authorization("inspect", ToolClass::Observe), options())
             .await
             .expect("authorized observation succeeds");
-        let ToolCallOutcome::Observed(payload) = outcome else {
-            panic!("read-only call returns an observation");
-        };
+        let payload = outcome
+            .outcome()
+            .observed_payload()
+            .expect("read-only call returns an observation");
         assert!(payload.as_str().contains("untrusted observation"));
         client.close().await;
         server.await.expect("fixture server completes");
@@ -5394,6 +5589,7 @@ mod tests {
         clippy::absolute_paths,
         clippy::expect_used,
         clippy::indexing_slicing,
+        clippy::panic,
         reason = "the cancellation fixture directly drives and asserts its stdio protocol transcript"
     )]
     async fn pre_dispatch_mutation_cancellation_is_typed_and_never_calls_the_server() {
@@ -5432,16 +5628,18 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
-        assert_eq!(
-            client
-                .call(
-                    call_authorization("mutate", ToolClass::Mutate),
-                    RequestOptions::new(Duration::from_secs(1), cancellation),
-                )
-                .await
-                .map_err(error_kind),
-            Err(RmcpClientErrorKind::Cancelled)
-        );
+        let error = match client
+            .call(
+                call_authorization("mutate", ToolClass::Mutate),
+                RequestOptions::new(Duration::from_secs(1), cancellation),
+            )
+            .await
+        {
+            Ok(_outcome) => panic!("pre-dispatch cancellation must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.error().kind(), RmcpClientErrorKind::Cancelled);
+        assert_eq!(error.provenance().tool().as_str(), "mutate");
         client.close().await;
         server
             .await
@@ -5509,7 +5707,10 @@ mod tests {
             )
             .await
             .expect("a dispatched mutation becomes explicitly ambiguous on cancellation");
-        assert!(matches!(outcome, ToolCallOutcome::OutcomeUnknown(_)));
+        assert!(matches!(
+            outcome.outcome(),
+            ToolCallOutcome::OutcomeUnknown(_)
+        ));
         cancel_task.await.expect("fixture canceller completes");
         server
             .await
@@ -5521,7 +5722,7 @@ mod tests {
         clippy::absolute_paths,
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::panic,
+        clippy::too_many_lines,
         reason = "the transport-loss fixture directly drives a multi-connection stdio transcript and requires a typed reconciliation token"
     )]
     async fn transport_loss_returns_one_reconciliation_token_with_canonical_status_arguments() {
@@ -5564,9 +5765,9 @@ mod tests {
             .call(call_authorization("mutate", ToolClass::Mutate), options())
             .await
             .expect("transport loss makes the mutation outcome explicit");
-        let ToolCallOutcome::OutcomeUnknown(reconciliation) = outcome else {
-            panic!("mutating transport loss returns a reconciliation token");
-        };
+        let reconciliation = outcome
+            .into_reconciliation()
+            .expect("mutating transport loss returns a reconciliation token");
         assert_eq!(invocation_count.load(Ordering::Acquire), 1);
         server
             .await
@@ -5617,10 +5818,24 @@ mod tests {
         .await
         .expect("status fixture initializes");
 
+        let reconciled = status_client
+            .reconcile(&reconciliation, options())
+            .await
+            .expect("status fixture returns a bound reconciliation result");
+        assert_eq!(reconciled.outcome(), ReconciliationOutcome::Committed);
         assert_eq!(
-            status_client.reconcile(reconciliation, options()).await,
-            Ok(ReconciliationOutcome::Committed)
+            reconciled.idempotency_key().as_str(),
+            reconciliation.idempotency_key().as_str()
         );
+        assert_eq!(reconciled.originating_tool().as_str(), "mutate");
+        assert_eq!(
+            reconciled
+                .approval()
+                .map(tiber_external_tools_core::OwnerApprovalId::as_str),
+            Some("approval-1")
+        );
+        assert_invalid_reconciliation_is_provenance_bound(&mut status_client, &reconciliation)
+            .await;
         status_client.close().await;
         status_server
             .await
@@ -6054,7 +6269,6 @@ IFS= read -r hold
     #[expect(
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::panic,
         clippy::unreachable,
         reason = "the raw HTTP fixture asserts an exact request transcript and treats unexpected requests as test failures"
     )]
@@ -6127,9 +6341,10 @@ IFS= read -r hold
             .call(authorization, options())
             .await
             .expect("loopback HTTP call succeeds");
-        let ToolCallOutcome::Observed(payload) = outcome else {
-            panic!("read-only HTTP call returns an observation");
-        };
+        let payload = outcome
+            .outcome()
+            .observed_payload()
+            .expect("read-only HTTP call returns an observation");
         assert!(payload.as_str().contains("loopback JSON observation"));
         client.close().await;
         server.await.expect("loopback HTTP fixture completes");
@@ -6139,7 +6354,6 @@ IFS= read -r hold
     #[expect(
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::panic,
         clippy::unreachable,
         reason = "the raw SSE fixture asserts an exact request transcript and treats unexpected requests as test failures"
     )]
@@ -6214,9 +6428,10 @@ IFS= read -r hold
             .call(authorization, options())
             .await
             .expect("bounded SSE result succeeds");
-        let ToolCallOutcome::Observed(payload) = outcome else {
-            panic!("SSE read-only call returns an observation");
-        };
+        let payload = outcome
+            .outcome()
+            .observed_payload()
+            .expect("SSE read-only call returns an observation");
         assert!(payload.as_str().contains("loopback SSE observation"));
         client.close().await;
         server.await.expect("loopback SSE fixture completes");
@@ -6299,7 +6514,10 @@ IFS= read -r hold
             .call(authorization, options())
             .await
             .expect("a dispatched mutation becomes explicitly ambiguous");
-        assert!(matches!(outcome, ToolCallOutcome::OutcomeUnknown(_)));
+        assert!(matches!(
+            outcome.outcome(),
+            ToolCallOutcome::OutcomeUnknown(_)
+        ));
         server
             .await
             .expect("fixture observes no retry after the transport drop");
@@ -6391,7 +6609,10 @@ IFS= read -r hold
         .await
         .expect("operation deadline interrupts a stalled HTTP post")
         .expect("a dispatched mutation becomes explicitly ambiguous");
-        assert!(matches!(outcome, ToolCallOutcome::OutcomeUnknown(_)));
+        assert!(matches!(
+            outcome.outcome(),
+            ToolCallOutcome::OutcomeUnknown(_)
+        ));
         server
             .await
             .expect("fixture observes the aborted HTTP request");
@@ -6476,7 +6697,10 @@ IFS= read -r hold
             .call(authorization, options())
             .await
             .expect("an incomplete mutation stream becomes explicitly ambiguous");
-        assert!(matches!(outcome, ToolCallOutcome::OutcomeUnknown(_)));
+        assert!(matches!(
+            outcome.outcome(),
+            ToolCallOutcome::OutcomeUnknown(_)
+        ));
         server
             .await
             .expect("fixture observes no SSE resume request");
@@ -6591,7 +6815,10 @@ IFS= read -r hold
             .call(authorization, options())
             .await
             .expect("a session-expired mutation becomes explicitly ambiguous");
-        assert!(matches!(outcome, ToolCallOutcome::OutcomeUnknown(_)));
+        assert!(matches!(
+            outcome.outcome(),
+            ToolCallOutcome::OutcomeUnknown(_)
+        ));
         server
             .await
             .expect("fixture observes no session reinitialization or mutation replay");

@@ -1,0 +1,18 @@
+[package]
+name = "tiber-integration-audit"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+sha2 = "=0.10.9"
+tiber-external-tools-core = { path = "../tiber-external-tools-core" }
+tiber-memory-core = { path = "../tiber-memory-core" }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

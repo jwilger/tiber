@@ -14,7 +14,9 @@ tiber-memory-core = { path = "../tiber-memory-core" }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "time"] }
 
 [dev-dependencies]
+tiber-integration-audit = { path = "../tiber-integration-audit" }
 tokio = { version = "=1.53.1", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "=1.24.0", features = ["v4"] }
 
 [lints]
 workspace = true

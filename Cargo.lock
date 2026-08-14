@@ -2062,8 +2062,21 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tiber-integration-audit",
  "tiber-memory-core",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "tiber-integration-audit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tiber-external-tools-core",
+ "tiber-memory-core",
 ]
 
 [[package]]
@@ -2099,6 +2112,7 @@ dependencies = [
  "serde_json",
  "sse-stream",
  "tiber-external-tools-core",
+ "tiber-integration-audit",
  "tokio",
  "tokio-util",
  "tracing",

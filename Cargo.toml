@@ -4,6 +4,7 @@ members = [
   "crates/tiber-cli",
   "crates/tiber-external-tools-core",
   "crates/tiber-hindsight-http",
+  "crates/tiber-integration-audit",
   "crates/tiber-memory-core",
   "crates/tiber-rmcp-client",
   "crates/tiber-review",
