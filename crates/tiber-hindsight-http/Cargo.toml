@@ -1,0 +1,20 @@
+[package]
+name = "tiber-hindsight-http"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+futures = "=0.3.32"
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+tiber-memory-core = { path = "../tiber-memory-core" }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "time"] }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

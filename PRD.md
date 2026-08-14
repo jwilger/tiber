@@ -72,7 +72,28 @@ calls carry an idempotency identity and ambiguous outcomes enter
 reconciliation. Sampling, elicitation, and MCP tasks are explicit refusals.
 This slice adds no `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler,
 or runner integration and makes no live external-service validation claim.
-Hindsight S2 and audit/integration S3 remain pending.
+Audit/integration S3 remains pending.
+
+### Current memory S2 boundary
+
+`tiber-memory-core` provides a swappable `MemoryBackend` port;
+`tiber-hindsight-http` is its first adapter and keeps Hindsight HTTP API 0.8.3
+DTOs at that boundary. The adapter supports only asynchronous retain,
+operation status, cancellation, forget, recall, and named read-only
+reconciliation. It uses an explicit
+endpoint only: Tiber does not install or globally configure Hindsight, retry
+requests, manage Hindsight authentication, or claim live-service validation.
+
+Every memory operation is scoped by strict owner and repository provenance,
+with typed repository, agent, session, task, and memory-kind tags. Backend
+document and operation handles are stable and scope-bound. An ambiguous
+mutation carries a read-only reconciliation handle rather than granting a
+replay. Recall is bounded, advisory, untrusted,
+provenance-carrying context—not authority for a workflow, decision, or effect.
+Retain requests name their source turn, and recall requests never admit that
+same turn. Memory
+failures are visible and normally nonfatal. This S2 boundary has no EventCore,
+workflow, CLI, TUI, app-server, or scheduler integration.
 
 ## Problem
 
@@ -139,7 +160,9 @@ it never grants authority.
 - Own Tiber Tasks and development-workflow operations through native services.
 - Execute configured third-party MCP servers through a harness-owned client.
 - Provide a swappable memory port with Hindsight HTTP API 0.8.3 as the first
-  adapter.
+  adapter, bounded asynchronous retain/status/cancel/forget/recall/reconciliation
+  operations, strict owner/repository provenance and tags, and advisory
+  untrusted recall.
 - Isolate repository and process effects behind an x86_64 Linux platform port.
 - Record durable facts and receipts for decisions, mutations, tests, memory,
   retries, cancellation, reconciliation, verification, and delivery.
@@ -183,8 +206,8 @@ it never grants authority.
   services operate without MCP or shell loopback into Tiber.
 - MCP denial, cancellation, ambiguous-write, hostile-input, and capability
   negotiation cases pass.
-- Hindsight fake-server tests and opt-in live tests prove scoped memory,
-  provenance budgets, cancellation, and nonfatal failure behavior.
+- Hindsight fake-server tests prove scoped memory, provenance budgets,
+  cancellation, and nonfatal failure behavior without a live-service claim.
 - Crash/restart, stale/corrupt state, concurrency, and clean-machine packaging
   cases pass.
 - Formatting, strict Clippy, deterministic behavior, EventCore,

@@ -269,22 +269,29 @@ Mutating calls require stable idempotency; an unknown result enters the
 configured read-only reconciliation operation rather than an automatic replay.
 This S1 boundary is not connected to workflow `TiberEffect`, EventCore, CLI,
 TUI, app-server, scheduler, or runner code, and no live external-service
-validation is claimed. Hindsight S2 and audit/integration S3 remain subsequent
-slices.
+validation is claimed. Audit/integration S3 remains a subsequent slice.
 
 ## Memory
 
-`MemoryBackend` is swappable. The first adapter contains Hindsight HTTP API
-0.8.3 DTOs and supports retain, recall, forget, operation status, and
-cancellation. Tiber connects only to an explicit endpoint and never installs
-or globally configures Hindsight.
+`tiber-memory-core` defines a swappable `MemoryBackend` port. The first
+adapter, `tiber-hindsight-http`, contains Hindsight HTTP API 0.8.3 DTOs and
+supports only asynchronous retain, operation status, cancellation, forget,
+recall, and named read-only reconciliation. Tiber connects only to an explicit
+endpoint; it never installs or
+globally configures Hindsight, retries a request, manages Hindsight
+authentication, or claims live-service validation.
 
-Banks are owner-global or repository-scoped. Tags include repository, agent,
-session, task, and memory kind. EventCore-derived document IDs are stable.
-Turns are retained at turn/session end and never recalled into the same turn.
-Recall is advisory, untrusted, provenance-carrying, and bounded by item and
-token budgets. Failure is visible and nonfatal unless the workflow explicitly
-requires memory.
+Memory operations carry strict owner and repository provenance. Banks are
+owner-global or repository-scoped; typed tags include repository, agent,
+session, task, and memory kind. Backend document and operation handles are
+stable and scope-bound. An ambiguous mutation supplies a read-only
+reconciliation handle rather than a replay. Retain requests name their source
+turn, and recall requests never admit that same turn. Recall is
+advisory,
+untrusted, provenance-carrying, and bounded by item and token budgets. It
+cannot grant authority. Failure is visible and nonfatal unless a future
+workflow explicitly requires memory. This boundary is not connected to
+EventCore, workflow execution, CLI, TUI, app-server, or scheduler.
 
 ## TUI
 

@@ -3,6 +3,8 @@ members = [
   "crates/tiber-app-server",
   "crates/tiber-cli",
   "crates/tiber-external-tools-core",
+  "crates/tiber-hindsight-http",
+  "crates/tiber-memory-core",
   "crates/tiber-rmcp-client",
   "crates/tiber-review",
   "crates/tiber-store-git",

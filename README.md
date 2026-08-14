@@ -66,7 +66,28 @@ sampling, elicitation, MCP tasks, resource templates, subscriptions, cache
 directives, and interactive continuations are refused. This is not yet a
 workflow `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler, or runner
 integration, and it does not claim live external-service validation. Hindsight
-S2 and audit/integration S3 remain pending.
+audit/integration S3 remains pending.
+
+## Memory boundary (S2)
+
+`tiber-memory-core` defines a swappable `MemoryBackend` port. Its first
+adapter, `tiber-hindsight-http`, owns the Hindsight HTTP API 0.8.3 DTOs and
+only supports asynchronous retain, operation status, cancellation, forget,
+recall, and named read-only reconciliation. It connects only to an explicitly
+configured endpoint: it neither
+installs nor globally configures Hindsight, retries requests, manages
+authentication, or claims live-service validation.
+
+Memory writes and recalls carry strict owner/repository provenance and typed
+tags for repository, agent, session, task, and memory kind. Retained document
+and operation handles are stable and scope-bound. An ambiguous mutation carries
+a read-only reconciliation handle instead of authorizing a replay. Recall
+results are bounded, advisory, untrusted context
+with provenance; they cannot authorize a decision or effect. Retain requests
+name their source turn, and recall requests never admit that same turn. Visible
+memory failures remain nonfatal unless a
+future workflow expressly requires memory. This boundary is not yet connected
+to EventCore, workflow execution, the CLI, TUI, app-server, or scheduler.
 
 `tiber tasks show <task-ref>` renders subtasks by stable one-based occurrence,
 identity, status, title, and prerequisites. The narrowly scoped

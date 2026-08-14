@@ -2055,6 +2055,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiber-hindsight-http"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tiber-memory-core",
+ "tokio",
+]
+
+[[package]]
+name = "tiber-memory-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "tiber-review"
 version = "0.1.0"
 dependencies = [
