@@ -16,6 +16,7 @@
         packages = with pkgs; [
           actionlint
           bash
+          bubblewrap
           cargo
           clippy
           git
@@ -31,6 +32,8 @@
           export TIBER_DEPENDENCIES_DIR="$PWD/.dependencies"
           export CARGO_HOME="$TIBER_DEPENDENCIES_DIR/cargo"
           export CARGO_INSTALL_ROOT="$TIBER_DEPENDENCIES_DIR/cargo-install"
+          export TIBER_TEST_BASH="${pkgs.bash}/bin/bash"
+          export TIBER_TEST_BWRAP="${pkgs.bubblewrap}/bin/bwrap"
           mkdir -p "$CARGO_HOME" "$CARGO_INSTALL_ROOT"
           export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
 

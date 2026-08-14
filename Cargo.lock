@@ -2099,6 +2099,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiber-repository-linux"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tiber-repository-core",
+ "tiber-workflow-core",
+]
+
+[[package]]
 name = "tiber-review"
 version = "0.1.0"
 dependencies = [

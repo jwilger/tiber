@@ -48,7 +48,7 @@ and CLI do not yet run this workflow—app-server tools remain inert—and
 scheduler, effect reconciliation, durable interactive sessions, and UI
 integration remain later slices.
 
-## Repository-mutation boundary (S1)
+## Repository-mutation boundary (S2)
 
 `tiber-repository-core` is a pure, unconnected authority contract for narrow
 assignment-bound repository file mutations. An opaque authorization permits a
@@ -65,12 +65,17 @@ policy/assignment context.
 An unknown mutation outcome is reconciled by stable mutation identity rather than
 automatically replayed. This does not create a generic filesystem or shell
 runner, and it does not generalize `tiber-store-git`, which remains the fixed
-signed `tiber` authority-branch publisher. S2 will add the isolated x86_64
-Linux executor; S3 will add durable recovery, crash/restart and stale/corrupt
-state reconciliation, concurrency evidence, and clean-machine packaging. No
-workflow, EventCore, CLI, TUI, app-server, scheduler, runner, operational
-request-options, timeout, or cancellation surface is connected yet; S2 owns
-those operational controls.
+signed `tiber` authority-branch publisher.
+
+`tiber-repository-linux` is the x86_64 Linux-only `RepositoryService` adapter.
+It interprets only the opaque bounded operations through a fixed, private
+`tiber-repository-worker` under Bubblewrap: no model or caller can provide shell
+text, arbitrary argv, cwd, environment, mount, or network configuration. S2
+owns bounded timeout, cancellation, child cleanup, and typed non-durable
+outcomes, but adds no workflow, EventCore, CLI, TUI, app-server, scheduler,
+runner, or generic `ProcessService` integration. S3 adds durable recovery,
+crash/restart and stale/corrupt-state reconciliation, concurrency evidence, and
+clean-machine packaging.
 
 ## External-tools boundary (S1)
 

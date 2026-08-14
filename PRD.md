@@ -53,7 +53,7 @@ correction fact through the same board/task lease. This lets an owner repair a
 malformed duplicate subtask ID without rewriting signed history or ambiguously
 changing the first matching row.
 
-### Current repository-mutation S1 boundary
+### Current repository-mutation S2 boundary
 
 `tiber-repository-core` is a real but unconnected pure authority boundary for
 narrow assignment-bound repository file mutations. Its opaque authorization
@@ -71,13 +71,18 @@ adapter.
 An unknown mutation outcome is reconciled by stable mutation identity before any
 later decision; it is never auto-replayed. This is neither a generic filesystem
 nor shell-runner API, and it does not extend `tiber-store-git` beyond its fixed
-signed `tiber` authority-branch publication role. S1 adds no `TiberEffect`,
-EventCore, CLI, TUI, app-server, scheduler, runner, or Linux adapter
-integration, operational request options, timeout, or cancellation surface. S2
-will supply the x86_64 Linux isolated executor and operational timeout and
-cancellation controls; S3 will supply durable recovery, crash/restart and
-stale/corrupt-state reconciliation, concurrency evidence, and clean-machine
-packaging evidence.
+signed `tiber` authority-branch publication role.
+
+S2 supplies `tiber-repository-linux`, the x86_64 Linux-only
+`RepositoryService` adapter. It runs only opaque bounded authorizations and
+reconciliation through a fixed, private `tiber-repository-worker` under
+Bubblewrap. The model and caller cannot provide shell text, arbitrary argv,
+cwd, environment, mount, or network configuration. The adapter owns bounded
+operational timeouts, cancellation, child cleanup, and typed non-durable
+outcomes. It adds no `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler,
+runner, or generic `ProcessService` integration. S3 supplies durable recovery,
+crash/restart and stale/corrupt-state reconciliation, concurrency evidence, and
+clean-machine packaging evidence.
 
 ### Current external-tools S1 boundary
 
@@ -212,7 +217,9 @@ it never grants authority.
   0.8.3 and 0.8.4 contracts as the first adapter, bounded asynchronous
   retain/status/cancel/forget/recall/reconciliation operations, strict
   owner/repository provenance and tags, and advisory untrusted recall.
-- Isolate repository and process effects behind an x86_64 Linux platform port.
+- Isolate bounded repository mutations behind the x86_64 Linux
+  `tiber-repository-linux` platform adapter; generic process effects remain
+  future product scope.
 - Record durable facts and receipts for decisions, mutations, tests, memory,
   retries, cancellation, reconciliation, verification, and delivery.
 - Resume safely after cancellation, interruption, crash, stale state, corrupt

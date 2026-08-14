@@ -31,8 +31,8 @@ reconciliation, and terminal workflow outcome.
   provenance, trust labels, authoritative context construction, the bounded
   observation policy, and no-progress termination.
 - **Ports:** `InferenceGateway`, `MemoryBackend`, `TaskService`,
-  `WorkflowService`, `ExternalToolService`, `RepositoryService`,
-  `ProcessService`, `VerificationService`, and `DeliveryService`.
+  `WorkflowService`, `ExternalToolService`, `RepositoryService`, and future
+  `ProcessService`, `VerificationService`, and `DeliveryService` ports.
 - **Adapters:** Codex app-server inference, native Tiber Tasks, native
   development workflow, RMCP client, Hindsight HTTP, Git/forge, Linux
   isolation, and verification runners.
@@ -258,12 +258,17 @@ The boundary is not a generic filesystem or shell runner, and it does not
 generalize `tiber-store-git`: that adapter remains the narrowly scoped signed
 publisher for the fixed `tiber` EventCore authority branch.
 
-S1 adds no workflow `TiberEffect`, EventCore fact, CLI, TUI, scheduler, runner,
-platform adapter, operational request options, timeout, or cancellation
-surface. S2 will interpret the bounded authorized operations behind the x86_64
-Linux isolation port and own their operational timeout and cancellation
-controls; S3 will add durable recovery, crash/restart, stale/corrupt-state
-reconciliation, concurrency evidence, and clean-machine packaging evidence.
+S2 adds `tiber-repository-linux`, the Linux-only imperative
+`RepositoryService` adapter. It interprets only opaque bounded authorizations
+and reconciliation values through a fixed, private
+`tiber-repository-worker` under Bubblewrap. Neither the model nor a caller can
+supply shell text, arbitrary argv, cwd, environment, mount, or network
+configuration. The adapter owns bounded operational timeout, cancellation,
+child cleanup, and typed non-durable outcomes; it adds no workflow
+`TiberEffect`, EventCore fact, CLI, TUI, scheduler, runner, or generic
+`ProcessService` integration. S3 will add durable recovery, crash/restart,
+stale/corrupt-state reconciliation, concurrency evidence, and clean-machine
+packaging evidence.
 
 ## Third-party MCP
 
@@ -364,14 +369,17 @@ agent, gates, memory, and integration health, with `/tasks`, `/memory`, and
 
 ## Isolation and process execution
 
-Linux-specific filesystem, process, and network controls will sit behind a
-platform port. S2 will interpret only the bounded
-`tiber-repository-core` authorization through that port, rather than exposing a
-generic filesystem or shell executor. The v1 implementation and packaging
-target only x86_64 Linux; the port keeps future Apple silicon support possible
-without weakening v1 evidence. Processes receive explicit argv, cwd,
-environment allowlists, resource bounds, timeouts, cancellation, cleanup, and
-receipts.
+Linux-specific filesystem, process, and network controls sit behind the
+`tiber-repository-linux` platform adapter. S2 interprets only bounded
+`tiber-repository-core` authorizations through its fixed, private
+`tiber-repository-worker` under Bubblewrap, rather than exposing a generic
+filesystem, shell, or process executor. The adapter constructs the worker argv
+and isolation configuration from parsed trusted configuration and opaque
+authorization; callers supply neither command nor execution configuration.
+It enforces resource bounds, timeout, cancellation, and child cleanup, and
+returns typed non-durable outcomes. The v1 implementation targets only x86_64
+Linux; durable receipts, restart recovery, and clean-machine packaging remain
+S3 evidence.
 
 ## Recovery, verification, and delivery
 

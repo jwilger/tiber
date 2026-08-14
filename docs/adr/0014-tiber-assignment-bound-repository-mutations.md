@@ -58,24 +58,32 @@ runner. `tiber-store-git` remains limited to its signed `tiber`
 authority-branch publication contract and is never generalized into this
 repository mutation authority.
 
-S2 will interpret only the bounded authorizations through an x86_64 Linux
-platform adapter with filesystem, process, and network isolation, including its
-operational timeout and cancellation controls. S3 will add durable receipts,
-recovery, crash/restart and stale/corrupt-state reconciliation, concurrency
-evidence, and clean-machine packaging.
+S2 interprets only the bounded authorizations through
+`tiber-repository-linux`, an x86_64 Linux `RepositoryService` adapter with
+filesystem, process, and network isolation. It starts a fixed, private
+`tiber-repository-worker` under Bubblewrap; neither model nor caller can supply
+shell text, arbitrary argv, cwd, environment, mount, or network configuration.
+The adapter owns operational timeout, cancellation, child cleanup, and typed
+non-durable outcomes. It is not a generic `ProcessService`, shell runner, or
+workflow integration. S3 will add durable receipts, recovery, crash/restart and
+stale/corrupt-state reconciliation, concurrency evidence, and clean-machine
+packaging.
 
 ## Consequences
 
-S1 can establish precise semantic types and observable pure-core behavior
-without claiming that Tiber has changed a repository. It keeps the future
-execution adapter replaceable and makes the authority distinction between a
-working-tree mutation and an EventCore authority-branch publication explicit.
+S1 established precise semantic types and observable pure-core behavior without
+claiming that Tiber had changed a repository. S2 now supplies the replaceable
+isolated adapter for those bounded operations, with timeout, cancellation, and
+child-cleanup controls, but makes no durable-receipt or restart-recovery claim.
+The boundary keeps the authority distinction between a working-tree mutation and
+an EventCore authority-branch publication explicit.
 
-Execution, cancellation, timeout, retry bounds, platform isolation, durable
-receipts, restart recovery, and packaging are intentionally not delivered by
-S1. An ambiguous mutation requires reconciliation before any later fresh
-attempt, so callers cannot rely on an implicit retry for a potentially applied
-write.
+S1 intentionally deferred execution, cancellation, timeout, retry bounds,
+platform isolation, durable receipts, restart recovery, and packaging. S2
+delivers only isolated execution controls and typed non-durable outcomes;
+durable recovery and packaging remain S3. An ambiguous mutation requires
+reconciliation before any later fresh attempt, so callers cannot rely on an
+implicit retry for a potentially applied write.
 
 ## Alternatives considered
 
