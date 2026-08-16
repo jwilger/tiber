@@ -48,7 +48,7 @@ and CLI do not yet run this workflow—app-server tools remain inert—and
 scheduler, effect reconciliation, durable interactive sessions, and UI
 integration remain later slices.
 
-## Repository-mutation boundary (S2)
+## Repository-mutation boundary (S3)
 
 `tiber-repository-core` is a pure, unconnected authority contract for narrow
 assignment-bound repository file mutations. An opaque authorization permits a
@@ -73,9 +73,21 @@ It interprets only the opaque bounded operations through a fixed, private
 text, arbitrary argv, cwd, environment, mount, or network configuration. S2
 owns bounded timeout, cancellation, child cleanup, and typed non-durable
 outcomes, but adds no workflow, EventCore, CLI, TUI, app-server, scheduler,
-runner, or generic `ProcessService` integration. S3 adds durable recovery,
-crash/restart and stale/corrupt-state reconciliation, concurrency evidence, and
-clean-machine packaging.
+runner, or generic `ProcessService` integration.
+
+S3 adds a private, pinned `eventcore-fs` full-fsync receipt journal outside the
+repository in an owner-only state root. It persists `Prepared` before the
+worker receives a mutation and durable terminal `Applied`, `Failed`, or
+`Unknown` facts afterward. Restart scans return only read-only ambiguity
+handles—never replay authority—and corrupted, dangling, forked, or stale state
+fails closed. Cooperative state-root then worker-lock ordering coordinates
+concurrent owners. These are durable journal facts, not a general guarantee of
+working-tree filesystem durability.
+
+The x86_64 Linux package exposes public `tiber` while keeping the worker and
+Bubblewrap helper private under `libexec`. CI's package smoke checks that
+artifact layout and entry behavior only; real adapter behavior is tested
+separately outside the package smoke.
 
 ## External-tools boundary (S1)
 
@@ -168,13 +180,14 @@ Use the pinned Nix development shell:
 
 ```shell
 nix develop
-just ci
+lefthook install
 ```
 
-The local and CI gate runs deterministic checks only: actionlint, the Rust
-lint-policy audit, formatting, strict Clippy, tests, and the app-server
-authority fixture. It does not require credentials or start a live inference
-session.
+Git runs the tracked Lefthook pre-commit gate for local formatting, strict
+Clippy, and unit tests. Do not run `just ci` locally; remote CI owns that entry
+point and adds actionlint, the Rust lint-policy audit, the full test suite, the
+app-server authority fixture, and packaging. Neither boundary requires provider
+credentials or starts a live inference session.
 
 For the current executable slice:
 

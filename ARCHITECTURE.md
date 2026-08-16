@@ -266,9 +266,8 @@ supply shell text, arbitrary argv, cwd, environment, mount, or network
 configuration. The adapter owns bounded operational timeout, cancellation,
 child cleanup, and typed non-durable outcomes; it adds no workflow
 `TiberEffect`, EventCore fact, CLI, TUI, scheduler, runner, or generic
-`ProcessService` integration. S3 will add durable recovery, crash/restart,
-stale/corrupt-state reconciliation, concurrency evidence, and clean-machine
-packaging evidence.
+`ProcessService` integration. S3 adds the private recovery and package boundary
+described below without changing that integration scope.
 
 ## Third-party MCP
 
@@ -378,8 +377,8 @@ and isolation configuration from parsed trusted configuration and opaque
 authorization; callers supply neither command nor execution configuration.
 It enforces resource bounds, timeout, cancellation, and child cleanup, and
 returns typed non-durable outcomes. The v1 implementation targets only x86_64
-Linux; durable receipts, restart recovery, and clean-machine packaging remain
-S3 evidence.
+Linux. S3 adds durable receipt facts and recovery evidence, but does not claim
+durable working-tree filesystem state beyond those journal facts.
 
 ## Recovery, verification, and delivery
 
@@ -389,6 +388,22 @@ gates consume exact-revision evidence. Delivery state machines own commit,
 push, pull-request, CI observation, and the single fenced CI-recovery incident.
 Remote writes are idempotent where possible and otherwise enter typed
 reconciliation.
+
+For repository mutation S3, `tiber-repository-linux` keeps a private, pinned
+`eventcore-fs` receipt journal outside the repository in an owner-only state
+root, with full file and directory fsync. It records `Prepared` before the
+private worker receives mutation bytes, then durable terminal `Applied`,
+`Failed`, or `Unknown` facts. Its restart scan projects only read-only
+ambiguity-derived reconciliation handles; it never recreates mutation authority
+or auto-replays a worker request.
+
+The journal validates corrupt, dangling, forked, and stale state fail-closed.
+The adapter takes its cooperative state-root lease before the worker can take
+the repository-root lock, preserving a single lock order for concurrent owners.
+The x86_64 Linux package exposes public `tiber` and keeps the worker plus
+Bubblewrap helper private under `libexec`. CI's package smoke covers that
+artifact layout and entry behavior only; real adapter behavior remains covered
+by separate integration tests.
 
 ## Review orchestration
 

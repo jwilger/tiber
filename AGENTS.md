@@ -10,12 +10,17 @@ Use the pinned Nix shell; do not install toolchains globally.
 
 ```shell
 nix develop
-just ci
 ```
 
-`just ci` is the required deterministic gate. It runs actionlint, the
-workspace lint-policy audit, formatting, strict Clippy, tests, and the
-app-server authority fixture. Keep it credential-free and reproducible.
+Git owns local commit verification through the tracked Lefthook pre-commit
+configuration. The hook runs formatting, strict Clippy, and unit tests. Do not
+manually invoke `lefthook run`, the installed pre-commit hook, or its component
+commands as delivery verification; proceed to `git commit` and let Git invoke
+the hook. If the hook rejects the commit, fix the failure and retry the commit.
+Do not run `just ci` locally, including before or after a commit; `just ci` is
+the remote CI entry point for actionlint, the workspace lint-policy audit,
+formatting, strict Clippy, the full test suite, the app-server authority fixture,
+and packaging. Keep both boundaries credential-free and reproducible.
 
 ## Architecture
 
@@ -60,13 +65,12 @@ disable signing and never add AI-attribution trailers.
 The delivery boundary is one-way:
 
 1. Complete final review against the final source-content snapshot.
-2. Create the signed commit.
-3. Run the required gate again against that exact commit.
-4. Push and confirm CI for the pushed revision.
+2. Create the signed commit; Git runs the Lefthook pre-commit gate.
+3. Push and confirm the full remote CI gate for the pushed revision.
 
 A content-identical commit does not invalidate completed source review merely
 because staging partition, `HEAD`, commit metadata, or its signature changed.
 Restart source review only when reviewed paths, contents, modes, untracked
-content, pinned baseline, or requested scope changes. Commit-message and
-signature checks are delivery verification, not a reason to repeat source
+content, pinned baseline, or requested scope changes. Commit-message, signature,
+and remote CI checks are delivery verification, not a reason to repeat source
 review. See [`docs/rules/workflow-and-commits.md`](docs/rules/workflow-and-commits.md).

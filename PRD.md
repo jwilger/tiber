@@ -53,7 +53,7 @@ correction fact through the same board/task lease. This lets an owner repair a
 malformed duplicate subtask ID without rewriting signed history or ambiguously
 changing the first matching row.
 
-### Current repository-mutation S2 boundary
+### Current repository-mutation S3 boundary
 
 `tiber-repository-core` is a real but unconnected pure authority boundary for
 narrow assignment-bound repository file mutations. Its opaque authorization
@@ -80,9 +80,20 @@ Bubblewrap. The model and caller cannot provide shell text, arbitrary argv,
 cwd, environment, mount, or network configuration. The adapter owns bounded
 operational timeouts, cancellation, child cleanup, and typed non-durable
 outcomes. It adds no `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler,
-runner, or generic `ProcessService` integration. S3 supplies durable recovery,
-crash/restart and stale/corrupt-state reconciliation, concurrency evidence, and
-clean-machine packaging evidence.
+runner, or generic `ProcessService` integration.
+
+S3 adds a private pinned `eventcore-fs` full-fsync receipt journal outside the
+repository in an owner-only state root. `Prepared` is durable before the worker
+receives mutation bytes; terminal `Applied`, `Failed`, and `Unknown` facts are
+durable after dispatch. Restart scans expose only read-only ambiguity handles,
+never auto-replay. Corrupt, dangling, forked, or stale journal state fails
+closed, and cooperative state-root then worker-lock ordering coordinates
+concurrent owners. The journal makes its receipt facts durable; it makes no
+broader claim about working-tree filesystem durability.
+
+The clean x86_64 Linux package exposes public `tiber` and keeps the worker plus
+Bubblewrap helper private under `libexec`. CI's package smoke verifies package
+layout and entry behavior only; real adapter tests remain outside that smoke.
 
 ### Current external-tools S1 boundary
 

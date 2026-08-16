@@ -9,6 +9,7 @@ compile_error!("tiber-repository-linux requires x86_64 Linux");
 
 /// Closed parent-to-worker request and response framing.
 mod protocol;
+mod recovery;
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{
@@ -19,14 +20,18 @@ use core::{
     time::Duration,
 };
 use protocol::{WorkerRequest, WorkerResponse, WorkerWritePrecondition};
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+use recovery::{JournalDispatchReplay, JournalFact, JournalReconciliationReplay};
+use rustix::fs::{FlockOperation, OFlags, fcntl_getfl, fcntl_setfl, flock};
 use rustix::process::{Pid, Signal, kill_process_group};
 use std::{
-    fs::read_link,
+    fs::{DirBuilder, File, OpenOptions, canonicalize, read_link},
     io::{Error as IoError, ErrorKind, Result as IoResult},
     io::{Read as _, Write as _},
-    os::unix::process::CommandExt as _,
-    path::PathBuf,
+    os::unix::{
+        fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _},
+        process::CommandExt as _,
+    },
+    path::{Component, Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Mutex, MutexGuard, TryLockError, mpsc},
     thread::{self, JoinHandle},
@@ -51,6 +56,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(2);
 /// Independent bound for one read-only reconciliation query.
 const RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Stable fail-closed recovery-store error.
+pub type LinuxRepositoryRecoveryError = recovery::LinuxRepositoryRecoveryError;
+/// Read-only ambiguity handles projected from durable restart state.
+pub type LinuxRepositoryRecoveryScan = recovery::LinuxRepositoryRecoveryScan;
+
 /// Stable adapter-configuration failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[expect(
@@ -60,6 +70,8 @@ const RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(1);
 pub enum LinuxRepositoryConfigurationError {
     /// One of the trusted fixed paths was not absolute.
     PathNotAbsolute,
+    /// The private receipt root overlaps the mutable working tree.
+    StateRootInsideRepository,
 }
 
 impl LinuxRepositoryConfigurationError {
@@ -73,6 +85,7 @@ impl LinuxRepositoryConfigurationError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::PathNotAbsolute => "repository_linux_path_not_absolute",
+            Self::StateRootInsideRepository => "repository_linux_state_root_inside_repository",
         }
     }
 }
@@ -127,6 +140,8 @@ pub struct LinuxRepositoryServiceConfig {
     repository_id: RepositoryId,
     /// Trusted absolute repository root.
     repository_root: PathBuf,
+    /// Trusted absolute root for the private fully-fsynced receipt journal.
+    state_root: Option<PathBuf>,
     /// Trusted absolute private worker executable.
     worker: PathBuf,
 }
@@ -156,8 +171,35 @@ impl LinuxRepositoryServiceConfig {
             bubblewrap,
             repository_id,
             repository_root,
+            state_root: None,
             worker,
         })
+    }
+
+    /// Binds this adapter to one trusted absolute durable-state root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinuxRepositoryConfigurationError::PathNotAbsolute`] for a relative root, or
+    /// [`LinuxRepositoryConfigurationError::StateRootInsideRepository`] when the private state
+    /// root equals or is contained by the mutable repository working tree.
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "successful state-root validation returns the updated immutable configuration"
+    )]
+    pub fn with_state_root(
+        mut self,
+        state_root: PathBuf,
+    ) -> Result<Self, LinuxRepositoryConfigurationError> {
+        if !state_root.is_absolute() {
+            return Err(LinuxRepositoryConfigurationError::PathNotAbsolute);
+        }
+        if path_contains(&self.repository_root, &state_root) {
+            return Err(LinuxRepositoryConfigurationError::StateRootInsideRepository);
+        }
+        self.state_root = Some(state_root);
+        Ok(self)
     }
 }
 
@@ -185,6 +227,12 @@ struct SpawnThreadGuard {
     release: mpsc::SyncSender<()>,
     /// Joins the otherwise short-lived trusted launch supervisor.
     thread: Option<JoinHandle<()>>,
+}
+
+/// Holds the cross-process durable-state lease across receipt and worker phases.
+struct RecoveryLease {
+    /// Open lock-file descriptor whose advisory lock releases on drop or crash.
+    _file: File,
 }
 
 impl Drop for SpawnThreadGuard {
@@ -241,10 +289,41 @@ impl LinuxRepositoryService {
         }
     }
 
+    /// Scans durable state after restart and returns only read-only recovery handles.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed fail-closed error for unavailable, corrupt, or stale journal state.
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the public scan is a short fail-closed lease and projection pipeline"
+    )]
+    pub fn scan_recovery(
+        &self,
+    ) -> Result<LinuxRepositoryRecoveryScan, LinuxRepositoryRecoveryError> {
+        let started = Instant::now();
+        let state_root = self
+            .config
+            .state_root
+            .as_ref()
+            .ok_or(LinuxRepositoryRecoveryError::StateUnavailable)?;
+        let _lease = acquire_recovery_lease(
+            state_root,
+            started,
+            RECONCILIATION_TIMEOUT,
+            &self.cancellation,
+        )?;
+        recovery::load(&state_root.join("journal"), &self.config.repository_id)
+            .map(recovery::JournalProjection::scan)
+    }
+
     /// Runs one authorized mutation through the fixed private worker.
     #[expect(
         clippy::implicit_return,
         clippy::result_large_err,
+        clippy::too_many_lines,
         reason = "the closed response match returns directly and the core port fixes the safe transcript result shape"
     )]
     fn dispatch_now(
@@ -274,59 +353,136 @@ impl LinuxRepositoryService {
             return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
         }
 
-        let (request, content) = mutation_request(&mutation);
-        let Ok(frame) = encode_request(&request, content) else {
+        let identity = mutation.identity();
+        let Some(state_root) = self.config.state_root.as_ref() else {
             return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
         };
-        if budget_expired(started, deadline, &self.cancellation) {
-            return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
-        }
-        let spawned = self.spawn_worker(false, started, deadline);
-        let Ok(SpawnedWorker {
-            mut child,
-            launch: _launch,
-        }) = spawned
+        let Ok(_recovery_lease) =
+            acquire_recovery_lease(state_root, started, deadline, &self.cancellation)
         else {
             return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
         };
-        if budget_expired(started, deadline, &self.cancellation) {
-            kill_and_reap(&mut child);
-            return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
-        }
-        match supervise_request_transfer(&mut child, &frame, started, deadline, &self.cancellation)
-        {
-            RequestTransferOutcome::Complete => {}
-            RequestTransferOutcome::NotStarted => {
+        let journal_root = state_root.join("journal");
+        let projection = match recovery::load(&journal_root, &self.config.repository_id) {
+            Ok(projection) => projection,
+            Err(_) => {
                 return Err(
                     mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
                 );
             }
-            RequestTransferOutcome::OutcomeUnknown => return Ok(mutation.into_ambiguity()),
-        }
-        let waited = wait_for_worker(&mut child, started, deadline, &self.cancellation);
-        let Ok(status) = waited else {
-            kill_and_reap(&mut child);
-            return Ok(mutation.into_ambiguity());
         };
-        if !status.success() {
-            return Ok(mutation.into_ambiguity());
+        match projection.dispatch_replay(&identity) {
+            Ok(JournalDispatchReplay::New) => {}
+            Ok(JournalDispatchReplay::Applied(receipt)) => {
+                return Ok(RepositoryDispatchOutcome::Applied(receipt));
+            }
+            Ok(JournalDispatchReplay::Failed(failure)) => return Err(failure),
+            Ok(JournalDispatchReplay::Unknown(reconciliation)) => {
+                return Ok(RepositoryDispatchOutcome::OutcomeUnknown(reconciliation));
+            }
+            Err(_) => {
+                return Err(
+                    mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
+                );
+            }
         }
-        let Some(response) = read_response(&mut child) else {
-            return Ok(mutation.into_ambiguity());
+        if recovery::append(
+            &journal_root,
+            &self.config.repository_id,
+            &projection,
+            JournalFact::Prepared(&identity),
+        )
+        .is_err()
+        {
+            return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
+        }
+        let prepared_projection = match recovery::load(&journal_root, &self.config.repository_id) {
+            Ok(loaded_projection) => loaded_projection,
+            Err(_) => return Ok(mutation.into_ambiguity()),
         };
-        match response {
-            WorkerResponse::Applied => Ok(RepositoryDispatchOutcome::Applied(
-                mutation.into_applied_receipt(),
-            )),
-            WorkerResponse::Rejected { code } => Err(mutation.into_failure(code)),
-            WorkerResponse::StillUnknown => Ok(mutation.into_ambiguity()),
+
+        let outcome = (|| {
+            let (request, content) = mutation_request(&mutation);
+            let Ok(frame) = encode_request(&request, content) else {
+                return Err(
+                    mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
+                );
+            };
+            if budget_expired(started, deadline, &self.cancellation) {
+                return Err(
+                    mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
+                );
+            }
+            let spawned = self.spawn_worker(false, started, deadline);
+            let Ok(SpawnedWorker {
+                mut child,
+                launch: _launch,
+            }) = spawned
+            else {
+                return Err(
+                    mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
+                );
+            };
+            if budget_expired(started, deadline, &self.cancellation) {
+                kill_and_reap(&mut child);
+                return Err(
+                    mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
+                );
+            }
+            match supervise_request_transfer(
+                &mut child,
+                &frame,
+                started,
+                deadline,
+                &self.cancellation,
+            ) {
+                RequestTransferOutcome::Complete => {}
+                RequestTransferOutcome::NotStarted => {
+                    return Err(
+                        mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
+                    );
+                }
+                RequestTransferOutcome::OutcomeUnknown => return Ok(mutation.into_ambiguity()),
+            }
+            let waited = wait_for_worker(&mut child, started, deadline, &self.cancellation);
+            let Ok(status) = waited else {
+                kill_and_reap(&mut child);
+                return Ok(mutation.into_ambiguity());
+            };
+            if !status.success() {
+                return Ok(mutation.into_ambiguity());
+            }
+            let Some(response) = read_response(&mut child) else {
+                return Ok(mutation.into_ambiguity());
+            };
+            match response {
+                WorkerResponse::Applied => Ok(RepositoryDispatchOutcome::Applied(
+                    mutation.into_applied_receipt(),
+                )),
+                WorkerResponse::Rejected { code } => Err(mutation.into_failure(code)),
+                WorkerResponse::StillUnknown => Ok(mutation.into_ambiguity()),
+            }
+        })();
+        if recovery::append(
+            &journal_root,
+            &self.config.repository_id,
+            &prepared_projection,
+            JournalFact::Dispatch(&outcome),
+        )
+        .is_err()
+        {
+            return Ok(RepositoryDispatchOutcome::OutcomeUnknown(
+                RepositoryReconciliation::from_durable_identity(identity),
+            ));
         }
+        outcome
     }
 
     /// Runs one conservative read-only query in a separate sandbox.
     #[expect(
         clippy::implicit_return,
         clippy::needless_pass_by_value,
+        clippy::question_mark_used,
         clippy::result_large_err,
         reason = "the core port consumes the ambiguity handle when binding either outcome or failure"
     )]
@@ -340,6 +496,40 @@ impl LinuxRepositoryService {
             );
         }
         let started = Instant::now();
+        let journal = if let Some(state_root) = self.config.state_root.as_ref() {
+            let lease = acquire_recovery_lease(
+                state_root,
+                started,
+                RECONCILIATION_TIMEOUT,
+                &self.cancellation,
+            )
+            .map_err(|_recovery_error| {
+                reconciliation.bind_failure(RepositoryReconciliationError::ReadOnlyQueryFailed)
+            })?;
+            let root = state_root.join("journal");
+            let projection =
+                recovery::load(&root, &self.config.repository_id).map_err(|_recovery_error| {
+                    reconciliation.bind_failure(RepositoryReconciliationError::ReadOnlyQueryFailed)
+                })?;
+            match projection.reconciliation_replay(reconciliation.identity()) {
+                Ok(JournalReconciliationReplay::Applied) => {
+                    return Ok(reconciliation.bind_outcome(RepositoryReconciliationState::Applied));
+                }
+                Ok(JournalReconciliationReplay::NotApplied) => {
+                    return Ok(
+                        reconciliation.bind_outcome(RepositoryReconciliationState::NotApplied)
+                    );
+                }
+                Ok(JournalReconciliationReplay::Untracked) => None,
+                Ok(JournalReconciliationReplay::Query) => Some((lease, root, projection)),
+                Err(_) => {
+                    return Err(reconciliation
+                        .bind_failure(RepositoryReconciliationError::ReadOnlyQueryFailed));
+                }
+            }
+        } else {
+            None
+        };
         let request = reconciliation_request(&reconciliation);
         let Ok(frame) = encode_request(&request, &[]) else {
             return Err(
@@ -385,7 +575,21 @@ impl LinuxRepositoryService {
                 reconciliation.bind_failure(RepositoryReconciliationError::ReadOnlyQueryFailed)
             );
         }
-        Ok(reconciliation.bind_outcome(RepositoryReconciliationState::StillUnknown))
+        let outcome = reconciliation.bind_outcome(RepositoryReconciliationState::StillUnknown);
+        if let Some((_lease, root, projection)) = journal
+            && recovery::append(
+                &root,
+                &self.config.repository_id,
+                &projection,
+                JournalFact::Reconciled(&outcome),
+            )
+            .is_err()
+        {
+            return Err(
+                reconciliation.bind_failure(RepositoryReconciliationError::ReadOnlyQueryFailed)
+            );
+        }
+        Ok(outcome)
     }
 
     /// Spawns only the configured worker under the caller's immutable budget.
@@ -693,6 +897,115 @@ fn supervise_request_transfer(
                 };
             }
         }
+    }
+}
+
+/// Acquires the receipt-store lease before any worker can acquire the repository-root lock.
+fn acquire_recovery_lease(
+    state_root: &Path,
+    started: Instant,
+    deadline: Duration,
+    cancellation: &RepositoryCancellation,
+) -> Result<RecoveryLease, LinuxRepositoryRecoveryError> {
+    match DirBuilder::new().mode(0o700).create(state_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(LinuxRepositoryRecoveryError::StateUnavailable),
+    }
+    let state_metadata = match state_root.metadata() {
+        Ok(metadata) => metadata,
+        Err(_error) => return Err(LinuxRepositoryRecoveryError::StateUnavailable),
+    };
+    if !state_metadata.is_dir() || state_metadata.mode() & 0o777 != 0o700 {
+        return Err(LinuxRepositoryRecoveryError::StateUnavailable);
+    }
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(state_root.join(".tiber-repository.lock"))
+    {
+        Ok(file) => file,
+        Err(_error) => return Err(LinuxRepositoryRecoveryError::StateUnavailable),
+    };
+    let lock_metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_error) => return Err(LinuxRepositoryRecoveryError::StateUnavailable),
+    };
+    if lock_metadata.mode() & 0o777 != 0o600 {
+        return Err(LinuxRepositoryRecoveryError::StateUnavailable);
+    }
+    loop {
+        if flock(&file, FlockOperation::NonBlockingLockExclusive).is_ok() {
+            return Ok(RecoveryLease { _file: file });
+        }
+        if budget_expired(started, deadline, cancellation) {
+            return Err(LinuxRepositoryRecoveryError::StateUnavailable);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Returns whether the candidate path resolves lexically or canonically inside the repository.
+#[expect(
+    clippy::implicit_return,
+    clippy::needless_return,
+    clippy::single_call_fn,
+    reason = "configuration containment is one direct lexical then canonical decision"
+)]
+fn path_contains(repository_root: &Path, candidate: &Path) -> bool {
+    let lexical_repository = lexical_absolute_path(repository_root);
+    let lexical_candidate = lexical_absolute_path(candidate);
+    if lexical_candidate.starts_with(&lexical_repository) {
+        return true;
+    }
+    let Ok(canonical_repository) = canonicalize(repository_root) else {
+        return false;
+    };
+    resolve_existing_prefix(candidate).is_some_and(|resolved_candidate| {
+        return resolved_candidate.starts_with(canonical_repository);
+    })
+}
+
+/// Eliminates ordinary `.` and `..` components from one already-absolute trusted path.
+#[expect(
+    clippy::implicit_return,
+    reason = "the normalized trusted path is the direct fold result"
+)]
+fn lexical_absolute_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir => {
+                let _removed = normalized.pop();
+            }
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+        }
+    }
+    normalized
+}
+
+/// Resolves symlinks in the nearest existing ancestor before restoring a missing suffix.
+#[expect(
+    clippy::question_mark_used,
+    clippy::single_call_fn,
+    reason = "nearest-existing-ancestor resolution terminates cleanly when no parent or name remains"
+)]
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut cursor = path;
+    let mut suffix = Vec::new();
+    loop {
+        if let Ok(mut resolved) = canonicalize(cursor) {
+            for segment in suffix.iter().rev() {
+                resolved.push(segment);
+            }
+            return Some(resolved);
+        }
+        suffix.push(cursor.file_name()?.to_owned());
+        cursor = cursor.parent()?;
     }
 }
 

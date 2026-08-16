@@ -6,11 +6,14 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+eventcore-fs.workspace = true
+eventcore-types.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tiber-repository-core = { path = "../tiber-repository-core" }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 tempfile.workspace = true

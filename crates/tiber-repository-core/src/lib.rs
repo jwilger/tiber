@@ -1384,7 +1384,7 @@ impl RepositoryMutationFailure {
 }
 
 /// A post-dispatch ambiguity that may only be queried through read-only reconciliation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RepositoryReconciliation {
     /// Exact safe request identity retained after ambiguity.
     identity: RepositoryMutationIdentity,
@@ -1396,6 +1396,15 @@ pub struct RepositoryReconciliation {
     reason = "the read-only reconciliation handle exposes only safe identity and closed outcome binding"
 )]
 impl RepositoryReconciliation {
+    /// Restores a read-only reconciliation handle from one validated durable identity.
+    ///
+    /// This never recreates mutation authority or raw write content.
+    #[must_use]
+    #[inline]
+    pub fn from_durable_identity(identity: RepositoryMutationIdentity) -> Self {
+        Self { identity }
+    }
+
     /// Returns the exact safe identity derived from the consumed mutation request.
     #[must_use]
     #[inline]
@@ -2168,6 +2177,32 @@ mod tests {
             Err(error) => panic!("safe receipt must deserialize: {error}"),
         };
         assert_eq!(restored, receipt);
+
+        let (ambiguity_proposal, ambiguity_assignment, ambiguity_policy, ambiguity_approval) =
+            valid_write_request();
+        let ambiguity = match must_authorize(
+            ambiguity_proposal,
+            &ambiguity_assignment,
+            &ambiguity_policy,
+            ambiguity_approval,
+        )
+        .into_ambiguity()
+        {
+            RepositoryDispatchOutcome::OutcomeUnknown(ambiguity) => ambiguity,
+            RepositoryDispatchOutcome::Applied(_) => {
+                panic!("direct ambiguity conversion cannot produce an applied receipt")
+            }
+        };
+        let serialized_ambiguity = match serde_json::to_string(&ambiguity) {
+            Ok(ambiguity_json) => ambiguity_json,
+            Err(error) => panic!("safe ambiguity must serialize: {error}"),
+        };
+        let restored_ambiguity: RepositoryReconciliation =
+            match serde_json::from_str(&serialized_ambiguity) {
+                Ok(restored_reconciliation) => restored_reconciliation,
+                Err(error) => panic!("safe ambiguity must deserialize: {error}"),
+            };
+        assert_eq!(restored_ambiguity, ambiguity);
 
         assert_deserialization_code::<RepositoryPath>(
             "\"src/../outside.rs\"",

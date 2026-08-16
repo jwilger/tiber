@@ -4,12 +4,8 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 default: ci
 
-# Compatibility entry point for the already-installed repository hook. Keeping
-# it explicit also makes the local commit gate and required CI gate identical.
-pre-commit: ci
-
 # Mirrors the required CI checks. No networked model or provider runner belongs here.
-ci: actionlint lint-policy format clippy test authority-fixture
+ci: actionlint lint-policy format clippy test authority-fixture package
 
 actionlint:
     actionlint
@@ -28,6 +24,10 @@ test:
 
 authority-fixture:
     node scripts/tests/probe-app-server-effective-authority.test.mjs
+
+package:
+    nix build --no-link .#tiber
+    nix build --no-link .#checks.x86_64-linux.package-smoke
 
 # Manually compare a locally generated protocol schema to the reviewed fixture.
 app-server-authority-fixture schema:

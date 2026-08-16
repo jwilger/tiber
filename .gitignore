@@ -3,6 +3,7 @@
 /**/.dependencies/
 /.direnv/
 /node_modules/
+/.codex/config.toml
 
 # Build and local runtime state.
 /target/

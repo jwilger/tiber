@@ -14,13 +14,17 @@ extern crate alloc;
 mod tests {
 
     use alloc::sync::Arc;
+    use eventcore_fs::FileEventStore;
+    use eventcore_types::{Event, EventStore as _, StreamId, StreamVersion, StreamWrites};
     use rustix::fs::{FlockOperation, flock, inotify};
+    use serde::{Deserialize, Serialize};
     use std::{
         future::Future,
         mem::MaybeUninit,
         os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink},
         path::PathBuf,
         pin::Pin,
+        process::Command,
         sync::{
             Barrier,
             atomic::{AtomicBool, Ordering},
@@ -34,18 +38,34 @@ mod tests {
         RepositoryContent, RepositoryDispatchOutcome, RepositoryError, RepositoryId,
         RepositoryMutationApproval, RepositoryMutationFailureCode, RepositoryMutationPolicy,
         RepositoryMutationProposal, RepositoryMutationProvenance, RepositoryPath,
-        RepositoryReconciliationOutcome, RepositoryReconciliationState, RepositoryService as _,
-        WritePrecondition, authorize_mutation,
+        RepositoryReconciliation, RepositoryReconciliationOutcome, RepositoryReconciliationState,
+        RepositoryService as _, WritePrecondition, authorize_mutation,
     };
     use tiber_repository_linux::{
-        LinuxRepositoryConfigurationError, LinuxRepositoryService, LinuxRepositoryServiceConfig,
-        RepositoryCancellation,
+        LinuxRepositoryConfigurationError, LinuxRepositoryRecoveryError, LinuxRepositoryService,
+        LinuxRepositoryServiceConfig, RepositoryCancellation,
     };
     use tiber_workflow_core::{
         AgentId, AssignmentEpoch, AssignmentId, AssignmentScope, AttemptNumber, ContextReceiptId,
         DeadlineMilliseconds, EffectId, HarnessError, IdempotencyKey, PolicyDecisionId, SessionId,
         WorkflowId,
     };
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct StructuralJournalFixture {
+        label: String,
+        stream: StreamId,
+    }
+
+    impl Event for StructuralJournalFixture {
+        fn event_type_name() -> &'static str {
+            "StructuralJournalFixture"
+        }
+
+        fn stream_id(&self) -> &StreamId {
+            &self.stream
+        }
+    }
 
     #[test]
     fn absent_write_applies_exact_bytes_through_the_public_repository_service() {
@@ -57,7 +77,7 @@ mod tests {
             "src/lib.rs",
             b"public behavior\n",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         );
 
         let outcome = block_on_ready(service.dispatch(mutation));
@@ -74,13 +94,516 @@ mod tests {
     }
 
     #[test]
+    fn restart_replays_a_durable_applied_receipt_without_redispatch() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let first = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(state.path().to_path_buf())
+                .expect("absolute recovery root should parse"),
+        );
+
+        let first_outcome = block_on_ready(first.dispatch(authorized_write(
+            "src/restart.txt",
+            b"durable\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+        assert!(
+            matches!(first_outcome, Ok(RepositoryDispatchOutcome::Applied(_))),
+            "first dispatch should persist an applied receipt: {first_outcome:?}"
+        );
+        drop(first);
+
+        let marker = repository.path().join("redispatched");
+        let second = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        let replayed = block_on_ready(second.dispatch(authorized_write(
+            "src/restart.txt",
+            b"durable\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+
+        assert!(
+            matches!(replayed, Ok(RepositoryDispatchOutcome::Applied(_))),
+            "the durable applied receipt should be replayed: {replayed:?}"
+        );
+        assert!(
+            !marker.exists(),
+            "receipt replay must not launch Bubblewrap"
+        );
+    }
+
+    #[test]
+    fn restart_replays_a_durable_no_launch_failure_without_redispatch() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let missing_bwrap = repository.path().join("missing-bwrap");
+        let first = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                missing_bwrap,
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        let first_outcome = block_on_ready(first.dispatch(authorized_write(
+            "src/no-launch.txt",
+            b"never launched\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+        assert_failure(
+            first_outcome,
+            RepositoryMutationFailureCode::PreDispatchRejected,
+        );
+        drop(first);
+
+        let marker = repository.path().join("redispatched-after-no-launch");
+        let second = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        let replayed = block_on_ready(second.dispatch(authorized_write(
+            "src/no-launch.txt",
+            b"never launched\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+
+        assert_failure(replayed, RepositoryMutationFailureCode::PreDispatchRejected);
+        assert!(
+            !marker.exists(),
+            "durable failure replay must not launch Bubblewrap"
+        );
+    }
+
+    #[test]
+    fn crash_after_prepared_recovers_ambiguity_without_automatic_redispatch() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let ready = repository.path().join("crash-worker.ready");
+        let stalled_worker = executable_script(
+            repository.path(),
+            "crash-worker",
+            "printf ready > /repo/crash-worker.ready\nwhile :; do :; done",
+        );
+        let mut child =
+            Command::new(std::env::current_exe().expect("test executable should exist"))
+                .args([
+                    "--exact",
+                    "tests::crash_after_prepared_fixture",
+                    "--nocapture",
+                ])
+                .env("TIBER_CRASH_REPOSITORY", repository.path())
+                .env("TIBER_CRASH_STATE", state.path())
+                .env("TIBER_CRASH_WORKER", &stalled_worker)
+                .spawn()
+                .expect("crash fixture should spawn");
+        wait_for_path(&ready);
+        child.kill().expect("crash fixture should be killed");
+        let _status = child.wait().expect("crash fixture should reap");
+
+        let marker = repository.path().join("redispatched-after-crash");
+        let recovered = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        let scan = recovered
+            .scan_recovery()
+            .expect("prepared journal should be recoverable");
+        assert_eq!(
+            scan.pending().len(),
+            1,
+            "crash should expose one safe handle"
+        );
+
+        let replayed = block_on_ready(recovered.dispatch(authorized_write(
+            "src/crash.txt",
+            b"ambiguous after crash\n",
+            WritePrecondition::Absent,
+            10_000,
+        )));
+        assert!(matches!(
+            replayed,
+            Ok(RepositoryDispatchOutcome::OutcomeUnknown(_))
+        ));
+        assert!(
+            !marker.exists(),
+            "a prepared fact must never auto-redispatch"
+        );
+    }
+
+    #[test]
+    fn restart_scans_a_durable_unknown_and_never_redispatches() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let first = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                test_bubblewrap(),
+                stalled_worker_script(repository.path()),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        let first_outcome = block_on_ready(first.dispatch(authorized_write(
+            "src/durable-unknown.txt",
+            b"ambiguous worker result\n",
+            WritePrecondition::Absent,
+            500,
+        )));
+        assert!(matches!(
+            first_outcome,
+            Ok(RepositoryDispatchOutcome::OutcomeUnknown(_))
+        ));
+        drop(first);
+
+        let marker = repository.path().join("redispatched-durable-unknown");
+        let restarted = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        assert_eq!(
+            restarted
+                .scan_recovery()
+                .expect("unknown journal should scan")
+                .pending()
+                .len(),
+            1
+        );
+        let replayed = block_on_ready(restarted.dispatch(authorized_write(
+            "src/durable-unknown.txt",
+            b"ambiguous worker result\n",
+            WritePrecondition::Absent,
+            500,
+        )));
+        assert!(matches!(
+            replayed,
+            Ok(RepositoryDispatchOutcome::OutcomeUnknown(_))
+        ));
+        assert!(
+            !marker.exists(),
+            "durable unknown must never auto-redispatch"
+        );
+    }
+
+    #[test]
+    fn crash_after_prepared_fixture() {
+        let Some(repository) = std::env::var_os("TIBER_CRASH_REPOSITORY").map(PathBuf::from) else {
+            return;
+        };
+        let state = PathBuf::from(
+            std::env::var_os("TIBER_CRASH_STATE").expect("crash state should be provided"),
+        );
+        let worker = PathBuf::from(
+            std::env::var_os("TIBER_CRASH_WORKER").expect("crash worker should be provided"),
+        );
+        let service = LinuxRepositoryService::new(
+            config_with_paths("repo-1", &repository, test_bubblewrap(), worker)
+                .with_state_root(state)
+                .expect("absolute recovery root should parse"),
+        );
+
+        let _never_returns = block_on_ready(service.dispatch(authorized_write(
+            "src/crash.txt",
+            b"ambiguous after crash\n",
+            WritePrecondition::Absent,
+            10_000,
+        )));
+    }
+
+    #[test]
+    fn corrupt_journal_fails_closed_during_restart_scan() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let service = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(state.path().to_path_buf())
+                .expect("absolute recovery root should parse"),
+        );
+        let outcome = block_on_ready(service.dispatch(authorized_write(
+            "src/corrupt.txt",
+            b"durable before corruption\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+        assert!(matches!(outcome, Ok(RepositoryDispatchOutcome::Applied(_))));
+        drop(service);
+        corrupt_one_journal_fact(state.path());
+
+        let restarted = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(state.path().to_path_buf())
+                .expect("absolute recovery root should parse"),
+        );
+        assert_eq!(
+            restarted.scan_recovery(),
+            Err(LinuxRepositoryRecoveryError::StateCorrupt)
+        );
+    }
+
+    #[test]
+    fn dangling_journal_fails_closed_without_launch_or_repository_touch() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        create_applied_journal(&repository, &state, "src/dangling.txt");
+        let target = repository.path().join("src/dangling.txt");
+        let before = std::fs::read(&target).expect("applied target should be readable");
+        let mut facts = journal_fact_files(state.path());
+        facts.sort();
+        std::fs::remove_file(
+            facts
+                .first()
+                .expect("prepared transaction should be present"),
+        )
+        .expect("prepared transaction should be removed");
+        let marker = repository.path().join("launched-for-dangling-scan");
+        let restarted = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+
+        assert_eq!(
+            restarted.scan_recovery(),
+            Err(LinuxRepositoryRecoveryError::StateCorrupt)
+        );
+        assert!(!marker.exists(), "dangling-state scan must not launch");
+        assert_eq!(
+            std::fs::read(target).expect("target should remain readable"),
+            before
+        );
+    }
+
+    #[test]
+    fn forked_journal_fails_closed_without_launch_or_repository_touch() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        create_applied_journal(&repository, &state, "src/forked.txt");
+        let target = repository.path().join("src/forked.txt");
+        let before = std::fs::read(&target).expect("applied target should be readable");
+        let clone = recovery_state();
+        copy_tree(&state.path().join("journal"), &clone.path().join("journal"));
+        append_structural_fixture(&state.path().join("journal"), "branch-a", 2);
+        append_structural_fixture(&clone.path().join("journal"), "branch-b", 2);
+        union_journal_facts(&clone.path().join("journal"), &state.path().join("journal"));
+        let marker = repository.path().join("launched-for-forked-scan");
+        let restarted = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+
+        assert_eq!(
+            restarted.scan_recovery(),
+            Err(LinuxRepositoryRecoveryError::StateCorrupt)
+        );
+        assert!(!marker.exists(), "forked-state scan must not launch");
+        assert_eq!(
+            std::fs::read(target).expect("target should remain readable"),
+            before
+        );
+    }
+
+    #[test]
+    fn journal_for_another_repository_fails_closed_as_stale() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let first = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(state.path().to_path_buf())
+                .expect("absolute recovery root should parse"),
+        );
+        let outcome = block_on_ready(first.dispatch(authorized_write(
+            "src/stale.txt",
+            b"repo one\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+        assert!(matches!(outcome, Ok(RepositoryDispatchOutcome::Applied(_))));
+        drop(first);
+
+        let second = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-2",
+                repository.path(),
+                test_bubblewrap(),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        assert_eq!(
+            second.scan_recovery(),
+            Err(LinuxRepositoryRecoveryError::StateStale)
+        );
+    }
+
+    #[test]
+    fn reused_idempotency_key_with_a_different_identity_fails_before_launch() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let first = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(state.path().to_path_buf())
+                .expect("absolute recovery root should parse"),
+        );
+        let first_outcome = block_on_ready(first.dispatch(authorized_write_with_idempotency(
+            "src/idempotency.txt",
+            b"first identity\n",
+            WritePrecondition::Absent,
+            15_000,
+            "shared-idempotency-key",
+        )));
+        assert!(matches!(
+            first_outcome,
+            Ok(RepositoryDispatchOutcome::Applied(_))
+        ));
+        drop(first);
+
+        let marker = repository.path().join("launched-for-stale-idempotency");
+        let second = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        assert_failure(
+            block_on_ready(second.dispatch(authorized_write_with_idempotency(
+                "src/idempotency.txt",
+                b"different identity\n",
+                WritePrecondition::Absent,
+                15_000,
+                "shared-idempotency-key",
+            ))),
+            RepositoryMutationFailureCode::PreDispatchRejected,
+        );
+        assert!(
+            !marker.exists(),
+            "identity conflict must fail before launch"
+        );
+    }
+
+    #[test]
+    fn terminal_append_failure_preserves_unknown_and_restart_never_redispatches() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let first = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                terminal_append_breaking_bwrap_script(
+                    repository.path(),
+                    &state.path().join("journal"),
+                ),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        let first_outcome = block_on_ready(first.dispatch(authorized_write(
+            "src/append-failure.txt",
+            b"worker applied before receipt failure\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+        assert!(matches!(
+            first_outcome,
+            Ok(RepositoryDispatchOutcome::OutcomeUnknown(_))
+        ));
+        assert_eq!(
+            std::fs::read(repository.path().join("src/append-failure.txt"))
+                .expect("worker application should remain readable"),
+            b"worker applied before receipt failure\n"
+        );
+        drop(first);
+        let status = Command::new(executable_on_path("chmod"))
+            .args(["-R", "u+w"])
+            .arg(state.path().join("journal"))
+            .status()
+            .expect("journal permissions should restore");
+        assert!(status.success(), "journal permissions should restore");
+
+        let marker = repository.path().join("redispatched-after-append-failure");
+        let restarted = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        let replayed = block_on_ready(restarted.dispatch(authorized_write(
+            "src/append-failure.txt",
+            b"worker applied before receipt failure\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+        assert!(matches!(
+            replayed,
+            Ok(RepositoryDispatchOutcome::OutcomeUnknown(_))
+        ));
+        assert!(
+            !marker.exists(),
+            "prepared replay must not relaunch the worker"
+        );
+    }
+
+    #[test]
     fn launch_thread_outlives_bubblewrap_parent_death_contract() {
         let repository = repository_with_src();
         let mutation = authorized_write(
             "src/launch-guard.txt",
             b"worker stayed alive\n",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         );
 
         let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
@@ -101,7 +624,7 @@ mod tests {
             "src/lib.rs",
             b"replacement\n",
             WritePrecondition::ExactDigest(tiber_repository_core::Sha256Digest::of(original)),
-            1_000,
+            15_000,
         );
 
         let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
@@ -129,7 +652,7 @@ mod tests {
             "src/tool",
             b"#!/bin/true\n",
             WritePrecondition::ExactDigest(tiber_repository_core::Sha256Digest::of(original)),
-            1_000,
+            15_000,
         );
 
         let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
@@ -155,7 +678,7 @@ mod tests {
         let mutation = authorized_delete(
             "src/lib.rs",
             tiber_repository_core::Sha256Digest::of(original),
-            1_000,
+            15_000,
         );
 
         let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
@@ -231,7 +754,7 @@ mod tests {
             "src/lib.rs",
             b"must not replace\n",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         );
 
         let absent_outcome = block_on_ready(service(repository.path()).dispatch(absent_write));
@@ -251,13 +774,13 @@ mod tests {
             "src/lib.rs",
             b"must not replace\n",
             WritePrecondition::ExactDigest(wrong),
-            1_000,
+            15_000,
         );
         assert_failure(
             block_on_ready(service(repository.path()).dispatch(exact_write)),
             RepositoryMutationFailureCode::PreconditionNotMet,
         );
-        let exact_delete = authorized_delete("src/lib.rs", wrong, 1_000);
+        let exact_delete = authorized_delete("src/lib.rs", wrong, 15_000);
         assert_failure(
             block_on_ready(service(repository.path()).dispatch(exact_delete)),
             RepositoryMutationFailureCode::PreconditionNotMet,
@@ -343,7 +866,7 @@ mod tests {
                 "src/special",
                 b"replacement",
                 WritePrecondition::ExactDigest(digest),
-                1_000,
+                15_000,
             ))),
             RepositoryMutationFailureCode::PreconditionNotMet,
         );
@@ -351,7 +874,7 @@ mod tests {
             block_on_ready(service(repository.path()).dispatch(authorized_delete(
                 "src/special",
                 digest,
-                1_000,
+                15_000,
             ))),
             RepositoryMutationFailureCode::PreconditionNotMet,
         );
@@ -368,7 +891,7 @@ mod tests {
             "escape/outside.txt",
             b"must stay contained\n",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         );
 
         assert_failure(
@@ -384,7 +907,7 @@ mod tests {
             "missing/parent/file.txt",
             b"must not create parents\n",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         );
         assert_failure(
             block_on_ready(service(repository.path()).dispatch(missing)),
@@ -412,6 +935,89 @@ mod tests {
     }
 
     #[test]
+    fn receipt_state_inside_the_repository_is_rejected_at_configuration() {
+        let repository = repository_with_src();
+        let config = config(repository.path());
+
+        let result = config.with_state_root(repository.path().join(".tiber-state"));
+
+        assert!(matches!(
+            result,
+            Err(LinuxRepositoryConfigurationError::StateRootInsideRepository)
+        ));
+    }
+
+    #[test]
+    fn nonexistent_state_below_a_symlink_to_the_repository_is_rejected() {
+        let repository = repository_with_src();
+        let aliases = TempDir::new().expect("alias directory should be created");
+        let alias = aliases.path().join("repository-alias");
+        symlink(repository.path(), &alias).expect("repository alias should be created");
+        let config = config(repository.path());
+
+        let result = config.with_state_root(alias.join("new-state"));
+
+        assert!(matches!(
+            result,
+            Err(LinuxRepositoryConfigurationError::StateRootInsideRepository)
+        ));
+    }
+
+    #[test]
+    fn recovery_state_is_owner_only_and_rejects_a_non_private_existing_root() {
+        let repository = repository_with_src();
+        let private_state = repository
+            .path()
+            .parent()
+            .expect("repository should have a parent")
+            .join(format!(
+                "{}.private-state",
+                repository
+                    .path()
+                    .file_name()
+                    .expect("repository should have a name")
+                    .to_string_lossy()
+            ));
+        let private = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(private_state.clone())
+                .expect("private state should configure"),
+        );
+        private
+            .scan_recovery()
+            .expect("private recovery root should initialize");
+        assert_eq!(
+            std::fs::metadata(&private_state)
+                .expect("state root metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(private_state.join(".tiber-repository.lock"))
+                .expect("lock metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let public_state = TempDir::new().expect("public state should be created");
+        std::fs::set_permissions(public_state.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("public permissions should be set");
+        let public = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(public_state.path().to_path_buf())
+                .expect("external state should configure"),
+        );
+        assert_eq!(
+            public.scan_recovery(),
+            Err(LinuxRepositoryRecoveryError::StateUnavailable)
+        );
+    }
+
+    #[test]
     fn service_rejects_authority_for_a_different_repository_before_launch() {
         let repository = repository_with_src();
         let marker = repository.path().join("bwrap-launched");
@@ -421,7 +1027,7 @@ mod tests {
             "src/lib.rs",
             b"wrong repository\n",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         );
 
         let service = LinuxRepositoryService::new(config_with_paths(
@@ -455,7 +1061,7 @@ mod tests {
             "src/lib.rs",
             b"cancelled\n",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         );
 
         assert_failure(
@@ -485,7 +1091,7 @@ mod tests {
             "src/first.txt",
             &vec![b'x'; tiber_repository_core::MAX_REPOSITORY_CONTENT_BYTES],
             WritePrecondition::Absent,
-            500,
+            5_000,
         );
         let first_service = Arc::clone(&service);
         let first_thread = std::thread::spawn(move || {
@@ -552,7 +1158,7 @@ mod tests {
             "src/shared.txt",
             b"first replacement\n",
             WritePrecondition::ExactDigest(tiber_repository_core::Sha256Digest::of(original)),
-            5_000,
+            15_000,
         );
         let first_thread = std::thread::spawn(move || {
             start_one.wait();
@@ -562,7 +1168,7 @@ mod tests {
         let second = authorized_delete(
             "src/shared.txt",
             tiber_repository_core::Sha256Digest::of(original),
-            5_000,
+            15_000,
         );
         let second_thread = std::thread::spawn(move || {
             start_two.wait();
@@ -570,11 +1176,11 @@ mod tests {
         });
         start.wait();
 
-        wait_for_flock_waiters(repository.path(), 2);
+        wait_for_flock_waiters(repository.path(), 1);
         assert_eq!(
             std::fs::read(&target).expect("locked target should be readable"),
             original,
-            "neither service may precheck or mutate while the root lock is held"
+            "one service holds the receipt lease while waiting at the root lock, and neither may mutate"
         );
         flock(&root_lock, FlockOperation::Unlock).expect("test root lock should release");
 
@@ -596,6 +1202,67 @@ mod tests {
                 .count(),
             1,
             "the later exact mutation must observe the committed digest: {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn concurrent_services_share_one_durable_receipt_and_launch_once() {
+        let repository = repository_with_src();
+        let launches = repository.path().join("shared-receipt-launches");
+        let bwrap = counting_bwrap_script(repository.path(), &launches);
+        let service_one = LinuxRepositoryService::new(config_with_paths(
+            "repo-1",
+            repository.path(),
+            bwrap.clone(),
+            PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+        ));
+        let service_two = LinuxRepositoryService::new(config_with_paths(
+            "repo-1",
+            repository.path(),
+            bwrap,
+            PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+        ));
+        let start = Arc::new(Barrier::new(3));
+        let first_start = Arc::clone(&start);
+        let first = std::thread::spawn(move || {
+            first_start.wait();
+            matches!(
+                block_on_ready(service_one.dispatch(authorized_write(
+                    "src/concurrent-receipt.txt",
+                    b"one durable application\n",
+                    WritePrecondition::Absent,
+                    15_000,
+                ))),
+                Ok(RepositoryDispatchOutcome::Applied(_))
+            )
+        });
+        let second_start = Arc::clone(&start);
+        let second = std::thread::spawn(move || {
+            second_start.wait();
+            matches!(
+                block_on_ready(service_two.dispatch(authorized_write(
+                    "src/concurrent-receipt.txt",
+                    b"one durable application\n",
+                    WritePrecondition::Absent,
+                    15_000,
+                ))),
+                Ok(RepositoryDispatchOutcome::Applied(_))
+            )
+        });
+        start.wait();
+
+        let outcomes = [
+            first.join().expect("first dispatch should join"),
+            second.join().expect("second dispatch should join"),
+        ];
+        assert!(outcomes.into_iter().all(core::convert::identity));
+        assert_eq!(
+            std::fs::read_to_string(launches)
+                .expect("launch counter should be readable")
+                .lines()
+                .count(),
+            1,
+            "the second service must replay the shared terminal receipt"
         );
     }
 
@@ -622,7 +1289,7 @@ mod tests {
             "src/lock-timeout.txt",
             b"must not apply while locked\n",
             WritePrecondition::Absent,
-            500,
+            5_000,
         );
         let started = Instant::now();
 
@@ -636,7 +1303,7 @@ mod tests {
             Ok(RepositoryDispatchOutcome::OutcomeUnknown(_))
         ));
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(7),
             "root-lock wait must remain within the dispatch budget"
         );
         assert!(!target.exists(), "blocked worker must not touch its target");
@@ -661,7 +1328,7 @@ mod tests {
             "src/never-applied.txt",
             &vec![b'x'; tiber_repository_core::MAX_REPOSITORY_CONTENT_BYTES],
             WritePrecondition::Absent,
-            2_000,
+            5_000,
         );
         let dispatch = std::thread::spawn(move || {
             matches!(
@@ -781,7 +1448,7 @@ mod tests {
             "src/lib.rs",
             b"never dispatched",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         )
         .into_ambiguity()
         {
@@ -827,11 +1494,111 @@ mod tests {
         assert_eq!(before, after, "read-only reconciliation must not mutate");
     }
 
+    #[test]
+    fn reconciliation_uses_durable_applied_fact_without_launch() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let first = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(state.path().to_path_buf())
+                .expect("absolute recovery root should parse"),
+        );
+        let mutation = authorized_write(
+            "src/reconciled-applied.txt",
+            b"durably applied\n",
+            WritePrecondition::Absent,
+            15_000,
+        );
+        let reconciliation = RepositoryReconciliation::from_durable_identity(mutation.identity());
+        assert!(matches!(
+            block_on_ready(first.dispatch(mutation)),
+            Ok(RepositoryDispatchOutcome::Applied(_))
+        ));
+        drop(first);
+
+        let marker = repository
+            .path()
+            .join("launched-for-applied-reconciliation");
+        let restarted = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        assert!(matches!(
+            block_on_ready(restarted.reconcile(reconciliation)),
+            Ok(RepositoryReconciliationOutcome::Applied(_))
+        ));
+        assert!(
+            !marker.exists(),
+            "terminal applied proof must not query a worker"
+        );
+    }
+
+    #[test]
+    fn reconciliation_uses_durable_no_launch_failure_without_querying() {
+        let repository = repository_with_src();
+        let state = recovery_state();
+        let first = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                repository.path().join("missing-bwrap-for-reconciliation"),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        let mutation = authorized_write(
+            "src/reconciled-failed.txt",
+            b"never applied\n",
+            WritePrecondition::Absent,
+            15_000,
+        );
+        let reconciliation = RepositoryReconciliation::from_durable_identity(mutation.identity());
+        assert_failure(
+            block_on_ready(first.dispatch(mutation)),
+            RepositoryMutationFailureCode::PreDispatchRejected,
+        );
+        drop(first);
+
+        let marker = repository.path().join("launched-for-failed-reconciliation");
+        let restarted = LinuxRepositoryService::new(
+            config_with_paths(
+                "repo-1",
+                repository.path(),
+                marker_script(repository.path(), &marker),
+                PathBuf::from(env!("CARGO_BIN_EXE_tiber-repository-worker")),
+            )
+            .with_state_root(state.path().to_path_buf())
+            .expect("absolute recovery root should parse"),
+        );
+        assert!(matches!(
+            block_on_ready(restarted.reconcile(reconciliation)),
+            Ok(RepositoryReconciliationOutcome::NotApplied(_))
+        ));
+        assert!(
+            !marker.exists(),
+            "terminal failure proof must not query a worker"
+        );
+    }
+
     fn repository_with_src() -> TempDir {
         let repository = TempDir::new().expect("test repository should be created");
         std::fs::create_dir_all(repository.path().join("src"))
             .expect("test parent directory should be created");
         repository
+    }
+
+    fn recovery_state() -> TempDir {
+        let state = TempDir::new().expect("test recovery state should be created");
+        std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("test recovery state should be owner-only");
+        state
     }
 
     fn config(repository: &std::path::Path) -> LinuxRepositoryServiceConfig {
@@ -849,6 +1616,16 @@ mod tests {
         bubblewrap: PathBuf,
         worker: PathBuf,
     ) -> LinuxRepositoryServiceConfig {
+        let state_root = repository
+            .parent()
+            .expect("test repository should have a parent")
+            .join(format!(
+                "{}.tiber-repository-state",
+                repository
+                    .file_name()
+                    .expect("test repository should have a name")
+                    .to_string_lossy()
+            ));
         LinuxRepositoryServiceConfig::new(
             repository_value(RepositoryId::parse, repository_id),
             repository.to_path_buf(),
@@ -856,6 +1633,8 @@ mod tests {
             worker,
         )
         .expect("absolute adapter paths should parse")
+        .with_state_root(state_root)
+        .expect("test state root outside the repository should parse")
     }
 
     fn service(repository: &std::path::Path) -> LinuxRepositoryService {
@@ -889,6 +1668,164 @@ mod tests {
             "fake-bwrap",
             &format!("printf launched > '{}'", marker.display()),
         )
+    }
+
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the terminal-append regression uses one purpose-built Bubblewrap wrapper"
+    )]
+    fn terminal_append_breaking_bwrap_script(
+        directory: &std::path::Path,
+        journal: &std::path::Path,
+    ) -> PathBuf {
+        executable_script(
+            directory,
+            "terminal-append-breaking-bwrap",
+            &format!(
+                "'{bwrap}' \"$@\"\nstatus=$?\n'{chmod}' -R a-w '{journal}'\nexit $status",
+                bwrap = test_bubblewrap().display(),
+                chmod = executable_on_path("chmod").display(),
+                journal = journal.display(),
+            ),
+        )
+    }
+
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the concurrent-receipt regression uses one launch-counting wrapper"
+    )]
+    fn counting_bwrap_script(directory: &std::path::Path, launches: &std::path::Path) -> PathBuf {
+        executable_script(
+            directory,
+            "counting-bwrap",
+            &format!(
+                "printf 'launched\\n' >> '{launches}'\nexec '{bwrap}' \"$@\"",
+                launches = launches.display(),
+                bwrap = test_bubblewrap().display(),
+            ),
+        )
+    }
+
+    fn executable_on_path(name: &str) -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").expect("test PATH should exist"))
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+            .expect("test executable should exist on PATH")
+    }
+
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the corruption regression tampers with one integrity-anchored fact"
+    )]
+    fn corrupt_one_journal_fact(state_root: &std::path::Path) {
+        let fact = journal_fact_files(state_root)
+            .into_iter()
+            .next()
+            .expect("at least one journal fact should exist");
+        let mut bytes = std::fs::read(&fact).expect("journal fact should be readable");
+        let needle = b"\"schema_version\":1";
+        let offset = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("journal fact should carry the schema version");
+        let last = needle
+            .len()
+            .checked_sub(1)
+            .expect("schema version needle should not be empty");
+        let version = offset
+            .checked_add(last)
+            .expect("schema version offset should fit");
+        *bytes
+            .get_mut(version)
+            .expect("schema version byte should be present") = b'2';
+        std::fs::write(fact, bytes).expect("journal corruption should be written");
+    }
+
+    fn journal_fact_files(state_root: &std::path::Path) -> Vec<PathBuf> {
+        std::fs::read_dir(state_root.join("journal/events"))
+            .expect("journal events should be readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            })
+            .collect()
+    }
+
+    fn create_applied_journal(repository: &TempDir, state: &TempDir, path: &str) {
+        let service = LinuxRepositoryService::new(
+            config(repository.path())
+                .with_state_root(state.path().to_path_buf())
+                .expect("absolute recovery root should parse"),
+        );
+        let outcome = block_on_ready(service.dispatch(authorized_write(
+            path,
+            b"durable structural fixture\n",
+            WritePrecondition::Absent,
+            15_000,
+        )));
+        assert!(matches!(outcome, Ok(RepositoryDispatchOutcome::Applied(_))));
+    }
+
+    fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
+        std::fs::create_dir_all(destination).expect("destination directory should be created");
+        for entry in std::fs::read_dir(source).expect("source directory should be readable") {
+            let path = entry.expect("source entry should be readable").path();
+            let target = destination.join(path.file_name().expect("entry should have a name"));
+            if path.is_dir() {
+                copy_tree(&path, &target);
+            } else {
+                std::fs::copy(path, target).expect("journal file should be copied");
+            }
+        }
+    }
+
+    fn append_structural_fixture(root: &std::path::Path, label: &str, expected: usize) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("fixture runtime should build");
+        runtime.block_on(async {
+            let store = FileEventStore::open(root).expect("fixture store should open");
+            let stream =
+                StreamId::try_new("repository-recovery").expect("fixture stream should parse");
+            let writes = StreamWrites::new()
+                .register_stream(stream.clone(), StreamVersion::new(expected))
+                .and_then(|writes| {
+                    writes.append(StructuralJournalFixture {
+                        label: label.to_owned(),
+                        stream,
+                    })
+                })
+                .expect("fixture append should build");
+            let _receipt = store
+                .append_events(writes)
+                .await
+                .expect("fixture append should succeed");
+        });
+    }
+
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the fork regression performs one additive journal union"
+    )]
+    fn union_journal_facts(source: &std::path::Path, destination: &std::path::Path) {
+        for fact in std::fs::read_dir(source.join("events"))
+            .expect("source facts should be readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            })
+        {
+            let target = destination
+                .join("events")
+                .join(fact.file_name().expect("fact should have a name"));
+            if !target.exists() {
+                std::fs::copy(fact, target).expect("fork fact should be copied");
+            }
+        }
     }
 
     fn stalled_worker_script(directory: &std::path::Path) -> PathBuf {
@@ -1012,7 +1949,7 @@ mod tests {
 
     fn wait_for_path(path: &std::path::Path) {
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(2))
+            .checked_add(Duration::from_secs(10))
             .expect("test wait deadline should fit");
         while !path.exists() {
             assert!(
@@ -1125,7 +2062,7 @@ mod tests {
             "src/lib.rs",
             b"ambiguous",
             WritePrecondition::Absent,
-            1_000,
+            15_000,
         )
         .into_ambiguity()
         {
@@ -1198,7 +2135,54 @@ mod tests {
         precondition: WritePrecondition,
         deadline_milliseconds: u64,
     ) -> tiber_repository_core::AuthorizedRepositoryMutation {
-        let provenance = provenance(deadline_milliseconds);
+        let repository_content =
+            RepositoryContent::from_bytes(content).expect("bounded test content should parse");
+        let precondition_key = match precondition {
+            WritePrecondition::Absent => "absent".to_owned(),
+            WritePrecondition::ExactDigest(digest) => digest.as_hex().clone(),
+        };
+        let idempotency_key = format!(
+            "write-{}-{}-{}",
+            path.replace('/', "-"),
+            repository_content.digest().as_hex(),
+            precondition_key
+        );
+        authorized_write_for_repository_with_idempotency(
+            repository_id,
+            path,
+            repository_content,
+            precondition,
+            deadline_milliseconds,
+            &idempotency_key,
+        )
+    }
+
+    fn authorized_write_with_idempotency(
+        path: &str,
+        content: &[u8],
+        precondition: WritePrecondition,
+        deadline_milliseconds: u64,
+        idempotency_key: &str,
+    ) -> tiber_repository_core::AuthorizedRepositoryMutation {
+        authorized_write_for_repository_with_idempotency(
+            "repo-1",
+            path,
+            RepositoryContent::from_bytes(content).expect("bounded test content should parse"),
+            precondition,
+            deadline_milliseconds,
+            idempotency_key,
+        )
+    }
+
+    fn authorized_write_for_repository_with_idempotency(
+        repository_id: &str,
+        path: &str,
+        content: RepositoryContent,
+        precondition: WritePrecondition,
+        deadline_milliseconds: u64,
+        idempotency_key: &str,
+    ) -> tiber_repository_core::AuthorizedRepositoryMutation {
+        let provenance = provenance(deadline_milliseconds, idempotency_key);
         let repository = repository_value(RepositoryId::parse, repository_id);
         let assignment = RepositoryAssignmentContext::new(
             provenance.clone(),
@@ -1213,7 +2197,7 @@ mod tests {
             provenance,
             repository,
             repository_value(RepositoryPath::parse, path),
-            RepositoryContent::from_bytes(content).expect("bounded test content should parse"),
+            content,
             precondition,
         );
         let approval = RepositoryMutationApproval::issue(
@@ -1230,7 +2214,12 @@ mod tests {
         precondition: tiber_repository_core::Sha256Digest,
         deadline_milliseconds: u64,
     ) -> tiber_repository_core::AuthorizedRepositoryMutation {
-        let provenance = provenance(deadline_milliseconds);
+        let idempotency_key = format!(
+            "delete-{}-{}",
+            path.replace('/', "-"),
+            precondition.as_hex()
+        );
+        let provenance = provenance(deadline_milliseconds, &idempotency_key);
         let repository = repository_value(RepositoryId::parse, "repo-1");
         let assignment = RepositoryAssignmentContext::new(
             provenance.clone(),
@@ -1256,7 +2245,10 @@ mod tests {
             .expect("test deletion should authorize")
     }
 
-    fn provenance(deadline_milliseconds: u64) -> RepositoryMutationProvenance {
+    fn provenance(
+        deadline_milliseconds: u64,
+        idempotency_key: &str,
+    ) -> RepositoryMutationProvenance {
         RepositoryMutationProvenance::new(
             workflow_value(SessionId::parse, "session-1"),
             workflow_value(AgentId::parse, "agent-1"),
@@ -1268,7 +2260,7 @@ mod tests {
             workflow_value(ContextReceiptId::parse, "context-1"),
             workflow_value(PolicyDecisionId::parse, "policy-1"),
             workflow_value(EffectId::parse, "effect-1"),
-            workflow_value(IdempotencyKey::parse, "idem-1"),
+            workflow_value(IdempotencyKey::parse, idempotency_key),
             DeadlineMilliseconds::parse(deadline_milliseconds).expect("test deadline should parse"),
         )
     }

@@ -65,25 +65,40 @@ filesystem, process, and network isolation. It starts a fixed, private
 shell text, arbitrary argv, cwd, environment, mount, or network configuration.
 The adapter owns operational timeout, cancellation, child cleanup, and typed
 non-durable outcomes. It is not a generic `ProcessService`, shell runner, or
-workflow integration. S3 will add durable receipts, recovery, crash/restart and
-stale/corrupt-state reconciliation, concurrency evidence, and clean-machine
-packaging.
+workflow integration.
+
+S3 adds a private, pinned `eventcore-fs` receipt journal outside the repository
+in an owner-only state root, using full file and directory fsync. It records
+`Prepared` before the worker receives mutation bytes and durable terminal
+`Applied`, `Failed`, or `Unknown` facts afterward. Restart scans return only
+read-only ambiguity-derived reconciliation handles, never mutation authority or
+automatic replay. The journal rejects corrupt, dangling, forked, or stale state
+fail-closed, and the cooperative state-root then worker-lock order coordinates
+concurrent owners. These facts make the journal durable; they do not claim
+durability of the working-tree filesystem beyond the recorded facts.
+
+The clean x86_64 Linux package exposes public `tiber` and keeps the worker plus
+Bubblewrap helper private under `libexec`. CI's package smoke validates that
+artifact layout and entry behavior only; real adapter behavior is tested
+separately outside that package smoke.
 
 ## Consequences
 
 S1 established precise semantic types and observable pure-core behavior without
 claiming that Tiber had changed a repository. S2 now supplies the replaceable
 isolated adapter for those bounded operations, with timeout, cancellation, and
-child-cleanup controls, but makes no durable-receipt or restart-recovery claim.
+child-cleanup controls. S3 adds the private receipt-journal, read-only recovery,
+lock-ordering, and package-layout evidence without making the journal an
+EventCore workflow integration or a general filesystem durability guarantee.
 The boundary keeps the authority distinction between a working-tree mutation and
 an EventCore authority-branch publication explicit.
 
 S1 intentionally deferred execution, cancellation, timeout, retry bounds,
 platform isolation, durable receipts, restart recovery, and packaging. S2
-delivers only isolated execution controls and typed non-durable outcomes;
-durable recovery and packaging remain S3. An ambiguous mutation requires
-reconciliation before any later fresh attempt, so callers cannot rely on an
-implicit retry for a potentially applied write.
+delivers isolated execution controls and typed non-durable outcomes; S3 adds
+journal-backed recovery and package-layout evidence. An ambiguous mutation
+requires reconciliation before any later fresh attempt, so callers cannot rely
+on an implicit retry for a potentially applied write.
 
 ## Alternatives considered
 
