@@ -669,7 +669,11 @@ mod tests {
             fixture
         }
 
-        async fn signed_validation_repaired_order() -> Self {
+        #[expect(
+            clippy::single_call_fn,
+            reason = "the abandonment-only repaired-order fixture isolates one public lifecycle scenario from creation's established fixture contract"
+        )]
+        async fn signed_abandonment_validation_repaired_order() -> Self {
             let fixture = Self::signed_ordered_history().await;
             let board_stream = StreamId::try_new("tiber:board".to_owned())
                 .expect("fixture board stream should be valid");
@@ -693,6 +697,42 @@ mod tests {
                     "order_change": {
                         "stream_id": board_stream.as_ref(),
                         "order": [SECOND_PRIORITY_TASK_ID, SHELL_SENSITIVE_TASK_ID, FIRST_PRIORITY_TASK_ID]
+                    },
+                    "repairs": [{
+                        "repair": "board_entry_added",
+                        "task": FIRST_PRIORITY_TASK_ID
+                    }]
+                })))
+                .expect("validation-repair order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture validation repair should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::single_call_fn,
+            reason = "the creation repaired-order fixture preserves one established public append-after-repair scenario"
+        )]
+        async fn signed_validation_repaired_order() -> Self {
+            let fixture = Self::signed_ordered_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(2))
+                .expect("fixture board stream should register after retained order facts")
+                .append(event(json!({
+                    "event": "task_validation_repaired",
+                    "stream_id": board_stream.as_ref(),
+                    "link_changes": [],
+                    "order_change": {
+                        "stream_id": board_stream.as_ref(),
+                        "order": [FIRST_PRIORITY_TASK_ID, SECOND_PRIORITY_TASK_ID]
                     },
                     "repairs": [{
                         "repair": "board_entry_added",
@@ -1716,7 +1756,7 @@ mod tests {
 
     #[tokio::test]
     async fn tasks_transition_abandoned_uses_the_latest_repaired_board_order() {
-        let fixture = TaskFixture::signed_validation_repaired_order().await;
+        let fixture = TaskFixture::signed_abandonment_validation_repaired_order().await;
 
         let abandoned =
             fixture.tiber(&["tasks", "transition", FIRST_PRIORITY_TASK_ID, "abandoned"]);
