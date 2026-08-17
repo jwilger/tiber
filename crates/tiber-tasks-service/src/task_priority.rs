@@ -492,18 +492,23 @@ fn consistency_streams(task: &TaskId, before: &TaskId) -> Result<[StreamId; 3], 
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    clippy::implicit_return,
-    reason = "the private model fixture fails loudly and directly inspects provenance-dependent order derivation"
-)]
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
+        reason = "the private model fixture fails loudly on invalid fixed IDs and returns the semantic ID directly"
+    )]
     fn id(value: &str) -> TaskId {
         TaskId::parse(value).expect("test task ID should be valid")
     }
 
+    #[expect(
+        clippy::expect_used,
+        clippy::implicit_return,
+        reason = "the private model fixture fails loudly at each checked construction boundary and returns the modeled order directly"
+    )]
     fn modeled_order(current_order: Vec<TaskId>, task: TaskId, before: TaskId) -> Vec<TaskId> {
         let stream =
             StreamId::try_new("tiber:board".to_owned()).expect("test board stream should be valid");
