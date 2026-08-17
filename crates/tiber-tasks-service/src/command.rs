@@ -779,8 +779,8 @@ pub enum TaskCommandError {
     TaskActivationMalformedHistory,
     /// The current strict board order cannot authorize task creation.
     TaskCreationMalformedHistory,
-    /// An abandonment request addressed a task that is not currently queued.
-    TaskAbandonmentNotBacklog { task: TaskId, status: TaskStatus },
+    /// An abandonment request addressed a task that is not currently open.
+    TaskAbandonmentNotOpen { task: TaskId, status: TaskStatus },
     /// The current strict board order cannot authorize the requested priority movement.
     TaskPriorityMalformedHistory,
     /// Board-wide facts needed for abandonment came from an unfenced stream.
@@ -986,7 +986,7 @@ impl TaskCommandError {
                 "tasks_command_task_activation_malformed_history"
             }
             Self::TaskCreationMalformedHistory => "tasks_command_task_creation_malformed_history",
-            Self::TaskAbandonmentNotBacklog { .. } => "tasks_command_task_abandonment_not_backlog",
+            Self::TaskAbandonmentNotOpen { .. } => "tasks_command_task_abandonment_not_backlog",
             Self::TaskPriorityMalformedHistory => "tasks_command_task_priority_malformed_history",
             Self::TaskAbandonmentMalformedHistory => {
                 "tasks_command_task_abandonment_malformed_history"

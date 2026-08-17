@@ -399,13 +399,16 @@ pub fn decide(
     if current == TaskStatus::Abandoned && order.contains(&request.task) {
         return Err(TaskCommandError::TaskAbandonmentMalformedHistory);
     }
-    if current != TaskStatus::Abandoned && current != TaskStatus::Backlog {
-        return Err(TaskCommandError::TaskAbandonmentNotBacklog {
+    if current != TaskStatus::Abandoned
+        && current != TaskStatus::Backlog
+        && current != TaskStatus::InProgress
+    {
+        return Err(TaskCommandError::TaskAbandonmentNotOpen {
             task: request.task.clone(),
             status: current,
         });
     }
-    if current == TaskStatus::Backlog
+    if current != TaskStatus::Abandoned
         && order
             .iter()
             .filter(|task| return *task == &request.task)
@@ -481,7 +484,7 @@ mod tests {
             .board(board)
             .plan(Plan {
                 order: vec![other.clone(), target.clone(), trailing.clone()],
-                status: TaskStatus::Backlog,
+                status: TaskStatus::InProgress,
                 task: target,
             })
             .task_stream(

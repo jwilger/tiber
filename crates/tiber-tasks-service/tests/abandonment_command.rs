@@ -56,6 +56,19 @@ fn transitioned(status: &str) -> TaskEvent {
 
 #[expect(
     clippy::needless_return,
+    clippy::single_call_fn,
+    reason = "the bounded fixture uses an explicit return to satisfy the workspace's implicit-return policy"
+)]
+fn claimed_active_transition() -> TaskEvent {
+    return event(serde_json::json!({
+        "event": "task_transitioned", "stream_id": format!("tiber:task:{TASK}"),
+        "stem": TASK, "status": "in-progress",
+        "claim": { "host": "fixture-host", "session": "fixture-session" }
+    }));
+}
+
+#[expect(
+    clippy::needless_return,
     reason = "the bounded fixture uses an explicit return to satisfy the workspace's implicit-return policy"
 )]
 fn historical(event_name: &str) -> TaskEvent {
@@ -77,6 +90,34 @@ fn abandonment_publication_fences_board_and_the_addressed_task() {
     let (_events, streams) = publication.into_events_and_consistency_streams();
     assert_eq!(streams[0].as_ref(), "tiber:board");
     assert_eq!(streams[1].as_ref(), format!("tiber:task:{TASK}"));
+}
+
+#[test]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::pattern_type_mismatch,
+    clippy::tests_outside_test_module,
+    reason = "the root integration test fails loudly while inspecting the fixed two-fact public abandonment batch through its borrowed event variants"
+)]
+fn abandonment_of_an_active_task_clears_its_claim_and_open_board_membership() {
+    let [created, order] = history();
+    let publication =
+        decide_abandon_task(&[created, claimed_active_transition(), order], &request())
+            .expect("active task can be abandoned")
+            .expect("active task requires publication");
+    let (events, _streams) = publication.into_events_and_consistency_streams();
+    let TaskEvent::TaskTransitioned(transitioned) = &events[0] else {
+        panic!("first abandonment fact must be the terminal transition");
+    };
+    let TaskEvent::TaskPriorityChanged(resulting_order) = &events[1] else {
+        panic!("second abandonment fact must be the resulting strict order");
+    };
+
+    assert_eq!(transitioned.status, tiber_tasks_core::TaskStatus::Abandoned);
+    assert!(transitioned.claim.is_none());
+    assert!(!resulting_order.order.contains(request().task()));
 }
 
 #[test]
@@ -173,6 +214,28 @@ fn abandonment_rejects_duplicate_unrelated_board_membership() {
 #[test]
 #[expect(
     clippy::tests_outside_test_module,
+    reason = "the root integration test exercises the public command boundary against an active task missing from strict open-board order"
+)]
+fn abandonment_rejects_active_task_missing_from_strict_order() {
+    let [created, _order] = history();
+    let empty_order = event(serde_json::json!({
+        "event": "board_reordered", "stream_id": "tiber:board", "order": []
+    }));
+
+    let result = decide_abandon_task(
+        &[created, transitioned("in-progress"), empty_order],
+        &request(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(TaskCommandError::TaskAbandonmentMalformedHistory)
+    ));
+}
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
     reason = "the root integration test exercises the public command boundary against an overwritten malformed order carrier"
 )]
 fn abandonment_rejects_an_overwritten_duplicate_order_carrier() {
@@ -259,7 +322,7 @@ fn abandonment_treats_historical_closure_as_terminal() {
     );
     assert!(matches!(
         result,
-        Err(TaskCommandError::TaskAbandonmentNotBacklog { .. })
+        Err(TaskCommandError::TaskAbandonmentNotOpen { .. })
     ));
 }
 

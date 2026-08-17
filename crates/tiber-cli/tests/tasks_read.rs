@@ -1773,24 +1773,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tasks_transition_abandoned_rejects_an_active_task_without_advancing_authority() {
+    async fn tasks_transition_abandoned_removes_one_active_task_from_the_open_board() {
         let fixture = TaskFixture::signed_active_paged_history().await;
         let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
 
         let output = fixture.tiber(&["tasks", "transition", TASK_ID, "abandoned"]);
 
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
+        assert_success(&output);
+        let after = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        assert_ne!(after, before);
         assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            format!(
-                "tasks_command_task_abandonment_not_backlog: task `{TASK_ID}` is currently `in-progress`; abandonment requires `backlog`\n"
-            )
+            String::from_utf8_lossy(&output.stdout),
+            format!("abandoned {TASK_ID} at {after}\n")
         );
+        let open = fixture.tiber(&["tasks", "list"]);
+        assert_success(&open);
+        assert!(open.stdout.is_empty());
+        let terminal = fixture.tiber(&["tasks", "list", "--status", "abandoned"]);
+        assert_success(&terminal);
         assert_eq!(
-            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
-            before,
-            "an active task refusal must not advance task authority"
+            String::from_utf8_lossy(&terminal.stdout),
+            format!(
+                "{TASK_ID}\tabandoned\tPaged task revision {}\n",
+                PAGE_SPANNING_UPDATES - 1
+            )
         );
     }
 
@@ -1806,7 +1812,7 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output.stderr),
             format!(
-                "tasks_command_task_abandonment_not_backlog: task `{CLOSED_TASK_ID}` is currently `done`; abandonment requires `backlog`\n"
+                "tasks_command_task_abandonment_not_backlog: task `{CLOSED_TASK_ID}` is currently `done`; abandonment requires `backlog` or `in-progress`\n"
             )
         );
         assert_eq!(

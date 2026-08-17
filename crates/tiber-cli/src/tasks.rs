@@ -533,10 +533,10 @@ impl fmt::Display for TaskCliError {
                     status_name(*status)
                 );
             }
-            Self::Command(TaskCommandError::TaskAbandonmentNotBacklog { task, status }) => {
+            Self::Command(TaskCommandError::TaskAbandonmentNotOpen { task, status }) => {
                 return write!(
                     f,
-                    "task `{}` is currently `{}`; abandonment requires `backlog`",
+                    "task `{}` is currently `{}`; abandonment requires `backlog` or `in-progress`",
                     task.as_str(),
                     status_name(*status)
                 );
