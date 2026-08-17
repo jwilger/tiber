@@ -23,6 +23,62 @@ use tiber_tasks_core::{
     TaskSubtaskOccurrenceChecked, TaskTransitioned,
 };
 
+/// Opaque publication for one modeled unchecked acceptance addition.
+#[derive(Debug, Eq, PartialEq)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque token stores the modeled fact before the consistency fence used to publish it"
+)]
+pub struct AcceptanceAddPublication {
+    /// Sole modeled unchecked acceptance fact authorized for publication.
+    fact: TaskAcceptanceAdded,
+    /// Exact board and addressed-task streams read by the addition decision.
+    consistency_streams: [StreamId; 2],
+}
+
+impl AcceptanceAddPublication {
+    /// Creates the closed acceptance-add token from one modeled unchecked fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed command failure when the fact is checked, is not on the
+    /// addressed task stream, or differs from the exact consistency fence.
+    #[expect(
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the closed-token constructor validates modeled provenance before returning the exact two-stream fence"
+    )]
+    pub(crate) fn from_modeled_fact(
+        fact: TaskAcceptanceAdded,
+        consistency_streams: [StreamId; 2],
+    ) -> Result<Self, command::TaskCommandError> {
+        if fact.stream_id != consistency_streams[1]
+            || fact.item.checked
+            || !fact.stream_id.as_ref().ends_with(fact.stem.as_str())
+        {
+            return Err(command::TaskCommandError::InvalidModeledAcceptanceAddPublication);
+        }
+        Ok(Self {
+            fact,
+            consistency_streams,
+        })
+    }
+
+    /// Transfers the modeled fact and its exact board-and-task stream fences.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot opaque transfer returns its complete event and fence directly"
+    )]
+    pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 2]) {
+        (
+            TaskEvent::TaskAcceptanceAdded(self.fact),
+            self.consistency_streams,
+        )
+    }
+}
+
 /// Opaque publication for one modeled task-details replacement.
 #[derive(Debug, Eq, PartialEq)]
 pub struct TaskDetailsPublication {

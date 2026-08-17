@@ -1227,6 +1227,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tasks_acceptance_add_appends_a_criterion_visible_through_native_queries() {
+        let fixture = TaskFixture::signed_acceptance_history().await;
+
+        let added = fixture.tiber(&[
+            "tasks",
+            "acceptance",
+            "add",
+            TASK_ID,
+            "The packaged binary restores the exact next action after restart.",
+        ]);
+
+        assert_success(&added);
+        let shown = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&shown);
+        let shown_text = String::from_utf8_lossy(&shown.stdout);
+        assert!(
+            shown_text.contains(
+                "3. [ ] The packaged binary restores the exact next action after restart.\n"
+            ),
+            "unexpected task projection:\n{shown_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_acceptance_add_reconciles_a_shell_safe_retry_after_ambiguous_publication() {
+        let fixture = TaskFixture::signed_paged_history().await;
+        let remote = fixture._directory.path().join("acceptance-add-remote.git");
+        git(
+            fixture._directory.path(),
+            [
+                "clone",
+                "--bare",
+                fixture.repository.to_str().expect("fixture path is UTF-8"),
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        git(
+            &fixture.repository,
+            [
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        let base = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        let commands = fixture
+            ._directory
+            .path()
+            .join("acceptance-add-ambiguous-commands");
+        fs::create_dir_all(&commands).expect("wrapper directory should be created");
+        let wrapper = commands.join("git");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+operation=
+for argument in "$@"; do
+  if [ "$argument" = "push" ]; then operation=push; fi
+  if [ "$argument" = "ls-remote" ]; then operation=ls-remote; fi
+done
+if [ "$operation" = "ls-remote" ] && [ -f "$TIBER_PUSH_MARKER" ]; then
+  printf '%s\trefs/heads/tiber\n' "$TIBER_STALE_HEAD"
+  exit 0
+fi
+if [ "$operation" = "push" ]; then
+  "$TIBER_REAL_GIT" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then : > "$TIBER_PUSH_MARKER"; fi
+  exit "$status"
+fi
+exec "$TIBER_REAL_GIT" "$@"
+"#,
+        )
+        .expect("Git wrapper should be written");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("wrapper executable");
+        let real_git = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("Git discovery")
+                .stdout,
+        )
+        .expect("Git path UTF-8")
+        .trim()
+        .to_owned();
+        let path = format!(
+            "{}:{}",
+            commands.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let marker = fixture
+            ._directory
+            .path()
+            .join("acceptance-add-push-completed");
+        let sentinel = fixture._directory.path().join("must-not-exist");
+        let criterion = format!("Owner's exact criterion; touch {}", sentinel.display());
+        let ambiguous = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(["tasks", "acceptance", "add", TASK_ID, criterion.as_str()])
+            .current_dir(&fixture.repository)
+            .env("PATH", path)
+            .env("TIBER_REAL_GIT", real_git)
+            .env("TIBER_PUSH_MARKER", &marker)
+            .env("TIBER_STALE_HEAD", &base)
+            .output()
+            .expect("Tiber CLI");
+        assert!(!ambiguous.status.success());
+        let diagnostic = String::from_utf8_lossy(&ambiguous.stderr);
+        let remote_after_ambiguous = git_output(&remote, ["rev-parse", TIBER_REF]);
+        assert_ne!(remote_after_ambiguous, base);
+        let retry_command = diagnostic
+            .strip_prefix("tiber_store_publication_ambiguous: acceptance addition may already be durable; retry exactly: `")
+            .and_then(|text| text.strip_suffix("`\n"))
+            .expect("exact retry diagnostic");
+        let tiber_directory = Path::new(env!("CARGO_BIN_EXE_tiber"))
+            .parent()
+            .expect("binary parent");
+        let retry_path = format!(
+            "{}:{}",
+            tiber_directory.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let reconciled = Command::new("sh")
+            .args(["-c", retry_command])
+            .current_dir(&fixture.repository)
+            .env("PATH", retry_path)
+            .output()
+            .expect("retry command");
+        assert_success(&reconciled);
+        assert_eq!(
+            String::from_utf8_lossy(&reconciled.stdout),
+            format!("criterion already added for {TASK_ID}\n")
+        );
+        assert!(!sentinel.exists());
+        assert_eq!(
+            git_output(&remote, ["rev-parse", TIBER_REF]),
+            remote_after_ambiguous
+        );
+        let shown = fixture.tiber(&["tasks", "show", TASK_ID]);
+        assert_success(&shown);
+        assert_eq!(
+            String::from_utf8_lossy(&shown.stdout)
+                .matches(&criterion)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn tasks_update_reconciles_the_exact_retry_after_ambiguous_publication() {
         let fixture = TaskFixture::signed_paged_history().await;
         let remote = fixture._directory.path().join("update-remote.git");
@@ -3076,8 +3228,8 @@ exec "$TIBER_REAL_GIT" "$@"
     )]
     fn explicit_help_flags_succeed_without_an_error_diagnostic() {
         let directory = TempDir::new().expect("fixture directory should be created");
-        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
-        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
+        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
+        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
         let usage_exit_code: i32 = 2;
         let cases: &[(&[&str], &str)] = &[
             (&["--help"], root_usage),
@@ -3163,7 +3315,7 @@ exec "$TIBER_REAL_GIT" "$@"
         assert!(String::from_utf8_lossy(&output.stderr).is_empty());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
+            "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
         );
     }
 

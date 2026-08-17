@@ -4,6 +4,8 @@
 //! adapter. They deliberately do not reuse [`crate::TaskBoardProjection`],
 //! whose broad state is query-only rather than write authority.
 
+#[path = "acceptance_add.rs"]
+mod acceptance_add;
 #[path = "task_administration.rs"]
 mod task_administration;
 #[path = "task_details.rs"]
@@ -41,6 +43,8 @@ pub type TaskCreationDecision = task_administration::TaskCreationDecision;
 
 /// Request to replace the owner-editable details of one task.
 pub type UpdateTaskDetails = task_details::UpdateTaskDetails;
+/// Request to append one exact unchecked acceptance criterion.
+pub type AddAcceptance = acceptance_add::AddAcceptance;
 
 /// A zero-based durable acceptance-item position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -901,6 +905,10 @@ pub enum TaskCommandError {
     ModeledTaskDetailsDecisionFailed,
     /// The checked `EventCore` command did not produce one valid task-details fact.
     InvalidModeledTaskDetailsPublication,
+    /// The checked `EventCore` command could not produce its acceptance-add fact.
+    ModeledAcceptanceAddDecisionFailed,
+    /// The checked command did not produce one valid acceptance-add fact.
+    InvalidModeledAcceptanceAddPublication,
 }
 
 impl TaskCommandError {
@@ -1002,6 +1010,12 @@ impl TaskCommandError {
             }
             Self::InvalidModeledTaskDetailsPublication => {
                 "tasks_command_invalid_modeled_task_details_publication"
+            }
+            Self::ModeledAcceptanceAddDecisionFailed => {
+                "tasks_command_modeled_acceptance_add_decision_failed"
+            }
+            Self::InvalidModeledAcceptanceAddPublication => {
+                "tasks_command_invalid_modeled_acceptance_add_publication"
             }
         }
     }
@@ -4109,6 +4123,24 @@ pub fn decide_update_task_details(
     request: &UpdateTaskDetails,
 ) -> Result<Option<crate::TaskDetailsPublication>, TaskCommandError> {
     task_details::decide_update_task_details(events, request)
+}
+
+/// Decides one unchecked acceptance addition through its command-specific model.
+///
+/// # Errors
+///
+/// Returns a typed command failure when canonical history or the checked model
+/// rejects the requested addition.
+#[inline]
+#[expect(
+    clippy::needless_return,
+    reason = "the workspace requires explicit returns while Clippy also reports this forwarding return as needless"
+)]
+pub fn decide_add_acceptance(
+    events: &[TaskEvent],
+    request: &AddAcceptance,
+) -> Result<Option<crate::AcceptanceAddPublication>, TaskCommandError> {
+    return acceptance_add::decide_add_acceptance(events, request);
 }
 
 /// Decides the two-fact publication for one new backlog task.

@@ -16,9 +16,9 @@ use eventcore_fs::{FileEventStore, FsConfig, FsyncPolicy};
 use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamWrites};
 use tempfile::TempDir;
 use tiber_tasks_service::{
-    AcceptanceCheckPublication, SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication,
-    TaskActivationPublication, TaskCompletionPublication, TaskCreationPublication,
-    TaskDetailsPublication,
+    AcceptanceAddPublication, AcceptanceCheckPublication, SubtaskIdCorrectionPublication,
+    SubtaskOccurrenceCheckPublication, TaskActivationPublication, TaskCompletionPublication,
+    TaskCreationPublication, TaskDetailsPublication,
 };
 
 use crate::{
@@ -195,6 +195,21 @@ impl TiberEventPublisher {
     pub async fn publish_task_details(
         &mut self,
         publication: TaskDetailsPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = publication.into_event_and_consistency_streams();
+        return self.append(&streams, vec![event]).await;
+    }
+
+    /// Publishes one modeled unchecked acceptance addition.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed publication failure when task authority changes,
+    /// signing fails, or the remote result cannot be safely reconciled.
+    #[inline]
+    pub async fn publish_acceptance_add(
+        &mut self,
+        publication: AcceptanceAddPublication,
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (event, streams) = publication.into_event_and_consistency_streams();
         return self.append(&streams, vec![event]).await;

@@ -585,6 +585,21 @@ pub struct TaskAcceptanceAdded {
     pub item: ChecklistItem,
 }
 
+impl TaskAcceptanceAdded {
+    /// Creates one durable unchecked acceptance criterion.
+    #[must_use]
+    pub fn new(stream_id: StreamId, stem: TaskId, text: String) -> Self {
+        Self {
+            stream_id,
+            stem,
+            item: ChecklistItem {
+                checked: false,
+                text,
+            },
+        }
+    }
+}
+
 /// Durable source-event payload for checking an acceptance item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]

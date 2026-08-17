@@ -14,11 +14,12 @@ use tiber_store_git::{
 };
 use tiber_tasks_core::{Subtask, Task, TaskCoreError, TaskEvent, TaskId, TaskStatus, TaskTitle};
 use tiber_tasks_service::command::{
-    AcceptanceIndex, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask, CreateTask,
-    RepairDuplicateSubtaskId, StartTask, SubtaskOccurrence, SubtaskReplacementId, TaskCommandError,
-    TaskCreationDecision, UpdateTaskDetails, decide_check_acceptance,
-    decide_check_subtask_occurrence, decide_complete_task, decide_create_task,
-    decide_repair_duplicate_subtask_id, decide_start_task, decide_update_task_details,
+    AcceptanceIndex, AddAcceptance, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask,
+    CreateTask, RepairDuplicateSubtaskId, StartTask, SubtaskOccurrence, SubtaskReplacementId,
+    TaskCommandError, TaskCreationDecision, UpdateTaskDetails, decide_add_acceptance,
+    decide_check_acceptance, decide_check_subtask_occurrence, decide_complete_task,
+    decide_create_task, decide_repair_duplicate_subtask_id, decide_start_task,
+    decide_update_task_details,
 };
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -32,7 +33,7 @@ const TASK_HISTORY_PAGE_SIZE: usize = 64;
     clippy::pub_with_shorthand,
     reason = "the parent command shell consumes the one canonical task grammar without widening it to the crate"
 )]
-pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
+pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
 
 /// The exact durable stream patterns that comprise native Tiber Tasks history.
 ///
@@ -77,6 +78,10 @@ pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, Tas
         TaskCommand::AcceptanceCheck { reference, index } => {
             check_acceptance(repository, &reference, index)
         }
+        TaskCommand::AcceptanceAdd {
+            reference,
+            criterion,
+        } => add_acceptance(repository, &reference, criterion),
         TaskCommand::SubtaskRepairDuplicate {
             reference,
             occurrence,
@@ -144,6 +149,13 @@ pub(super) enum TaskCommand {
         reference: TaskReference,
         /// The parsed human-facing one-based acceptance position.
         index: AcceptanceIndex,
+    },
+    /// Appends one unchecked acceptance criterion through the signed native write boundary.
+    AcceptanceAdd {
+        /// The parsed task reference resolved after canonical history is read.
+        reference: TaskReference,
+        /// Exact owner-supplied criterion.
+        criterion: String,
     },
     /// Corrects one exact malformed duplicate subtask identity through the signed native write boundary.
     SubtaskRepairDuplicate {
@@ -246,6 +258,15 @@ pub(super) enum TaskCliError {
         /// Underlying typed publication outcome.
         source: Box<TiberPublicationError>,
     },
+    /// Acceptance-add publication failed while retaining its exact retry intent.
+    AcceptanceAddPublication {
+        /// Durable task identity bound to the retry.
+        task: TaskId,
+        /// Exact criterion bound to the retry.
+        criterion: String,
+        /// Underlying typed publication outcome.
+        source: Box<TiberPublicationError>,
+    },
     /// The CLI could not create its bounded local async runtime for `EventCore` append work.
     Runtime(io::Error),
     /// A static native task stream pattern was rejected by the `EventCore` boundary.
@@ -274,9 +295,9 @@ impl TaskCliError {
             Self::Projection(error) => error.code(),
             Self::Command(error) => error.code(),
             Self::Publication(error) => error.code(),
-            Self::CreationPublication { source, .. } | Self::UpdatePublication { source, .. } => {
-                source.code()
-            }
+            Self::CreationPublication { source, .. }
+            | Self::UpdatePublication { source, .. }
+            | Self::AcceptanceAddPublication { source, .. } => source.code(),
             Self::Runtime(_) => "tiber_tasks_runtime_unavailable",
             Self::StreamPattern => "tiber_tasks_stream_pattern_invalid",
             Self::ProjectionTaskMissing => "tiber_tasks_projection_task_missing",
@@ -367,6 +388,7 @@ impl TaskCliError {
             | Self::Publication(_)
             | Self::CreationPublication { .. }
             | Self::UpdatePublication { .. }
+            | Self::AcceptanceAddPublication { .. }
             | Self::Runtime(_)
             | Self::StreamPattern
             | Self::ProjectionTaskMissing => None,
@@ -493,6 +515,21 @@ impl fmt::Display for TaskCliError {
                 }
                 "the authoritative Tiber task update could not be published"
             }
+            Self::AcceptanceAddPublication {
+                task,
+                criterion,
+                source,
+            } => {
+                if matches!(source.as_ref(), TiberPublicationError::Ambiguous) {
+                    return write!(
+                        f,
+                        "acceptance addition may already be durable; retry exactly: `tiber tasks acceptance add {} {}`",
+                        quote_shell_argument(task.as_str()),
+                        quote_shell_argument(criterion)
+                    );
+                }
+                "the authoritative Tiber acceptance addition could not be published"
+            }
             Self::Runtime(_) => "the local task runtime could not be started",
             Self::StreamPattern => "the native task stream selection is invalid",
             Self::Projection(TaskProjectionError::TaskReferenceMissing { reference }) => {
@@ -531,9 +568,9 @@ impl Error for TaskCliError {
             Self::Projection(error) => Some(error),
             Self::Command(error) => Some(error),
             Self::Publication(error) => Some(error),
-            Self::CreationPublication { source, .. } | Self::UpdatePublication { source, .. } => {
-                Some(source.as_ref())
-            }
+            Self::CreationPublication { source, .. }
+            | Self::UpdatePublication { source, .. }
+            | Self::AcceptanceAddPublication { source, .. } => Some(source.as_ref()),
             Self::Runtime(error) => Some(error),
             Self::Core(error) => Some(error),
             Self::MissingSubcommand
@@ -607,6 +644,12 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
             _ => Err(TaskCliError::InvalidArguments),
         },
         "acceptance" => match arguments {
+            [operation, reference, criterion] if operation == "add" => {
+                Ok(TaskCommand::AcceptanceAdd {
+                    reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+                    criterion: criterion.clone(),
+                })
+            }
             [operation, reference, index] if operation == "check" => {
                 Ok(TaskCommand::AcceptanceCheck {
                     reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
@@ -668,6 +711,46 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
         },
         _ => Err(TaskCliError::UnknownSubcommand),
     }
+}
+
+/// Decides and publishes one unchecked acceptance criterion.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the imperative CLI boundary preserves typed railway propagation across history, projection, modeled decision, and signed publication"
+)]
+fn add_acceptance(
+    repository: &Path,
+    reference: &TaskReference,
+    criterion: String,
+) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let request = AddAcceptance::new(task.clone(), criterion);
+    let Some(publication) =
+        decide_add_acceptance(history.events(), &request).map_err(TaskCliError::Command)?
+    else {
+        return Ok(format!("criterion already added for {}\n", task.as_str()));
+    };
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_acceptance_add(publication))
+        .map_err(|source| TaskCliError::AcceptanceAddPublication {
+            task: task.clone(),
+            criterion: request.criterion().to_owned(),
+            source: Box::new(source),
+        })?;
+    Ok(format!(
+        "added acceptance criterion for {} at {}\n",
+        task.as_str(),
+        outcome.revision().as_str()
+    ))
 }
 
 /// Decides and publishes one native backlog task creation.
