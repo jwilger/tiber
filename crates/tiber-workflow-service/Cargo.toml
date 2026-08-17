@@ -11,8 +11,8 @@ serde.workspace = true
 tiber-workflow-core = { path = "../tiber-workflow-core" }
 
 [dev-dependencies]
-eventcore = { version = "=2.0.0", features = ["experimental-model-check"] }
-eventcore-memory = "=2.0.0"
+eventcore = { version = "=2.0.1", features = ["experimental-model-check"] }
+eventcore-memory = "=2.0.1"
 eventcore-types.workspace = true
 futures = "=0.3.32"
 

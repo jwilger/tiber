@@ -15,11 +15,14 @@ named Tiber Tasks. Running `tiber` without arguments opens the current
 interactive terminal UI. Native task operations live only under `tiber tasks
 …`. The shipped task slice includes read-only `list`, `show`, `search`, and
 `next` queries over EventCore history preserved on the signed Tiber authority
-branch, plus four bounded native operations: `start <ref>`, `acceptance check`,
+branch, plus command-specific native operations: `create <title>`, `start <ref>`, `acceptance check`,
 `subtask check <ref> <one-based-occurrence>`, and `transition <ref> done`.
 Each folds only the facts needed for that decision, publishes a closed modeled
 fact sequence through the exact board/task consistency boundary, signs the
 candidate, and uses an exact-base lease to publish to the fixed authority ref.
+Creation emits one empty backlog task and the resulting strict order on the
+board stream. Its stable `--id` retry form reconciles an ambiguous publication
+as an idempotent no-op when that exact creation is already durable.
 The occurrence check captures the addressed subtask's complete preimage, so a
 legacy duplicate ID cannot select the wrong row. Transition accepts only the
 terminal `done` status; it is not a generic lifecycle setter. There is no
@@ -246,6 +249,20 @@ it never grants authority.
   applicable, and no-progress detection.
 - EventCore commands for durable decisions, command-specific folds, and no
   unconsumed provenance in checked models.
+- Exact RED–GREEN implementation authority: every new or changed first-party
+  product behavior records a public-boundary failing scenario before
+  implementation, and the authorized production delta may address only that
+  exact failure. A predicted compiler diagnostic may serve as RED when a
+  missing type/API/trait/case is the intended boundary; incidental compilation
+  breakage may not. When an outer BDD failure has multiple plausible causes,
+  Tiber requires drill-down RED evidence at progressively narrower behavioral
+  boundaries until one cause is explicit, and authorizes only that leaf fix
+  before rerunning outward. After generation, an independent fresh-context
+  exact-failure-conformance review compares the complete production delta with
+  the durable RED evidence and blocks every later phase when the delta exceeds
+  that authority. Explicit exemptions cover simple development scripts, CI
+  workflows, covered refactors, and removals; tests never assert committed text
+  merely to manufacture evidence.
 - Rust Edition 2024, forbidden unsafe code, strict workspace Clippy inheritance,
   and warnings denied in CI.
 - Credentials are never read, copied, logged, decoded, retained, serialized,

@@ -290,6 +290,30 @@ pub struct Task {
     pub committed_at: String,
 }
 
+impl Task {
+    /// Creates the canonical empty backlog state for one newly admitted task.
+    #[must_use]
+    pub fn new_backlog(stem: TaskId, title: TaskTitle, committed_at: String) -> Self {
+        Self {
+            stem,
+            status: TaskStatus::Backlog,
+            title,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            tags: Vec::new(),
+            pr_mr_url: None,
+            pr_mr_status: None,
+            claim: None,
+            summary: String::new(),
+            context: String::new(),
+            acceptance: Vec::new(),
+            subtasks: Vec::new(),
+            notes: Vec::new(),
+            committed_at,
+        }
+    }
+}
+
 /// Durable source-event payload for repository initialization.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -306,6 +330,17 @@ pub struct TaskCreated {
     pub stream_id: StreamId,
     /// Complete initial task state.
     pub task: Box<Task>,
+}
+
+impl TaskCreated {
+    /// Creates one named task-creation fact payload.
+    #[must_use]
+    pub fn new(stream_id: StreamId, task: Task) -> Self {
+        Self {
+            stream_id,
+            task: Box::new(task),
+        }
+    }
 }
 
 /// Durable source-event payload for a lifecycle transition.

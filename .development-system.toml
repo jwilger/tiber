@@ -7,7 +7,7 @@ trunk_branch = "main"
 [features]
 agentic_systems = true
 eval_case_reporting = false
-tiber = true
+tiber = false
 
 [final_review.models.codex]
 pre_filter = "gpt-5.6-sol"

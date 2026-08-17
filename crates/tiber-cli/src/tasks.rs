@@ -6,20 +6,23 @@
 use core::{error::Error, fmt};
 use std::{ffi::OsString, io, path::Path};
 
+use chrono::{SecondsFormat, Utc};
 use eventcore_types::{BatchSize, StreamPattern};
 use tiber_store_git::publication::{TiberEventPublisher, TiberPublicationError};
 use tiber_store_git::{
     GitStoreError, TiberEventStore, TiberRevision, TransactionEventPage, TransactionHistoryError,
 };
-use tiber_tasks_core::{Subtask, Task, TaskEvent, TaskId, TaskStatus};
+use tiber_tasks_core::{Subtask, Task, TaskCoreError, TaskEvent, TaskId, TaskStatus, TaskTitle};
 use tiber_tasks_service::command::{
-    AcceptanceIndex, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask,
+    AcceptanceIndex, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask, CreateTask,
     RepairDuplicateSubtaskId, StartTask, SubtaskOccurrence, SubtaskReplacementId, TaskCommandError,
-    decide_check_acceptance, decide_check_subtask_occurrence, decide_complete_task,
-    decide_repair_duplicate_subtask_id, decide_start_task,
+    TaskCreationDecision, decide_check_acceptance, decide_check_subtask_occurrence,
+    decide_complete_task, decide_create_task, decide_repair_duplicate_subtask_id,
+    decide_start_task,
 };
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
 use tokio::runtime::Builder as RuntimeBuilder;
+use uuid::Uuid;
 
 /// Maximum number of durable facts fetched by one explicit `EventCore` page.
 const TASK_HISTORY_PAGE_SIZE: usize = 64;
@@ -29,7 +32,7 @@ const TASK_HISTORY_PAGE_SIZE: usize = 64;
     clippy::pub_with_shorthand,
     reason = "the parent command shell consumes the one canonical task grammar without widening it to the crate"
 )]
-pub(super) const TASKS_COMMAND_GRAMMAR: &str = "list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
+pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
 
 /// The exact durable stream patterns that comprise native Tiber Tasks history.
 ///
@@ -64,6 +67,7 @@ pub(super) fn parse(
 pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, TaskCliError> {
     match command {
         TaskCommand::Help => Ok(help_output()),
+        TaskCommand::Create { id_prefix, title } => create_task(repository, id_prefix, title),
         TaskCommand::AcceptanceCheck { reference, index } => {
             check_acceptance(repository, &reference, index)
         }
@@ -105,6 +109,13 @@ pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, Tas
 pub(super) enum TaskCommand {
     /// Renders the supported native task grammar without accessing repository state.
     Help,
+    /// Creates one new backlog task through the native signed authority.
+    Create {
+        /// Stable retry identity supplied by the caller when reconciling creation.
+        id_prefix: Option<TaskId>,
+        /// Parsed owner-facing task title.
+        title: TaskTitle,
+    },
     /// Activates one strict-next eligible backlog task through the signed native write boundary.
     Start {
         /// The parsed task reference resolved after canonical history is read.
@@ -184,6 +195,8 @@ pub(super) enum TaskCliError {
     InvalidStatus,
     /// A search query contained no meaningful text.
     EmptySearchQuery,
+    /// A semantic task value was rejected at the CLI boundary.
+    Core(TaskCoreError),
     /// The read-only Git snapshot could not be prepared.
     Store(GitStoreError),
     /// Tiber could not construct or page the committed task transaction history.
@@ -194,6 +207,15 @@ pub(super) enum TaskCliError {
     Command(TaskCommandError),
     /// The signed one-shot task publication could not be confirmed.
     Publication(TiberPublicationError),
+    /// Task creation failed while retaining the exact stable retry intent.
+    CreationPublication {
+        /// Stable identity prefix that must be reused for reconciliation.
+        id_prefix: TaskId,
+        /// Canonical title bound to that creation intent.
+        title: TaskTitle,
+        /// Underlying typed publication outcome.
+        source: TiberPublicationError,
+    },
     /// The CLI could not create its bounded local async runtime for `EventCore` append work.
     Runtime(io::Error),
     /// A static native task stream pattern was rejected by the `EventCore` boundary.
@@ -216,11 +238,13 @@ impl TaskCliError {
             Self::InvalidArgumentEncoding => "tiber_tasks_invalid_argument_encoding",
             Self::InvalidStatus => "tiber_tasks_invalid_status",
             Self::EmptySearchQuery => "tiber_tasks_search_query_required",
+            Self::Core(error) => error.code(),
             Self::Store(error) => error.code(),
             Self::History(_) => "tiber_tasks_history_read_failed",
             Self::Projection(error) => error.code(),
             Self::Command(error) => error.code(),
             Self::Publication(error) => error.code(),
+            Self::CreationPublication { source, .. } => source.code(),
             Self::Runtime(_) => "tiber_tasks_runtime_unavailable",
             Self::StreamPattern => "tiber_tasks_stream_pattern_invalid",
             Self::ProjectionTaskMissing => "tiber_tasks_projection_task_missing",
@@ -237,6 +261,7 @@ impl TaskCliError {
                 | Self::InvalidArgumentEncoding
                 | Self::InvalidStatus
                 | Self::EmptySearchQuery
+                | Self::Core(_)
                 | Self::Command(
                     TaskCommandError::InvalidAcceptanceIndex
                         | TaskCommandError::InvalidSubtaskOccurrence
@@ -303,10 +328,12 @@ impl TaskCliError {
             | Self::InvalidArgumentEncoding
             | Self::InvalidStatus
             | Self::EmptySearchQuery
+            | Self::Core(_)
             | Self::Store(_)
             | Self::History(_)
             | Self::Projection(_)
             | Self::Publication(_)
+            | Self::CreationPublication { .. }
             | Self::Runtime(_)
             | Self::StreamPattern
             | Self::ProjectionTaskMissing => None,
@@ -317,6 +344,7 @@ impl TaskCliError {
 impl fmt::Display for TaskCliError {
     #[expect(
         clippy::pattern_type_mismatch,
+        clippy::too_many_lines,
         reason = "matching the borrowed typed error keeps formatting non-owning at the CLI boundary"
     )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -330,6 +358,7 @@ impl fmt::Display for TaskCliError {
             Self::InvalidArgumentEncoding => "task arguments must be valid UTF-8",
             Self::InvalidStatus => "status must be backlog, in-progress, done, or abandoned",
             Self::EmptySearchQuery => "search query must not be empty",
+            Self::Core(_) => "task input is invalid",
             Self::Store(_) => "the authoritative Tiber task snapshot could not be opened",
             Self::History(_) => "the authoritative Tiber task history could not be read",
             Self::Projection(TaskProjectionError::InvalidTaskReference) => {
@@ -397,6 +426,21 @@ impl fmt::Display for TaskCliError {
                 "the task update may already have been published; reload with `tiber tasks show <ref>` before retrying"
             }
             Self::Publication(_) => "the authoritative Tiber task update could not be published",
+            Self::CreationPublication {
+                id_prefix,
+                title,
+                source: TiberPublicationError::Ambiguous,
+            } => {
+                let quoted_id_prefix = quote_shell_argument(id_prefix.as_str());
+                let quoted_title = quote_shell_argument(title.as_str());
+                return write!(
+                    f,
+                    "task creation may already be durable; retry exactly: `tiber tasks create --id {quoted_id_prefix} {quoted_title}`"
+                );
+            }
+            Self::CreationPublication { .. } => {
+                "the authoritative Tiber task creation could not be published"
+            }
             Self::Runtime(_) => "the local task runtime could not be started",
             Self::StreamPattern => "the native task stream selection is invalid",
             Self::Projection(TaskProjectionError::TaskReferenceMissing { reference }) => {
@@ -435,7 +479,9 @@ impl Error for TaskCliError {
             Self::Projection(error) => Some(error),
             Self::Command(error) => Some(error),
             Self::Publication(error) => Some(error),
+            Self::CreationPublication { source, .. } => Some(source),
             Self::Runtime(error) => Some(error),
+            Self::Core(error) => Some(error),
             Self::MissingSubcommand
             | Self::UnknownSubcommand
             | Self::InvalidArguments
@@ -448,6 +494,11 @@ impl Error for TaskCliError {
     }
 }
 
+/// Quotes one argument for the exact POSIX-shell retry diagnostic.
+fn quote_shell_argument(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', "'\\''"))
+}
+
 #[expect(
     clippy::pattern_type_mismatch,
     clippy::question_mark_used,
@@ -457,6 +508,21 @@ impl Error for TaskCliError {
 fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, TaskCliError> {
     match subcommand {
         "-h" | "--help" if arguments.is_empty() => Ok(TaskCommand::Help),
+        "create" => match arguments {
+            [flag, id_prefix, title @ ..] if flag == "--id" && !title.is_empty() => {
+                Ok(TaskCommand::Create {
+                    id_prefix: Some(TaskId::parse(id_prefix).map_err(TaskCliError::Core)?),
+                    title: TaskTitle::parse(&title.join(" ")).map_err(TaskCliError::Core)?,
+                })
+            }
+            [flag] if flag == "--id" => Err(TaskCliError::InvalidArguments),
+            [flag, _id_prefix] if flag == "--id" => Err(TaskCliError::InvalidArguments),
+            title if !title.is_empty() => Ok(TaskCommand::Create {
+                id_prefix: None,
+                title: TaskTitle::parse(&title.join(" ")).map_err(TaskCliError::Core)?,
+            }),
+            _ => Err(TaskCliError::InvalidArguments),
+        },
         "start" => match arguments {
             [reference] => Ok(TaskCommand::Start {
                 reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
@@ -525,6 +591,64 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
         },
         _ => Err(TaskCliError::UnknownSubcommand),
     }
+}
+
+/// Decides and publishes one native backlog task creation.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the creation boundary sequences canonical history, modeled decision, exact revision fence, and signed publication with typed failures"
+)]
+fn create_task(
+    repository: &Path,
+    requested_id_prefix: Option<TaskId>,
+    title: TaskTitle,
+) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let (generated_id_prefix, recorded_at) = creation_metadata()?;
+    let has_retry_identity = requested_id_prefix.is_some();
+    let id_prefix = requested_id_prefix.unwrap_or(generated_id_prefix);
+    let request = if has_retry_identity {
+        CreateTask::new(id_prefix.clone(), recorded_at, title.clone())
+    } else {
+        CreateTask::new_implicit(id_prefix.clone(), recorded_at, title.clone())
+    };
+    let decision = decide_create_task(history.events(), &request).map_err(TaskCliError::Command)?;
+    let publication = match decision {
+        TaskCreationDecision::Publish(publication) => publication,
+        TaskCreationDecision::AlreadyCreated(task_id) => {
+            return Ok(format!("already created {}\n", task_id.as_str()));
+        }
+    };
+    let task_id = publication.task_id().clone();
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_task_creation(publication))
+        .map_err(|source| TaskCliError::CreationPublication {
+            id_prefix,
+            title,
+            source,
+        })?;
+    Ok(format!(
+        "created {} at {}\n",
+        task_id.as_str(),
+        outcome.revision().as_str()
+    ))
+}
+
+/// Supplies only the metadata required by the currently proven creation contract.
+fn creation_metadata() -> Result<(TaskId, String), TaskCliError> {
+    TaskId::parse(&format!("00000000-{}", Uuid::new_v4().simple()))
+        .map(|prefix| {
+            (
+                prefix,
+                Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            )
+        })
+        .map_err(TaskCliError::Core)
 }
 
 /// Decides and publishes one bounded task activation through the native signed boundary.
@@ -957,6 +1081,10 @@ fn render_task(task: &Task) -> String {
     output.push_str(status_name(task.status));
     output.push_str("\ntitle: ");
     output.push_str(task.title.as_str());
+    if !task.committed_at.is_empty() {
+        output.push_str("\ncommitted-at: ");
+        output.push_str(&task.committed_at);
+    }
     output.push_str("\nsummary: ");
     output.push_str(&task.summary);
     output.push_str("\ncontext: ");

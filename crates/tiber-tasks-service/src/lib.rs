@@ -23,6 +23,84 @@ use tiber_tasks_core::{
     TaskSubtaskOccurrenceChecked, TaskTransitioned,
 };
 
+/// The only publication input for creating one backlog task.
+///
+/// This opaque token carries the modeled creation fact and resulting strict
+/// board order on the single board-authority stream. It cannot encode an
+/// arbitrary task mutation or caller-selected event batch.
+#[derive(Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct TaskCreationPublication {
+    /// Exact board stream-version fence read by the creation command.
+    consistency_stream: StreamId,
+    /// The sole modeled backlog-creation fact authorized for publication.
+    created_fact: TaskCreated,
+    /// The modeled strict board order that accompanies the creation fact.
+    order_fact: TaskOrder,
+}
+
+impl TaskCreationPublication {
+    /// Creates the closed creation token from the modeled creation facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed command error when the modeled facts do not form the
+    /// exact backlog creation batch with its required board consistency fence.
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the only command-local construction point validates the modeled creation facts before the closed transfer token is created"
+    )]
+    pub(crate) fn from_modeled_facts(
+        created_fact: TaskCreated,
+        order_fact: TaskOrder,
+        consistency_stream: StreamId,
+    ) -> Result<Self, command::TaskCommandError> {
+        if created_fact.stream_id != consistency_stream
+            || order_fact.stream_id != consistency_stream
+            || created_fact.task.status != TaskStatus::Backlog
+            || created_fact.task.claim.is_some()
+            || order_fact.order.last() != Some(&created_fact.task.stem)
+        {
+            return Err(command::TaskCommandError::InvalidModeledTaskCreationPublication);
+        }
+        Ok(Self {
+            consistency_stream,
+            created_fact,
+            order_fact,
+        })
+    }
+
+    /// Transfers the closed two-fact creation batch to the Git adapter.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the opaque transfer returns its fixed fact batch and fence directly"
+    )]
+    pub fn into_events_and_consistency_streams(self) -> (Vec<TaskEvent>, [StreamId; 1]) {
+        (
+            vec![
+                TaskEvent::TaskCreated(self.created_fact),
+                TaskEvent::BoardReordered(self.order_fact),
+            ],
+            [self.consistency_stream],
+        )
+    }
+
+    /// Returns the durable identity selected by the modeled creation decision.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the opaque token exposes only its modeled durable identity"
+    )]
+    pub const fn task_id(&self) -> &TaskId {
+        &self.created_fact.task.stem
+    }
+}
+
 /// The only publication input for activating one strict-next backlog task.
 ///
 /// This opaque token carries exactly one unclaimed `InProgress` transition and

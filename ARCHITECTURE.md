@@ -207,13 +207,17 @@ reload rather than an automatic retry.
 The shipped native task-query surface exposes `tiber tasks list [--status
 <status>]`, `show`, `search`, and `next`. Those queries replay the full task history into a
 separate `TaskBoardProjection`; that projection is a read model, never
-EventCore command authority. The write surface remains deliberately closed:
+EventCore command authority. The write surface remains deliberately closed to
+named commands: `tiber tasks create [--id <stable-prefix>] <title>`,
 `tiber tasks start <ref>`, `tiber tasks acceptance check <ref>
 <one-based-index>`, `tiber tasks subtask check <ref> <one-based-occurrence>`,
 and `tiber tasks transition <ref> done`. Each is a command-specific pure fold
 that consumes only an opaque modeled
 publication token at the signed Git adapter; no adapter exposes a generic
-append. `start` can activate only the current eligible next task when no other
+append. Creation folds only current task identities and the latest strict board
+order, emits one backlog task plus its appended order on the board stream, and
+uses a stable caller-visible prefix to reconcile ambiguity without duplication.
+`start` can activate only the current eligible next task when no other
 task is active; an exact retry of that sole active task is a no-op. It is a
 bounded activation operation rather than generic lifecycle mutation or a
 scheduler. The occurrence check carries the exact current subtask at its
@@ -381,6 +385,29 @@ Linux. S3 adds durable receipt facts and recovery evidence, but does not claim
 durable working-tree filesystem state beyond those journal facts.
 
 ## Recovery, verification, and delivery
+
+The native development workflow treats one observed public-boundary RED as the
+only implementation authority for a product-behavior increment. Durable facts
+bind scenario identity, declared behavioral scope, command/evidence, and the
+exact expected failure before repository mutation or process execution can be
+authorized. RED evidence is either the predicted public runtime assertion or
+the predicted compiler diagnostic for an intentionally missing
+type/API/trait/case; incidental compilation failures grant no authority. GREEN
+references that same scenario and proves the specific
+failure resolved; it does not authorize unrelated production behavior. A
+source delta outside the active scenario's behavioral scope fails closed before
+the workflow advances. When an outer BDD failure has multiple plausible causes,
+the workflow records a drill-down chain of progressively narrower behavioral
+RED evidence and withholds mutation authority until one leaf failure has a
+single predicted cause. It authorizes only that leaf repair, then requires
+evidence to replay outward through the chain. Every generated production delta
+then receives a mandatory independent fresh-context exact-failure-conformance
+review against the durable RED evidence, drill-down chain, declared scope, and
+complete source delta. A non-clean result blocks GREEN, the next RED,
+verification, final review, and delivery. Each green increment requires a fresh-context
+lightweight review before another RED may begin. Explicit typed exemptions
+cover simple development-environment scripts, CI workflows, covered refactors,
+and removals without inventing a tautological committed-text test.
 
 Partial or unknown mutation results are reconciled by identity before retry.
 Checkpoints make crash and restart resumption explicit. Verification and review

@@ -423,9 +423,9 @@ dependencies = [
 
 [[package]]
 name = "eventcore"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80f05bcad5f8644c851dabd5b916b737ced03d2edd19178ec64b8fdf5617c24d"
+checksum = "f6a18566bc83d5c86f03a920242ff8500fb7d3540987af4db34f4ccb65a7dc00"
 dependencies = [
  "chrono",
  "eventcore-macros",
@@ -443,9 +443,9 @@ dependencies = [
 
 [[package]]
 name = "eventcore-fs"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30a195c70096754e456b90cc199bd677f0edc1fc9459ffffc5e28176ececf771"
+checksum = "c6c5abd393911b4f30b5f037511d7c9f4b5b119abda18bc119407763125bf977"
 dependencies = [
  "chrono",
  "eventcore-types",
@@ -463,9 +463,9 @@ dependencies = [
 
 [[package]]
 name = "eventcore-macros"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cde04832aaaea20f691d51bf861c2d40d9bee01598044cad711a1a56fe275d5"
+checksum = "efb67034e232cf8e92407f2e8057a688cd4326f3cd607c19568f85682cb5fcd2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -474,9 +474,9 @@ dependencies = [
 
 [[package]]
 name = "eventcore-memory"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "408461c2d943553f12e85c3c49e2ec26782a31e1bff28811357fba3b6ec8d47f"
+checksum = "ff0d5e44a3fc3087a743ee4957b84d6f4ac128cc778e7533ac1cc5205bdda939"
 dependencies = [
  "eventcore-types",
  "futures",
@@ -488,9 +488,9 @@ dependencies = [
 
 [[package]]
 name = "eventcore-types"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10a79a48287210e83c70b31d3e7b189b8e8401faa80c02f85fc74c4279d2b184"
+checksum = "8b511cb4d3b48b88b2ceb53c26b13aefca7c78b50f1fa761bdb96dbb7571f68e"
 dependencies = [
  "futures",
  "glob",
@@ -2022,6 +2022,7 @@ dependencies = [
 name = "tiber"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "eventcore-fs",
  "eventcore-types",
  "ratatui",
@@ -2034,6 +2035,7 @@ dependencies = [
  "tiber-tasks-service",
  "tiber-tui",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

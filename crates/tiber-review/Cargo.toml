@@ -11,8 +11,8 @@ eventcore-types.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
-eventcore = { version = "=2.0.0", features = ["experimental-model-check"] }
-eventcore-memory = "=2.0.0"
+eventcore = { version = "=2.0.1", features = ["experimental-model-check"] }
+eventcore-memory = "=2.0.1"
 futures = "=0.3.32"
 serde_json.workspace = true
 

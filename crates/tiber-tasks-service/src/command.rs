@@ -4,6 +4,9 @@
 //! adapter. They deliberately do not reuse [`crate::TaskBoardProjection`],
 //! whose broad state is query-only rather than write authority.
 
+#[path = "task_administration.rs"]
+mod task_administration;
+
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::{error::Error, fmt};
 
@@ -27,6 +30,12 @@ use crate::{
 
 /// The native board stream receiving task-mutation facts.
 pub const TASK_BOARD_STREAM: &str = "tiber:board";
+
+/// Request to create one backlog task from owner-supplied title and adapter-assigned metadata.
+pub type CreateTask = task_administration::CreateTask;
+
+/// Closed result of one task-creation decision.
+pub type TaskCreationDecision = task_administration::TaskCreationDecision;
 
 /// A zero-based durable acceptance-item position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -747,6 +756,8 @@ pub enum TaskCommandError {
     },
     /// A fact needed to decide activation has no valid current task/board interpretation.
     TaskActivationMalformedHistory,
+    /// The current strict board order cannot authorize task creation.
+    TaskCreationMalformedHistory,
     /// The requested task has no creation fact in the supplied canonical history.
     TaskMissing {
         /// The absent task identity.
@@ -877,6 +888,10 @@ pub enum TaskCommandError {
     InvalidModeledTaskCompletionPublication,
     /// The checked `EventCore` command did not produce one valid activation fact.
     InvalidModeledTaskActivationPublication,
+    /// The checked `EventCore` command did not produce one valid creation batch.
+    InvalidModeledTaskCreationPublication,
+    /// The checked `EventCore` command could not produce its creation batch.
+    ModeledTaskCreationDecisionFailed,
 }
 
 impl TaskCommandError {
@@ -905,6 +920,7 @@ impl TaskCommandError {
             Self::TaskActivationMalformedHistory => {
                 "tasks_command_task_activation_malformed_history"
             }
+            Self::TaskCreationMalformedHistory => "tasks_command_task_creation_malformed_history",
             Self::TaskMissing { .. } => "tasks_command_task_missing",
             Self::DuplicateTaskCreation { .. } => "tasks_command_duplicate_task_creation",
             Self::TargetTaskFactUnexpectedStream { .. } => {
@@ -965,6 +981,12 @@ impl TaskCommandError {
             }
             Self::InvalidModeledTaskActivationPublication => {
                 "tasks_command_invalid_modeled_task_activation_publication"
+            }
+            Self::InvalidModeledTaskCreationPublication => {
+                "tasks_command_invalid_modeled_task_creation_publication"
+            }
+            Self::ModeledTaskCreationDecisionFailed => {
+                "tasks_command_modeled_task_creation_decision_failed"
             }
         }
     }
@@ -4054,6 +4076,27 @@ pub fn acceptance_consistency_streams(task: &TaskId) -> Result<[StreamId; 2], Ta
     let task_stream = StreamId::try_new(format!("tiber:task:{}", task.as_str()))
         .map_err(|_source| TaskCommandError::InvalidTaskStream)?;
     Ok([board, task_stream])
+}
+
+/// Decides the two-fact publication for one new backlog task.
+///
+/// The fold retains only current task identities and strict open-task order.
+/// It never uses the broad read projection as write authority.
+///
+/// # Errors
+///
+/// Returns a typed task-command failure when retained history or the modeled
+/// publication violates creation authority.
+#[inline]
+#[expect(
+    clippy::implicit_return,
+    reason = "the public forwarding boundary preserves the typed decision result"
+)]
+pub fn decide_create_task(
+    events: &[TaskEvent],
+    request: &CreateTask,
+) -> Result<TaskCreationDecision, TaskCommandError> {
+    task_administration::decide_create_task(events, request)
 }
 
 /// Decides the check-only publication needed to check a current acceptance item.

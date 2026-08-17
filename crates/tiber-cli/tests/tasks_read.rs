@@ -1,6 +1,20 @@
 #![forbid(unsafe_code)]
 
 #[cfg(test)]
+#[expect(
+    clippy::absolute_paths,
+    clippy::default_numeric_fallback,
+    clippy::expect_used,
+    clippy::implicit_return,
+    clippy::question_mark_used,
+    clippy::shadow_reuse,
+    clippy::single_call_fn,
+    clippy::std_instead_of_core,
+    clippy::string_slice,
+    clippy::too_many_lines,
+    clippy::used_underscore_binding,
+    reason = "the black-box CLI fixture fails loudly and inspects exact bounded output values"
+)]
 mod tests {
     use std::{
         fs,
@@ -9,6 +23,7 @@ mod tests {
         process::{Command, Output},
     };
 
+    use chrono::{DateTime, Utc};
     use eventcore_fs::FileEventStore;
     use eventcore_types::{EventStore as _, StreamId, StreamVersion, StreamWrites};
     use serde::{Deserialize, Serialize};
@@ -235,7 +250,6 @@ mod tests {
         #[expect(
             clippy::expect_used,
             clippy::implicit_return,
-            clippy::single_call_fn,
             reason = "the recreated-task fixture deliberately retains a prior valid correction while making the current duplicate's complete preimage distinct"
         )]
         async fn signed_recreated_duplicate_subtask_history() -> Self {
@@ -486,12 +500,496 @@ mod tests {
             fixture
         }
 
+        async fn signed_validation_repaired_order() -> Self {
+            let fixture = Self::signed_ordered_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(2))
+                .expect("fixture board stream should register after retained order facts")
+                .append(event(json!({
+                    "event": "task_validation_repaired",
+                    "stream_id": board_stream.as_ref(),
+                    "link_changes": [],
+                    "order_change": {
+                        "stream_id": board_stream.as_ref(),
+                        "order": [FIRST_PRIORITY_TASK_ID, SECOND_PRIORITY_TASK_ID]
+                    },
+                    "repairs": [{
+                        "repair": "board_entry_added",
+                        "task": FIRST_PRIORITY_TASK_ID
+                    }]
+                })))
+                .expect("validation-repair order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture validation repair should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
         #[expect(
             clippy::implicit_return,
             reason = "the named backlog fixture returns its constructed scenario directly"
         )]
         async fn signed_paged_history() -> Self {
             Self::signed_paged_history_with_status("backlog").await
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-history fixture must fail fast while constructing one signed duplicate creation fact for the public write boundary"
+        )]
+        async fn signed_duplicate_creation_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let task_stream = StreamId::try_new(format!("tiber:task:{TASK_ID}"))
+                .expect("fixture task stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(task_stream.clone(), StreamVersion::new(66))
+                .expect("fixture task stream should register at its current version")
+                .append(task_created(
+                    &task_stream,
+                    TASK_ID,
+                    "Duplicate task creation",
+                    "backlog",
+                ))
+                .expect("duplicate task creation fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("duplicate task creation fact should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-history fixture must fail fast while constructing one task creation fact on a foreign stream"
+        )]
+        async fn signed_foreign_stream_creation_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let foreign_stream = StreamId::try_new(format!("tiber:task:{TASK_ID}"))
+                .expect("fixture existing task stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(foreign_stream.clone(), StreamVersion::new(66))
+                .expect("fixture existing task stream should register at its current version")
+                .append(task_created(
+                    &foreign_stream,
+                    "20260816-wrng-foreign-stream",
+                    "Foreign stream task",
+                    "backlog",
+                ))
+                .expect("foreign-stream task creation fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("foreign-stream task creation fact should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-history fixture must fail fast while constructing one removal for an absent task"
+        )]
+        async fn signed_absent_task_removal_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(historical_task_removed(
+                    &board_stream,
+                    "20260816-gone-never-created",
+                ))
+                .expect("absent-task removal fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("absent-task removal fact should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        async fn signed_foreign_stream_removal_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let foreign_stream = StreamId::try_new("tiber:task:foreign-owner".to_owned())
+                .expect("fixture foreign task stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(foreign_stream.clone(), StreamVersion::new(0))
+                .expect("fixture foreign task stream should register")
+                .append(historical_task_removed(&foreign_stream, TASK_ID))
+                .expect("foreign-stream removal should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("foreign-stream removal should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        async fn signed_removed_task_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(historical_task_removed(&board_stream, TASK_ID))
+                .expect("valid removal should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("valid removal should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-order fixture must fail fast while constructing one signed duplicate board occurrence"
+        )]
+        async fn signed_duplicate_board_order_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream, StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(board_reordered(&[TASK_ID, TASK_ID]))
+                .expect("duplicate board order fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("duplicate board order fact should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the retry-identity fixture must fail fast while retaining one noncanonical numeric suffix"
+        )]
+        async fn signed_noncanonical_retry_suffix_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let noncanonical_id = "20260816-rtry-exact-stable-prefix-02";
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(task_created(
+                    &board_stream,
+                    noncanonical_id,
+                    "Exact stable prefix",
+                    "backlog",
+                ))
+                .expect("noncanonical retry-suffix task should append")
+                .append(board_reordered(&[TASK_ID, noncanonical_id]))
+                .expect("fixture board order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("noncanonical retry-suffix history should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-order fixture must fail fast while carrying one board order fact on a retained task stream"
+        )]
+        async fn signed_foreign_stream_board_order_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let task_stream = StreamId::try_new(format!("tiber:task:{TASK_ID}"))
+                .expect("fixture task stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(task_stream.clone(), StreamVersion::new(66))
+                .expect("fixture task stream should register at its current version")
+                .append(event(json!({
+                    "event": "board_reordered",
+                    "stream_id": task_stream.as_ref(),
+                    "order": [TASK_ID]
+                })))
+                .expect("foreign-stream board order fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("foreign-stream board order history should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-order fixture must fail fast while carrying one priority fact on a retained task stream"
+        )]
+        async fn signed_foreign_stream_priority_order_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let task_stream = StreamId::try_new(format!("tiber:task:{TASK_ID}"))
+                .expect("fixture task stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(task_stream.clone(), StreamVersion::new(66))
+                .expect("fixture task stream should register at its current version")
+                .append(event(json!({
+                    "event": "task_priority_changed",
+                    "stream_id": task_stream.as_ref(),
+                    "order": [TASK_ID]
+                })))
+                .expect("foreign-stream priority order fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("foreign-stream priority history should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-order fixture must fail fast while carrying one commit-closure order on a retained task stream"
+        )]
+        async fn signed_foreign_stream_commit_closure_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let task_stream = StreamId::try_new(format!("tiber:task:{TASK_ID}"))
+                .expect("fixture task stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(task_stream.clone(), StreamVersion::new(66))
+                .expect("fixture task stream should register at its current version")
+                .append(event(json!({
+                    "event": "tasks_closed_from_commit_trailers",
+                    "stream_id": task_stream.as_ref(),
+                    "stems": [],
+                    "order": [TASK_ID]
+                })))
+                .expect("foreign-stream commit-closure fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("foreign-stream commit-closure history should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-repair fixture must fail fast while carrying one validation repair on a retained task stream"
+        )]
+        async fn signed_foreign_stream_validation_repair_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let task_stream = StreamId::try_new(format!("tiber:task:{TASK_ID}"))
+                .expect("fixture task stream should be valid");
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(task_stream.clone(), StreamVersion::new(66))
+                .expect("fixture task stream should register at its current version")
+                .append(event(json!({
+                    "event": "task_validation_repaired",
+                    "stream_id": task_stream.as_ref(),
+                    "link_changes": [],
+                    "order_change": {
+                        "stream_id": board_stream.as_ref(),
+                        "order": [TASK_ID]
+                    },
+                    "repairs": []
+                })))
+                .expect("foreign-stream validation repair should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("foreign-stream validation repair should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-repair fixture must fail fast while retaining a board repair whose embedded order names a task stream"
+        )]
+        async fn signed_mismatched_validation_repair_order_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let task_stream = StreamId::try_new(format!("tiber:task:{TASK_ID}"))
+                .expect("fixture task stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(event(json!({
+                    "event": "task_validation_repaired",
+                    "stream_id": board_stream.as_ref(),
+                    "link_changes": [],
+                    "order_change": {
+                        "stream_id": task_stream.as_ref(),
+                        "order": [TASK_ID]
+                    },
+                    "repairs": []
+                })))
+                .expect("mismatched validation repair should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("mismatched validation repair should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-order fixture must fail fast while retaining duplicate priority membership"
+        )]
+        async fn signed_duplicate_priority_order_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(event(json!({
+                    "event": "task_priority_changed",
+                    "stream_id": board_stream.as_ref(),
+                    "order": [TASK_ID, TASK_ID]
+                })))
+                .expect("duplicate priority order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("duplicate priority history should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-order fixture must fail fast while retaining duplicate commit-closure order membership"
+        )]
+        async fn signed_duplicate_commit_closure_order_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(event(json!({
+                    "event": "tasks_closed_from_commit_trailers",
+                    "stream_id": board_stream.as_ref(),
+                    "stems": [],
+                    "order": [TASK_ID, TASK_ID]
+                })))
+                .expect("duplicate commit-closure order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("duplicate commit-closure history should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        #[expect(
+            clippy::expect_used,
+            clippy::implicit_return,
+            clippy::single_call_fn,
+            reason = "the malformed-repair fixture must fail fast while retaining duplicate repaired-order membership"
+        )]
+        async fn signed_duplicate_validation_repair_order_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(event(json!({
+                    "event": "task_validation_repaired",
+                    "stream_id": board_stream.as_ref(),
+                    "link_changes": [],
+                    "order_change": {
+                        "stream_id": board_stream.as_ref(),
+                        "order": [TASK_ID, TASK_ID]
+                    },
+                    "repairs": []
+                })))
+                .expect("duplicate validation-repair order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("duplicate validation-repair history should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
         }
 
         #[expect(
@@ -602,6 +1100,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tasks_show_displays_the_original_durable_creation_timestamp() {
+        let fixture = TaskFixture::signed_paged_history().await;
+
+        let shown = fixture.tiber(&["tasks", "show", TASK_ID]);
+
+        assert_success(&shown);
+        assert!(
+            String::from_utf8_lossy(&shown.stdout).contains("committed-at: 2026-08-12T00:00:00Z\n"),
+            "task show must expose the retained original creation timestamp"
+        );
+    }
+
+    #[tokio::test]
     async fn tasks_list_ignores_non_task_streams_that_share_the_legacy_event_type() {
         let fixture = TaskFixture::signed_paged_history_with_unrelated_shared_event_type().await;
 
@@ -636,7 +1147,7 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&shown.stdout),
             format!(
-                "id: {TASK_ID}\nstatus: backlog\ntitle: Paged task revision {}\nsummary: History page {}.\ncontext: Read the complete EventCore history.\ntags: native\n",
+                "id: {TASK_ID}\nstatus: backlog\ntitle: Paged task revision {}\ncommitted-at: 2026-08-12T00:00:00Z\nsummary: History page {}.\ncontext: Read the complete EventCore history.\ntags: native\n",
                 PAGE_SPANNING_UPDATES - 1,
                 PAGE_SPANNING_UPDATES - 1
             )
@@ -660,6 +1171,703 @@ mod tests {
                 "{TASK_ID}\tbacklog\tPaged task revision {}\n",
                 PAGE_SPANNING_UPDATES - 1
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_publishes_a_backlog_task_visible_through_native_queries() {
+        let fixture = TaskFixture::signed_paged_history().await;
+
+        let created = fixture.tiber(&["tasks", "create", "Native task administration"]);
+
+        assert_success(&created);
+        let created_text = String::from_utf8_lossy(&created.stdout);
+        let task_id = created_text
+            .strip_prefix("created ")
+            .and_then(|text| text.split_once(" at ").map(|(id, _revision)| id))
+            .expect("successful creation names the durable task ID and authority revision");
+
+        let listed = fixture.tiber(&["tasks", "list", "--status", "backlog"]);
+        assert_success(&listed);
+        assert!(
+            String::from_utf8_lossy(&listed.stdout)
+                .contains(&format!("{task_id}\tbacklog\tNative task administration\n")),
+            "a created task must immediately appear in the native board projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_initializes_backlog_status_and_empty_optional_details() {
+        let fixture = TaskFixture::signed_paged_history().await;
+
+        let created = fixture.tiber(&["tasks", "create", "Initial task fields"]);
+
+        assert_success(&created);
+        let task_id = created_task_id(&created);
+        let shown = fixture.tiber(&["tasks", "show", task_id.as_str()]);
+        assert_success(&shown);
+        let shown_text = String::from_utf8_lossy(&shown.stdout);
+        assert!(
+            shown_text.starts_with(&format!(
+                "id: {task_id}\nstatus: backlog\ntitle: Initial task fields\ncommitted-at: "
+            )),
+            "a created task must begin in backlog with its requested title"
+        );
+        assert!(
+            shown_text.ends_with("summary: \ncontext: \n"),
+            "a created task must begin with empty optional details"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_records_the_invocation_time_as_a_utc_timestamp() {
+        let fixture = TaskFixture::signed_paged_history().await;
+        let instant_before = Utc::now();
+
+        let created = fixture.tiber(&["tasks", "create", "Timestamped task"]);
+
+        let instant_after = Utc::now();
+        assert_success(&created);
+        let task_id = created_task_id(&created);
+        let shown = fixture.tiber(&["tasks", "show", task_id.as_str()]);
+        assert_success(&shown);
+        let shown_text = String::from_utf8_lossy(&shown.stdout);
+        let committed_at = shown_text
+            .lines()
+            .find_map(|line| line.strip_prefix("committed-at: "))
+            .expect("a newly created task exposes its durable creation timestamp");
+        assert_eq!(committed_at.len(), 20);
+        assert_eq!(&committed_at[4..5], "-");
+        assert_eq!(&committed_at[7..8], "-");
+        assert_eq!(&committed_at[10..11], "T");
+        assert_eq!(&committed_at[13..14], ":");
+        assert_eq!(&committed_at[16..17], ":");
+        assert!(committed_at.ends_with('Z'));
+        assert!(
+            committed_at
+                .chars()
+                .enumerate()
+                .all(
+                    |(index, character)| matches!(index, 4 | 7 | 10 | 13 | 16 | 19)
+                        || character.is_ascii_digit(),
+                ),
+            "the creation timestamp must contain only UTC date-time digits and separators"
+        );
+        let committed_instant = DateTime::parse_from_rfc3339(committed_at)
+            .expect("the durable creation timestamp must parse as RFC 3339")
+            .with_timezone(&Utc);
+        assert!(
+            committed_instant.timestamp() >= instant_before.timestamp()
+                && committed_instant.timestamp() <= instant_after.timestamp(),
+            "the durable creation timestamp must fall within the invocation interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_disambiguates_repeated_title_nicknames() {
+        let fixture = TaskFixture::signed_paged_history().await;
+
+        let first = fixture.tiber(&["tasks", "create", "Repeated native title"]);
+        assert_success(&first);
+        let second = fixture.tiber(&["tasks", "create", "Repeated native title"]);
+        assert_success(&second);
+
+        let first_id = created_task_id(&first);
+        let second_id = created_task_id(&second);
+        assert!(first_id.ends_with("-repeated-native-title"));
+        assert!(second_id.ends_with("-repeated-native-title-2"));
+
+        let first_shown = fixture.tiber(&["tasks", "show", "repeated-native-title"]);
+        assert_success(&first_shown);
+        assert!(
+            String::from_utf8_lossy(&first_shown.stdout).starts_with(&format!("id: {first_id}\n"))
+        );
+        let second_shown = fixture.tiber(&["tasks", "show", "repeated-native-title-2"]);
+        assert_success(&second_shown);
+        assert!(
+            String::from_utf8_lossy(&second_shown.stdout)
+                .starts_with(&format!("id: {second_id}\n"))
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_preserves_the_latest_validation_repaired_order() {
+        let fixture = TaskFixture::signed_validation_repaired_order().await;
+
+        let before = fixture.tiber(&["tasks", "list"]);
+        assert_success(&before);
+        assert_eq!(
+            task_row_ids(&before),
+            [FIRST_PRIORITY_TASK_ID, SECOND_PRIORITY_TASK_ID],
+            "the public projection must expose the repaired order before creation"
+        );
+
+        let created = fixture.tiber(&["tasks", "create", "After repaired order"]);
+        assert_success(&created);
+        let created_id = created_task_id(&created);
+
+        let listed = fixture.tiber(&["tasks", "list"]);
+        assert_success(&listed);
+        assert_eq!(
+            task_row_ids(&listed),
+            [
+                FIRST_PRIORITY_TASK_ID,
+                SECOND_PRIORITY_TASK_ID,
+                created_id.as_str()
+            ],
+            "creation must append after the complete latest repaired strict order"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_retries_one_stable_creation_identity_without_duplication() {
+        let fixture = TaskFixture::signed_paged_history().await;
+        let invocation = [
+            "tasks",
+            "create",
+            "--id",
+            "20260816-rtry",
+            "Retry-safe creation",
+        ];
+
+        let first = fixture.tiber(&invocation);
+        assert_success(&first);
+        let task_id = created_task_id(&first);
+        assert_eq!(task_id, "20260816-rtry-retry-safe-creation");
+        let after_first = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let repeated = fixture.tiber(&invocation);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("already created {task_id}\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_first,
+            "retrying one stable creation identity must not publish a duplicate task"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_retries_the_disambiguated_task_for_one_stable_identity() {
+        let fixture = TaskFixture::signed_paged_history().await;
+        let occupied = fixture.tiber(&["tasks", "create", "Retry-safe creation"]);
+        assert_success(&occupied);
+        let invocation = [
+            "tasks",
+            "create",
+            "--id",
+            "20260816-rtry",
+            "Retry-safe creation",
+        ];
+
+        let first = fixture.tiber(&invocation);
+        assert_success(&first);
+        let task_id = created_task_id(&first);
+        assert_eq!(task_id, "20260816-rtry-retry-safe-creation-2");
+        let after_first = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let repeated = fixture.tiber(&invocation);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("already created {task_id}\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_first,
+            "retrying a disambiguated stable creation identity must not publish another task"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_does_not_alias_a_longer_stable_prefix_to_a_shorter_one() {
+        let fixture = TaskFixture::signed_paged_history().await;
+        let title = "Exact stable prefix";
+        let longer = fixture.tiber(&["tasks", "create", "--id", "20260816-rtry-long", title]);
+        assert_success(&longer);
+        let longer_id = created_task_id(&longer);
+        assert_eq!(longer_id, "20260816-rtry-long-exact-stable-prefix");
+
+        let shorter_invocation = ["tasks", "create", "--id", "20260816-rtry", title];
+        let shorter = fixture.tiber(&shorter_invocation);
+        assert_success(&shorter);
+        let shorter_id = created_task_id(&shorter);
+        assert_eq!(shorter_id, "20260816-rtry-exact-stable-prefix-2");
+        let after_shorter = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let repeated = fixture.tiber(&shorter_invocation);
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("already created {shorter_id}\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_shorter,
+            "only the exact shorter stable identity may reconcile without publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_does_not_reconcile_a_noncanonical_numeric_suffix() {
+        let fixture = TaskFixture::signed_noncanonical_retry_suffix_history().await;
+
+        let created = fixture.tiber(&[
+            "tasks",
+            "create",
+            "--id",
+            "20260816-rtry",
+            "Exact stable prefix",
+        ]);
+
+        assert_success(&created);
+        assert_eq!(
+            created_task_id(&created),
+            "20260816-rtry-exact-stable-prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_board_order_from_a_task_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_board_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "a board order on a task stream must report the stable stream-authority code"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a foreign-stream board order must not authorize publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_priority_order_from_a_task_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_priority_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "a priority order on a task stream must report the stable creation-history code"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a foreign-stream priority order must not authorize publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_commit_closure_order_from_a_task_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_commit_closure_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "a commit-closure order on a task stream must report malformed creation history"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a foreign-stream commit-closure order must not authorize publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_validation_repair_from_a_task_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_validation_repair_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "a validation repair on a task stream must report malformed creation history"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a foreign-stream validation repair must not authorize publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_a_validation_repair_with_mismatched_order_stream() {
+        let fixture = TaskFixture::signed_mismatched_validation_repair_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "a mismatched embedded order stream must report malformed creation history"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a mismatched validation-repair order must not authorize publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_duplicate_priority_order_without_publication() {
+        let fixture = TaskFixture::signed_duplicate_priority_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "duplicate priority order must report malformed creation history"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "duplicate priority order must not authorize publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_duplicate_commit_closure_order_without_publication() {
+        let fixture = TaskFixture::signed_duplicate_commit_closure_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "duplicate commit-closure order must report malformed creation history"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "duplicate commit-closure order must not authorize publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_duplicate_validation_repair_order_without_publication() {
+        let fixture = TaskFixture::signed_duplicate_validation_repair_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "duplicate repaired order must report malformed creation history"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "duplicate repaired order must not authorize publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_duplicate_creation_history_without_publication() {
+        let fixture = TaskFixture::signed_duplicate_creation_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&created.stderr),
+            "tasks_command_duplicate_task_creation: the authoritative Tiber task history could not decide that task change\n"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "malformed creation history must not authorize another authority revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_a_creation_fact_from_a_foreign_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_creation_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_target_task_fact_unexpected_stream:"),
+            "a foreign-stream task fact must report the stable stream-authority error code"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "foreign-stream task history must not authorize another authority revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_a_removal_for_an_absent_task() {
+        let fixture = TaskFixture::signed_absent_task_removal_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr).starts_with("tasks_command_task_missing:"),
+            "an invalid removal must report the stable missing-task error code"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "an invalid removal must not authorize another authority revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_a_removal_from_a_foreign_task_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_removal_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_target_task_fact_unexpected_stream:")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "foreign-stream removal must not authorize another revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_does_not_republish_a_removed_task_in_the_board_order() {
+        let fixture = TaskFixture::signed_removed_task_history().await;
+
+        let created = fixture.tiber(&["tasks", "create", "Replacement board member"]);
+
+        assert_success(&created);
+        let listed = fixture.tiber(&["tasks", "list"]);
+        assert_success(&listed);
+        assert!(!task_row_ids(&listed).contains(&TASK_ID));
+        assert_eq!(task_row_ids(&listed), vec![created_task_id(&created)]);
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_an_id_that_cannot_form_a_task_stream() {
+        let fixture = TaskFixture::signed_paged_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "--id", "*", "Poisoned task"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_invalid_task_stream:")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_accepts_valid_remove_then_recreate_history() {
+        let fixture = TaskFixture::signed_recreated_duplicate_subtask_history().await;
+
+        let created = fixture.tiber(&["tasks", "create", "After valid recreation"]);
+
+        assert_success(&created);
+        let created_id = created_task_id(&created);
+        let listed = fixture.tiber(&["tasks", "list"]);
+        assert_success(&listed);
+        assert!(
+            task_row_ids(&listed).contains(&created_id.as_str()),
+            "valid remove-and-recreate history must retain creation authority for a new task"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_rejects_duplicate_strict_order_without_publication() {
+        let fixture = TaskFixture::signed_duplicate_board_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let created = fixture.tiber(&["tasks", "create", "Must not be created"]);
+
+        assert!(!created.status.success());
+        assert!(
+            String::from_utf8_lossy(&created.stderr)
+                .starts_with("tasks_command_task_creation_malformed_history:"),
+            "duplicate strict order must report the stable creation-history error code"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "duplicate strict order must not authorize another authority revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_create_reports_an_exact_retry_after_ambiguous_remote_confirmation() {
+        let fixture = TaskFixture::signed_paged_history().await;
+        let remote = fixture._directory.path().join("remote.git");
+        git(
+            fixture._directory.path(),
+            [
+                "clone",
+                "--bare",
+                fixture.repository.to_str().expect("fixture path is UTF-8"),
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        git(
+            &fixture.repository,
+            [
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        let shell_sentinel = fixture._directory.path().join("unsafe-retry-ran");
+        let title = format!("Fix'; touch {}", shell_sentinel.display());
+        let first = fixture.tiber(&["tasks", "create", title.as_str()]);
+        assert_success(&first);
+        let first_task_id = created_task_id(&first);
+        let base = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        let commands = fixture._directory.path().join("ambiguous-commands");
+        fs::create_dir_all(&commands).expect("wrapper directory should be created");
+        let wrapper = commands.join("git");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+operation=
+for argument in "$@"; do
+  if [ "$argument" = "push" ]; then operation=push; fi
+  if [ "$argument" = "ls-remote" ]; then operation=ls-remote; fi
+done
+if [ "$operation" = "ls-remote" ] && [ -f "$TIBER_PUSH_MARKER" ]; then
+  printf '%s\trefs/heads/tiber\n' "$TIBER_STALE_HEAD"
+  exit 0
+fi
+if [ "$operation" = "push" ]; then
+  "$TIBER_REAL_GIT" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then : > "$TIBER_PUSH_MARKER"; fi
+  exit "$status"
+fi
+exec "$TIBER_REAL_GIT" "$@"
+"#,
+        )
+        .expect("Git wrapper should be written");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("Git wrapper metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("Git wrapper should be executable");
+        let real_git = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("Git discovery should execute");
+        assert!(real_git.status.success());
+        let real_git = String::from_utf8(real_git.stdout)
+            .expect("Git path is UTF-8")
+            .trim()
+            .to_owned();
+        let path = format!(
+            "{}:{}",
+            commands.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let marker = fixture._directory.path().join("push-completed");
+        let invocation = ["tasks", "create", title.as_str()];
+
+        let ambiguous = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(invocation)
+            .current_dir(&fixture.repository)
+            .env("PATH", path)
+            .env("TIBER_REAL_GIT", real_git)
+            .env("TIBER_PUSH_MARKER", &marker)
+            .env("TIBER_STALE_HEAD", base)
+            .output()
+            .expect("Tiber CLI should execute");
+
+        assert!(!ambiguous.status.success());
+        let diagnostic = String::from_utf8_lossy(&ambiguous.stderr);
+        let remote_after_ambiguous = git_output(&remote, ["rev-parse", TIBER_REF]);
+        let listed = fixture.tiber(&["tasks", "list"]);
+        assert_success(&listed);
+        let durable_task_id = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                let task_id = fields.next()?;
+                let _status = fields.next()?;
+                let listed_title = fields.next()?;
+                (listed_title == title && task_id != first_task_id).then(|| task_id.to_owned())
+            })
+            .expect("the ambiguous publication must be visible through the public task list");
+
+        let retry_command = diagnostic
+            .strip_prefix(
+                "tiber_store_publication_ambiguous: task creation may already be durable; retry exactly: `",
+            )
+            .and_then(|text| text.strip_suffix("`\n"))
+            .expect("the diagnostic must expose one exact retry command");
+        let tiber_directory = Path::new(env!("CARGO_BIN_EXE_tiber"))
+            .parent()
+            .expect("the test binary has a parent directory");
+        let retry_path = format!(
+            "{}:{}",
+            tiber_directory.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let reconciled = Command::new("sh")
+            .args(["-c", retry_command])
+            .current_dir(&fixture.repository)
+            .env("PATH", retry_path)
+            .output()
+            .expect("the displayed retry command should execute");
+        assert_success(&reconciled);
+        assert_eq!(
+            String::from_utf8_lossy(&reconciled.stdout),
+            format!("already created {durable_task_id}\n")
+        );
+        assert_ne!(durable_task_id, first_task_id);
+        assert!(
+            !shell_sentinel.exists(),
+            "the displayed retry must preserve the title as one inert shell argument"
+        );
+        assert_eq!(
+            git_output(&remote, ["rev-parse", TIBER_REF]),
+            remote_after_ambiguous,
+            "reconciliation must not publish a second task"
         );
     }
 
@@ -1224,7 +2432,7 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&before_check.stdout),
             format!(
-                "id: {TASK_ID}\nstatus: backlog\ntitle: Paged task revision {}\nsummary: History page {}.\ncontext: Read the complete EventCore history.\ntags: native\nacceptance:\n1. [ ] first native acceptance\n2. [ ] second native acceptance\n",
+                "id: {TASK_ID}\nstatus: backlog\ntitle: Paged task revision {}\ncommitted-at: 2026-08-12T00:00:00Z\nsummary: History page {}.\ncontext: Read the complete EventCore history.\ntags: native\nacceptance:\n1. [ ] first native acceptance\n2. [ ] second native acceptance\n",
                 PAGE_SPANNING_UPDATES - 1,
                 PAGE_SPANNING_UPDATES - 1
             )
@@ -1238,7 +2446,7 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&after_check.stdout),
             format!(
-                "id: {TASK_ID}\nstatus: backlog\ntitle: Paged task revision {}\nsummary: History page {}.\ncontext: Read the complete EventCore history.\ntags: native\nacceptance:\n1. [x] first native acceptance\n2. [ ] second native acceptance\n",
+                "id: {TASK_ID}\nstatus: backlog\ntitle: Paged task revision {}\ncommitted-at: 2026-08-12T00:00:00Z\nsummary: History page {}.\ncontext: Read the complete EventCore history.\ntags: native\nacceptance:\n1. [x] first native acceptance\n2. [ ] second native acceptance\n",
                 PAGE_SPANNING_UPDATES - 1,
                 PAGE_SPANNING_UPDATES - 1
             )
@@ -1582,9 +2790,95 @@ mod tests {
     #[test]
     #[expect(
         clippy::expect_used,
+        reason = "the sentinel fixture must fail fast while proving incomplete stable-creation syntax cannot trigger a Git authority read"
+    )]
+    fn tasks_create_rejects_a_bare_reserved_id_flag_before_git() {
+        let directory = TempDir::new().expect("fixture directory should be created");
+        let command_directory = directory.path().join("commands");
+        fs::create_dir_all(&command_directory)
+            .expect("sentinel command directory should be created");
+        let git_sentinel = command_directory.join("git");
+        fs::write(
+            &git_sentinel,
+            "#!/bin/sh\n: > \"$TIBER_GIT_SENTINEL\"\nexit 99\n",
+        )
+        .expect("sentinel Git command should be written");
+        let mut permissions = fs::metadata(&git_sentinel)
+            .expect("sentinel Git command metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&git_sentinel, permissions)
+            .expect("sentinel Git command should be executable");
+        let sentinel = directory.path().join("git-was-run");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(["tasks", "create", "--id"])
+            .current_dir(directory.path())
+            .env("PATH", &command_directory)
+            .env("TIBER_GIT_SENTINEL", &sentinel)
+            .output()
+            .expect("Tiber CLI should execute");
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).starts_with("tiber_tasks_invalid_arguments:"),
+            "the reserved stable-ID flag requires both its prefix and title operands"
+        );
+        assert!(
+            !sentinel.exists(),
+            "incomplete stable-creation syntax must not invoke Git"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the sentinel fixture must fail fast while proving a stable prefix without a title cannot trigger a Git authority read"
+    )]
+    fn tasks_create_rejects_a_stable_id_prefix_without_a_title_before_git() {
+        let directory = TempDir::new().expect("fixture directory should be created");
+        let command_directory = directory.path().join("commands");
+        fs::create_dir_all(&command_directory)
+            .expect("sentinel command directory should be created");
+        let git_sentinel = command_directory.join("git");
+        fs::write(
+            &git_sentinel,
+            "#!/bin/sh\n: > \"$TIBER_GIT_SENTINEL\"\nexit 99\n",
+        )
+        .expect("sentinel Git command should be written");
+        let mut permissions = fs::metadata(&git_sentinel)
+            .expect("sentinel Git command metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&git_sentinel, permissions)
+            .expect("sentinel Git command should be executable");
+        let sentinel = directory.path().join("git-was-run");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(["tasks", "create", "--id", "20260816-rtry"])
+            .current_dir(directory.path())
+            .env("PATH", &command_directory)
+            .env("TIBER_GIT_SENTINEL", &sentinel)
+            .output()
+            .expect("Tiber CLI should execute");
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).starts_with("tiber_tasks_invalid_arguments:"),
+            "the reserved stable-ID prefix requires a title operand"
+        );
+        assert!(
+            !sentinel.exists(),
+            "a stable prefix without a title must not invoke Git"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
         reason = "the command shell must start successfully before its public usage output can be asserted"
     )]
-    fn task_help_advertises_only_the_bounded_activation_and_completion_grammar() {
+    fn task_help_advertises_native_creation_and_bounded_lifecycle_grammar() {
         let directory = TempDir::new().expect("fixture directory should be created");
         let usage_exit_code: i32 = 2;
         let nested = Command::new(env!("CARGO_BIN_EXE_tiber"))
@@ -1593,6 +2887,10 @@ mod tests {
             .output()
             .expect("Tiber CLI should execute");
         assert_eq!(nested.status.code(), Some(usage_exit_code));
+        assert!(
+            String::from_utf8_lossy(&nested.stderr)
+                .contains("create [--id <stable-prefix>] <title>")
+        );
         assert!(
             String::from_utf8_lossy(&nested.stderr)
                 .contains("subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id>")
@@ -1629,8 +2927,8 @@ mod tests {
     )]
     fn explicit_help_flags_succeed_without_an_error_diagnostic() {
         let directory = TempDir::new().expect("fixture directory should be created");
-        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
-        let tasks_usage = "usage: tiber tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
+        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
+        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
         let usage_exit_code: i32 = 2;
         let cases: &[(&[&str], &str)] = &[
             (&["--help"], root_usage),
@@ -1716,7 +3014,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stderr).is_empty());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "usage: tiber tasks <list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
+            "usage: tiber tasks <create [--id <stable-prefix>] <title> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
         );
     }
 
@@ -1745,6 +3043,14 @@ mod tests {
                 "tags": ["native"],
                 "title": title
             }
+        }))
+    }
+
+    fn historical_task_removed(stream_id: &StreamId, task_id: &str) -> TaskEvent {
+        event(json!({
+            "event": "task_removed",
+            "stream_id": stream_id.as_ref(),
+            "stem": task_id
         }))
     }
 
@@ -2054,6 +3360,20 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn created_task_id(output: &Output) -> String {
+        String::from_utf8_lossy(&output.stdout)
+            .strip_prefix("created ")
+            .and_then(|text| text.split_once(" at ").map(|(id, _revision)| id.to_owned()))
+            .expect("successful creation names the durable task ID and authority revision")
+    }
+
+    fn task_row_ids(output: &Output) -> Vec<&str> {
+        let rows = std::str::from_utf8(&output.stdout).expect("task rows are UTF-8");
+        rows.lines()
+            .map(|row| row.split('\t').next().expect("task row has an ID"))
+            .collect()
     }
 
     #[expect(

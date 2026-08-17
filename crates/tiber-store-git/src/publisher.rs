@@ -17,7 +17,7 @@ use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamW
 use tempfile::TempDir;
 use tiber_tasks_service::{
     AcceptanceCheckPublication, SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication,
-    TaskActivationPublication, TaskCompletionPublication,
+    TaskActivationPublication, TaskCompletionPublication, TaskCreationPublication,
 };
 
 use crate::{
@@ -169,6 +169,21 @@ impl fmt::Debug for TiberEventPublisher {
     reason = "the publisher API follows stage opening, inspection, then one-shot append/publication flow"
 )]
 impl TiberEventPublisher {
+    /// Publishes one modeled backlog creation and resulting strict board order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed publication failure when the task authority changes,
+    /// signing fails, or the remote result cannot be safely reconciled.
+    #[inline]
+    pub async fn publish_task_creation(
+        &mut self,
+        publication: TaskCreationPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (events, consistency_streams) = publication.into_events_and_consistency_streams();
+        return self.append(&consistency_streams, events).await;
+    }
+
     /// Opens a publishable snapshot only if it still equals the already-read authority revision.
     ///
     /// # Errors

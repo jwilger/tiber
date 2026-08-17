@@ -14,8 +14,8 @@ are read-only queries over `EventCore` task history preserved on the signed
 currently advertised `tiber` commit and fetch that exact object without moving
 any caller Git ref.
 
-Tiber exposes only bounded native task activation and completion mutations:
-`start <task-ref>`, `acceptance check`, `subtask check`, and
+Tiber exposes command-specific native task creation, activation, and completion
+mutations: `create <title>`, `start <task-ref>`, `acceptance check`, `subtask check`, and
 `transition <task-ref> done`. Each starts with canonical history, makes one
 command-specific pure decision, and
 publishes only its opaque modeled fact sequence with the board and task-stream
@@ -23,6 +23,10 @@ versions as its consistency boundary. Tiber creates a signed candidate and uses
 an exact-base `--force-with-lease` update of the fixed authority branch (or a
 local ref CAS when no `origin` exists), so it cannot overwrite a changed remote
 head. A post-push ambiguity is reported rather than retried automatically.
+Creation emits only one backlog task plus the resulting strict order on the
+board stream. `create --id <stable-prefix> <title>` reconciles an ambiguous
+publication by reusing the exact intent; an already-durable identity is a
+no-op, so retry cannot create a second task.
 `start` activates only the current eligible next task while no other task is
 active; an exact retry for that sole active task is a no-op. It is a bounded
 activation operation, not a generic lifecycle setter.
@@ -193,6 +197,7 @@ For the current executable slice:
 
 ```shell
 cargo run --locked -p tiber -- app-server-probe path/to/protocol-schema.json
+cargo run --locked -p tiber -- tasks create "Task title"
 cargo run --locked -p tiber -- tasks list
 cargo run --locked -p tiber -- tasks show <task-ref>
 cargo run --locked -p tiber -- tasks search "outcome terms"
