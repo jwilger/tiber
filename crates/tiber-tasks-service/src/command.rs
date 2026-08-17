@@ -6,6 +6,8 @@
 
 #[path = "acceptance_add.rs"]
 mod acceptance_add;
+#[path = "dependency_link.rs"]
+mod dependency_link;
 #[path = "task_administration.rs"]
 mod task_administration;
 #[path = "task_details.rs"]
@@ -45,6 +47,8 @@ pub type TaskCreationDecision = task_administration::TaskCreationDecision;
 pub type UpdateTaskDetails = task_details::UpdateTaskDetails;
 /// Request to append one exact unchecked acceptance criterion.
 pub type AddAcceptance = acceptance_add::AddAcceptance;
+/// Request to make one task durably blocked by another task.
+pub type LinkBlockedBy = dependency_link::LinkBlockedBy;
 
 /// A zero-based durable acceptance-item position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -772,6 +776,11 @@ pub enum TaskCommandError {
         /// The absent task identity.
         task: TaskId,
     },
+    /// A dependency cannot name the same task as both endpoint roles.
+    DependencySelfLink {
+        /// Task supplied as both blocked target and blocker.
+        task: TaskId,
+    },
     /// Retained task facts repeated a task creation.
     DuplicateTaskCreation {
         /// The duplicate task identity.
@@ -909,6 +918,10 @@ pub enum TaskCommandError {
     ModeledAcceptanceAddDecisionFailed,
     /// The checked command did not produce one valid acceptance-add fact.
     InvalidModeledAcceptanceAddPublication,
+    /// The checked `EventCore` command could not produce its dependency-link fact.
+    ModeledDependencyLinkDecisionFailed,
+    /// The checked command did not produce one valid reciprocal dependency-link batch.
+    InvalidModeledDependencyLinkPublication,
 }
 
 impl TaskCommandError {
@@ -918,7 +931,8 @@ impl TaskCommandError {
     #[expect(
         clippy::implicit_return,
         clippy::pattern_type_mismatch,
-        reason = "the closed borrowed error-code mapping is clearest as a concise final match"
+        clippy::too_many_lines,
+        reason = "the closed borrowed error-code mapping remains one exhaustive stable-code authority despite the native command vocabulary length"
     )]
     pub const fn code(&self) -> &'static str {
         match self {
@@ -939,6 +953,7 @@ impl TaskCommandError {
             }
             Self::TaskCreationMalformedHistory => "tasks_command_task_creation_malformed_history",
             Self::TaskMissing { .. } => "tasks_command_task_missing",
+            Self::DependencySelfLink { .. } => "tasks_command_dependency_self_link",
             Self::DuplicateTaskCreation { .. } => "tasks_command_duplicate_task_creation",
             Self::TargetTaskFactUnexpectedStream { .. } => {
                 "tasks_command_target_task_fact_unexpected_stream"
@@ -1016,6 +1031,12 @@ impl TaskCommandError {
             }
             Self::InvalidModeledAcceptanceAddPublication => {
                 "tasks_command_invalid_modeled_acceptance_add_publication"
+            }
+            Self::ModeledDependencyLinkDecisionFailed => {
+                "tasks_command_modeled_dependency_link_decision_failed"
+            }
+            Self::InvalidModeledDependencyLinkPublication => {
+                "tasks_command_invalid_modeled_dependency_link_publication"
             }
         }
     }
@@ -4141,6 +4162,24 @@ pub fn decide_add_acceptance(
     request: &AddAcceptance,
 ) -> Result<Option<crate::AcceptanceAddPublication>, TaskCommandError> {
     return acceptance_add::decide_add_acceptance(events, request);
+}
+
+/// Decides one reciprocal blocked-by dependency through its command-specific model.
+///
+/// # Errors
+///
+/// Returns a typed task-command failure when canonical history cannot authorize
+/// the dependency or the checked model cannot produce its closed publication.
+#[inline]
+#[expect(
+    clippy::needless_return,
+    reason = "workspace style requires an explicit return in this narrow forwarding facade"
+)]
+pub fn decide_link_blocked_by(
+    events: &[TaskEvent],
+    request: &LinkBlockedBy,
+) -> Result<Option<crate::DependencyLinkPublication>, TaskCommandError> {
+    return dependency_link::decide_link_blocked_by(events, request);
 }
 
 /// Decides the two-fact publication for one new backlog task.

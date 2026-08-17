@@ -407,6 +407,24 @@ pub struct TaskLinksChanged {
     pub blocked_by: Vec<TaskId>,
 }
 
+impl TaskLinksChanged {
+    /// Creates one complete replacement of a task's dependency-link fields.
+    #[must_use]
+    pub fn new(
+        stream_id: StreamId,
+        stem: TaskId,
+        blocks: Vec<TaskId>,
+        blocked_by: Vec<TaskId>,
+    ) -> Self {
+        Self {
+            stream_id,
+            stem,
+            blocks,
+            blocked_by,
+        }
+    }
+}
+
 /// Durable source-event payload for adding one subtask.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]

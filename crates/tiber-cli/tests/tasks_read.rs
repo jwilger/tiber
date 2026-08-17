@@ -38,6 +38,10 @@ mod tests {
     const CLOSED_TASK_ID: &str = "20260812-d444-closed-task";
     const BLOCKER_TASK_ID: &str = "20260812-e555-blocking-task";
     const BLOCKED_TASK_ID: &str = "20260812-f666-blocked-task";
+    const UNRELATED_TARGET_BLOCKS: &str = "20260812-g777-target-blocks";
+    const UNRELATED_TARGET_BLOCKED_BY: &str = "20260812-h888-target-blocked-by";
+    const UNRELATED_BLOCKER_BLOCKS: &str = "20260812-i999-blocker-blocks";
+    const UNRELATED_BLOCKER_BLOCKED_BY: &str = "20260812-j000-blocker-blocked-by";
     const TIBER_REF: &str = "refs/heads/tiber";
 
     struct TaskFixture {
@@ -402,6 +406,38 @@ mod tests {
                 _directory: directory,
                 repository,
             }
+        }
+
+        async fn signed_dependency_preservation_history() -> Self {
+            let fixture = Self::signed_ordered_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream.clone(), StreamVersion::new(2))
+                .expect("fixture board stream should register after order and details")
+                .append(event(json!({
+                    "event": "task_links_changed", "stream_id": board_stream.as_ref(),
+                    "stem": FIRST_PRIORITY_TASK_ID,
+                    "blocks": [UNRELATED_TARGET_BLOCKS],
+                    "blocked_by": [UNRELATED_TARGET_BLOCKED_BY]
+                })))
+                .expect("target links should append")
+                .append(event(json!({
+                    "event": "task_links_changed", "stream_id": board_stream.as_ref(),
+                    "stem": SECOND_PRIORITY_TASK_ID,
+                    "blocks": [UNRELATED_BLOCKER_BLOCKS],
+                    "blocked_by": [UNRELATED_BLOCKER_BLOCKED_BY]
+                })))
+                .expect("blocker links should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("fixture dependency links should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
         }
 
         #[expect(
@@ -1247,6 +1283,246 @@ mod tests {
                 "3. [ ] The packaged binary restores the exact next action after restart.\n"
             ),
             "unexpected task projection:\n{shown_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_link_blocked_by_exposes_the_reciprocal_dependency_through_native_queries() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+
+        let linked = fixture.tiber(&[
+            "tasks",
+            "link",
+            "blocked-by",
+            FIRST_PRIORITY_TASK_ID,
+            SECOND_PRIORITY_TASK_ID,
+        ]);
+
+        assert_success(&linked);
+        let revision = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        assert_eq!(
+            String::from_utf8_lossy(&linked.stdout),
+            format!(
+                "linked {FIRST_PRIORITY_TASK_ID} blocked by {SECOND_PRIORITY_TASK_ID} at {revision}\n"
+            )
+        );
+        assert!(String::from_utf8_lossy(&linked.stderr).is_empty());
+        let target = fixture.tiber(&["tasks", "show", FIRST_PRIORITY_TASK_ID]);
+        assert_success(&target);
+        assert!(
+            String::from_utf8_lossy(&target.stdout)
+                .contains(&format!("blocked-by: {SECOND_PRIORITY_TASK_ID}\n"))
+        );
+        let blocker = fixture.tiber(&["tasks", "show", SECOND_PRIORITY_TASK_ID]);
+        assert_success(&blocker);
+        assert!(
+            String::from_utf8_lossy(&blocker.stdout)
+                .contains(&format!("blocks: {FIRST_PRIORITY_TASK_ID}\n"))
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_link_blocked_by_rejects_a_self_link_without_advancing_authority() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let linked = fixture.tiber(&[
+            "tasks",
+            "link",
+            "blocked-by",
+            FIRST_PRIORITY_TASK_ID,
+            FIRST_PRIORITY_TASK_ID,
+        ]);
+
+        assert!(!linked.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&linked.stderr),
+            format!(
+                "tasks_command_dependency_self_link: task `{FIRST_PRIORITY_TASK_ID}` cannot be blocked by itself\n"
+            )
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_link_blocked_by_preserves_unrelated_links_on_both_tasks() {
+        let fixture = TaskFixture::signed_dependency_preservation_history().await;
+
+        let linked = fixture.tiber(&[
+            "tasks",
+            "link",
+            "blocked-by",
+            FIRST_PRIORITY_TASK_ID,
+            SECOND_PRIORITY_TASK_ID,
+        ]);
+
+        assert_success(&linked);
+        let target = fixture.tiber(&["tasks", "show", FIRST_PRIORITY_TASK_ID]);
+        assert_success(&target);
+        let target = String::from_utf8_lossy(&target.stdout);
+        assert!(target.contains(&format!("blocks: {UNRELATED_TARGET_BLOCKS}\n")));
+        assert!(target.contains(&format!(
+            "blocked-by: {UNRELATED_TARGET_BLOCKED_BY}, {SECOND_PRIORITY_TASK_ID}\n"
+        )));
+        let blocker = fixture.tiber(&["tasks", "show", SECOND_PRIORITY_TASK_ID]);
+        assert_success(&blocker);
+        let blocker = String::from_utf8_lossy(&blocker.stdout);
+        assert!(blocker.contains(&format!(
+            "blocks: {UNRELATED_BLOCKER_BLOCKS}, {FIRST_PRIORITY_TASK_ID}\n"
+        )));
+        assert!(blocker.contains(&format!("blocked-by: {UNRELATED_BLOCKER_BLOCKED_BY}\n")));
+    }
+
+    #[tokio::test]
+    async fn tasks_link_blocked_by_reconciles_an_exact_durable_retry() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+        let arguments = [
+            "tasks",
+            "link",
+            "blocked-by",
+            FIRST_PRIORITY_TASK_ID,
+            SECOND_PRIORITY_TASK_ID,
+        ];
+
+        let linked = fixture.tiber(&arguments);
+        assert_success(&linked);
+        let linked_revision = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        let retried = fixture.tiber(&arguments);
+
+        assert_success(&retried);
+        assert_eq!(
+            String::from_utf8_lossy(&retried.stdout),
+            format!("{FIRST_PRIORITY_TASK_ID} already blocked by {SECOND_PRIORITY_TASK_ID}\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            linked_revision
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_link_blocked_by_reconciles_an_exact_retry_after_ambiguous_publication() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+        let remote = fixture._directory.path().join("dependency-link-remote.git");
+        git(
+            fixture._directory.path(),
+            [
+                "clone",
+                "--bare",
+                fixture.repository.to_str().expect("fixture path is UTF-8"),
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        git(
+            &fixture.repository,
+            [
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        let base = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        let commands = fixture
+            ._directory
+            .path()
+            .join("dependency-link-ambiguous-commands");
+        fs::create_dir_all(&commands).expect("wrapper directory should be created");
+        let wrapper = commands.join("git");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+operation=
+for argument in "$@"; do
+  if [ "$argument" = "push" ]; then operation=push; fi
+  if [ "$argument" = "ls-remote" ]; then operation=ls-remote; fi
+done
+if [ "$operation" = "ls-remote" ] && [ -f "$TIBER_PUSH_MARKER" ]; then
+  printf '%s\trefs/heads/tiber\n' "$TIBER_STALE_HEAD"
+  exit 0
+fi
+if [ "$operation" = "push" ]; then
+  "$TIBER_REAL_GIT" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then : > "$TIBER_PUSH_MARKER"; fi
+  exit "$status"
+fi
+exec "$TIBER_REAL_GIT" "$@"
+"#,
+        )
+        .expect("Git wrapper should be written");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("wrapper executable");
+        let real_git = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("Git discovery")
+                .stdout,
+        )
+        .expect("Git path UTF-8")
+        .trim()
+        .to_owned();
+        let path = format!(
+            "{}:{}",
+            commands.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let marker = fixture
+            ._directory
+            .path()
+            .join("dependency-link-push-completed");
+        let ambiguous = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args([
+                "tasks",
+                "link",
+                "blocked-by",
+                FIRST_PRIORITY_TASK_ID,
+                SECOND_PRIORITY_TASK_ID,
+            ])
+            .current_dir(&fixture.repository)
+            .env("PATH", path)
+            .env("TIBER_REAL_GIT", real_git)
+            .env("TIBER_PUSH_MARKER", &marker)
+            .env("TIBER_STALE_HEAD", &base)
+            .output()
+            .expect("Tiber CLI");
+        assert!(!ambiguous.status.success());
+        let remote_after_ambiguous = git_output(&remote, ["rev-parse", TIBER_REF]);
+        assert_ne!(remote_after_ambiguous, base);
+        let diagnostic = String::from_utf8_lossy(&ambiguous.stderr);
+        let retry_command = diagnostic
+            .strip_prefix("tiber_store_publication_ambiguous: dependency link may already be durable; retry exactly: `")
+            .and_then(|text| text.strip_suffix("`\n"))
+            .expect("exact retry diagnostic");
+        let tiber_directory = Path::new(env!("CARGO_BIN_EXE_tiber"))
+            .parent()
+            .expect("binary parent");
+        let retry_path = format!(
+            "{}:{}",
+            tiber_directory.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let reconciled = Command::new("sh")
+            .args(["-c", retry_command])
+            .current_dir(&fixture.repository)
+            .env("PATH", retry_path)
+            .output()
+            .expect("retry command");
+        assert_success(&reconciled);
+        assert_eq!(
+            String::from_utf8_lossy(&reconciled.stdout),
+            format!("{FIRST_PRIORITY_TASK_ID} already blocked by {SECOND_PRIORITY_TASK_ID}\n")
+        );
+        assert_eq!(
+            git_output(&remote, ["rev-parse", TIBER_REF]),
+            remote_after_ambiguous
         );
     }
 
@@ -3228,8 +3504,8 @@ exec "$TIBER_REAL_GIT" "$@"
     )]
     fn explicit_help_flags_succeed_without_an_error_diagnostic() {
         let directory = TempDir::new().expect("fixture directory should be created");
-        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
-        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
+        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
+        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
         let usage_exit_code: i32 = 2;
         let cases: &[(&[&str], &str)] = &[
             (&["--help"], root_usage),
@@ -3315,7 +3591,7 @@ exec "$TIBER_REAL_GIT" "$@"
         assert!(String::from_utf8_lossy(&output.stderr).is_empty());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
+            "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
         );
     }
 

@@ -16,9 +16,9 @@ use eventcore_fs::{FileEventStore, FsConfig, FsyncPolicy};
 use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamWrites};
 use tempfile::TempDir;
 use tiber_tasks_service::{
-    AcceptanceAddPublication, AcceptanceCheckPublication, SubtaskIdCorrectionPublication,
-    SubtaskOccurrenceCheckPublication, TaskActivationPublication, TaskCompletionPublication,
-    TaskCreationPublication, TaskDetailsPublication,
+    AcceptanceAddPublication, AcceptanceCheckPublication, DependencyLinkPublication,
+    SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication, TaskActivationPublication,
+    TaskCompletionPublication, TaskCreationPublication, TaskDetailsPublication,
 };
 
 use crate::{
@@ -213,6 +213,21 @@ impl TiberEventPublisher {
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (event, streams) = publication.into_event_and_consistency_streams();
         return self.append(&streams, vec![event]).await;
+    }
+
+    /// Publishes one modeled reciprocal blocked-by dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed publication failure when task authority changes,
+    /// signing fails, or the remote result cannot be safely reconciled.
+    #[inline]
+    pub async fn publish_dependency_link(
+        &mut self,
+        publication: DependencyLinkPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (events, streams) = publication.into_events_and_consistency_streams();
+        return self.append(&streams, events).await;
     }
 
     /// Opens a publishable snapshot only if it still equals the already-read authority revision.

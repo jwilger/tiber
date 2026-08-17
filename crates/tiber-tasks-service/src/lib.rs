@@ -12,7 +12,7 @@ extern crate alloc;
 /// Pure native task-command decisions.
 pub mod command;
 
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{error::Error, fmt};
 
 use eventcore_types::StreamId;
@@ -22,6 +22,66 @@ use tiber_tasks_core::{
     TaskStatus, TaskSubtaskAdded, TaskSubtaskChecked, TaskSubtaskIdCorrected,
     TaskSubtaskOccurrenceChecked, TaskTransitioned,
 };
+
+/// Opaque publication for one modeled reciprocal blocked-by dependency.
+#[derive(Debug, Eq, PartialEq)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque token groups the consistency fence before the target and blocker facts in command-flow order"
+)]
+pub struct DependencyLinkPublication {
+    /// Exact board and both endpoint streams read by the decision.
+    consistency_streams: [StreamId; 3],
+    /// Complete replacement links for the task that is blocked.
+    target_fact: TaskLinksChanged,
+    /// Complete replacement links for the task that blocks it.
+    blocker_fact: TaskLinksChanged,
+}
+
+impl DependencyLinkPublication {
+    /// Creates the closed reciprocal dependency token from modeled facts.
+    #[expect(
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the sole command-local constructor validates reciprocal modeled provenance before returning the closed token"
+    )]
+    pub(crate) fn from_modeled_facts(
+        target_fact: TaskLinksChanged,
+        blocker_fact: TaskLinksChanged,
+        consistency_streams: [StreamId; 3],
+    ) -> Result<Self, command::TaskCommandError> {
+        let board = &consistency_streams[0];
+        if &target_fact.stream_id != board
+            || &blocker_fact.stream_id != board
+            || !target_fact.blocked_by.contains(&blocker_fact.stem)
+            || !blocker_fact.blocks.contains(&target_fact.stem)
+        {
+            return Err(command::TaskCommandError::InvalidModeledDependencyLinkPublication);
+        }
+        Ok(Self {
+            consistency_streams,
+            target_fact,
+            blocker_fact,
+        })
+    }
+
+    /// Transfers the modeled reciprocal facts and their exact consistency fence.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot transfer returns its complete reciprocal batch and fence directly"
+    )]
+    pub fn into_events_and_consistency_streams(self) -> (Vec<TaskEvent>, [StreamId; 3]) {
+        (
+            vec![
+                TaskEvent::TaskLinksChanged(self.target_fact),
+                TaskEvent::TaskLinksChanged(self.blocker_fact),
+            ],
+            self.consistency_streams,
+        )
+    }
+}
 
 /// Opaque publication for one modeled unchecked acceptance addition.
 #[derive(Debug, Eq, PartialEq)]
