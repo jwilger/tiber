@@ -380,9 +380,8 @@ impl ResourceUri {
         {
             return Err(ExternalToolError::InvalidResourceUri);
         }
-        let parsed = match Url::parse(trimmed_value) {
-            Ok(parsed) => parsed,
-            Err(_) => return Err(ExternalToolError::InvalidResourceUri),
+        let Ok(parsed) = Url::parse(trimmed_value) else {
+            return Err(ExternalToolError::InvalidResourceUri);
         };
         Ok(Self(parsed.into()))
     }
@@ -450,9 +449,8 @@ impl LoopbackEndpoint {
     /// has user credentials or a fragment, or its host is not a loopback form.
     #[inline]
     pub fn parse(value: &str) -> Result<Self, ExternalToolError> {
-        let parsed = match Url::parse(value) {
-            Ok(parsed) => parsed,
-            Err(_) => return Err(ExternalToolError::InvalidEndpoint),
+        let Ok(parsed) = Url::parse(value) else {
+            return Err(ExternalToolError::InvalidEndpoint);
         };
         if parsed.scheme() != "http" {
             return Err(ExternalToolError::UnsupportedEndpointScheme);
@@ -750,9 +748,8 @@ impl ToolArguments {
         if value.len() > MAX_TOOL_ARGUMENT_BYTES {
             return Err(ExternalToolError::InvalidToolArguments);
         }
-        let parsed = match serde_json::from_str::<serde_json::Value>(value) {
-            Ok(parsed) => parsed,
-            Err(_) => return Err(ExternalToolError::InvalidToolArguments),
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) else {
+            return Err(ExternalToolError::InvalidToolArguments);
         };
         if !parsed.is_object() {
             return Err(ExternalToolError::InvalidToolArguments);
@@ -765,9 +762,8 @@ impl ToolArguments {
         self,
         idempotency_key: &IdempotencyKey,
     ) -> Result<Self, ExternalToolError> {
-        let mut parsed = match serde_json::from_str::<serde_json::Value>(&self.0) {
-            Ok(parsed) => parsed,
-            Err(_) => return Err(ExternalToolError::InvalidToolArguments),
+        let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&self.0) else {
+            return Err(ExternalToolError::InvalidToolArguments);
         };
         let Some(arguments) = parsed.as_object_mut() else {
             return Err(ExternalToolError::InvalidToolArguments);
@@ -779,9 +775,8 @@ impl ToolArguments {
             return Err(ExternalToolError::MutationIdempotencyConflict);
         }
         arguments.insert(IDEMPOTENCY_KEY_ARGUMENT.to_owned(), canonical_value);
-        let serialized = match serde_json::to_string(&parsed) {
-            Ok(serialized) => serialized,
-            Err(_) => return Err(ExternalToolError::InvalidToolArguments),
+        let Ok(serialized) = serde_json::to_string(&parsed) else {
+            return Err(ExternalToolError::InvalidToolArguments);
         };
         if serialized.len() > MAX_TOOL_ARGUMENT_BYTES {
             return Err(ExternalToolError::InvalidToolArguments);
@@ -819,9 +814,8 @@ impl PromptArguments {
         if value.len() > MAX_TOOL_ARGUMENT_BYTES {
             return Err(ExternalToolError::InvalidPromptArguments);
         }
-        let parsed = match serde_json::from_str::<serde_json::Value>(value) {
-            Ok(parsed) => parsed,
-            Err(_) => return Err(ExternalToolError::InvalidPromptArguments),
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) else {
+            return Err(ExternalToolError::InvalidPromptArguments);
         };
         if !parsed.is_object() {
             return Err(ExternalToolError::InvalidPromptArguments);
@@ -1067,10 +1061,7 @@ impl PolicyIntersection {
             Ok(()) => {}
             Err(error) => return Err(error),
         }
-        let grants = match self.matching_grants(context) {
-            Ok(grants) => grants,
-            Err(error) => return Err(error),
-        };
+        let grants = self.matching_grants(context)?;
         if grants
             .into_iter()
             .all(|grant| grant.permits_capability(capability))
@@ -1092,10 +1083,7 @@ impl PolicyIntersection {
             Ok(()) => {}
             Err(error) => return Err(error),
         }
-        let grants = match self.matching_grants(context) {
-            Ok(grants) => grants,
-            Err(error) => return Err(error),
-        };
+        let grants = self.matching_grants(context)?;
         if grants
             .into_iter()
             .all(|grant| grant.permits(tool, capability))
@@ -1561,10 +1549,7 @@ impl AuthorizedToolCall {
         if self.class != ToolClass::Mutate {
             return None;
         }
-        let idempotency_key = match self.idempotency_key.clone() {
-            Some(key) => key,
-            None => return None,
-        };
+        let idempotency_key = self.idempotency_key.clone()?;
         let status_tool = match self.integration.reconciliation_tool() {
             Some(tool) => tool.clone(),
             None => return None,
@@ -1586,10 +1571,7 @@ impl AuthorizedToolCall {
         if self.class != ToolClass::Mutate {
             return None;
         }
-        let idempotency_key = match self.idempotency_key {
-            Some(key) => key,
-            None => return None,
-        };
+        let idempotency_key = self.idempotency_key?;
         let status_tool = match self.integration.reconciliation_tool() {
             Some(tool) => tool.clone(),
             None => return None,
@@ -2431,10 +2413,7 @@ fn authorize_tool_call_inner(
         None
     };
     let arguments = match idempotency_key.as_ref() {
-        Some(key) => match proposal.arguments.with_idempotency_key(key) {
-            Ok(arguments) => arguments,
-            Err(error) => return Err(error),
-        },
+        Some(key) => proposal.arguments.with_idempotency_key(key)?,
         None => proposal.arguments,
     };
     Ok(AuthorizedToolCall {

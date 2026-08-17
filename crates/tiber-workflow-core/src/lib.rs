@@ -5,6 +5,7 @@ extern crate alloc;
 use alloc::string::String;
 use core::{error::Error, fmt};
 use serde::{Deserialize, Serialize, de::Error as _};
+use sha2::{Digest as _, Sha256};
 
 /// Defines one validated textual workflow identity newtype.
 macro_rules! semantic_text {
@@ -357,10 +358,7 @@ impl<'de> Deserialize<'de> for DeadlineMilliseconds {
     where
         D: serde::Deserializer<'de>,
     {
-        let decoded = match u64::deserialize(deserializer) {
-            Ok(decoded) => decoded,
-            Err(error) => return Err(error),
-        };
+        let decoded = u64::deserialize(deserializer)?;
         match Self::parse(decoded) {
             Ok(parsed) => Ok(parsed),
             Err(error) => Err(D::Error::custom(error)),
@@ -707,9 +705,8 @@ pub fn step(state: &HarnessState, observation: Option<&EffectObservation>) -> Tr
             Some(_) => stopped(state, HarnessError::UnexpectedObservation),
         },
         HarnessPhase::WaitingForInference => {
-            let observed = match observation {
-                Some(observed) => observed,
-                None => return stopped(state, HarnessError::MissingObservation),
+            let Some(observed) = observation else {
+                return stopped(state, HarnessError::MissingObservation);
             };
             if observed.effect_id() != state.initial_effect.effect_id() {
                 return stopped(state, HarnessError::MismatchedObservation);
@@ -730,6 +727,46 @@ pub fn step(state: &HarnessState, observation: Option<&EffectObservation>) -> Tr
             }
         }
     }
+}
+
+/// Creates the next ready inference continuation after one successful turn.
+///
+/// The workflow core, rather than an adapter, owns the successor effect identity.
+///
+/// # Errors
+///
+/// Returns [`HarnessError::TerminalState`] unless the supplied workflow completed.
+#[inline]
+#[expect(
+    clippy::format_collect,
+    clippy::needless_return,
+    clippy::question_mark_used,
+    reason = "the bounded SHA-256 successor identifiers preserve typed parsing failures at the workflow authority boundary and conform to the workspace's explicit-return rule"
+)]
+pub fn continue_after_completion(state: &HarnessState) -> Result<HarnessState, HarnessError> {
+    if state.phase != HarnessPhase::Completed {
+        return Err(HarnessError::TerminalState);
+    }
+    let prior = state.initial_effect();
+    let digest = Sha256::digest(prior.effect_id().as_str().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let effect = InferEffect::new(
+        prior.session_id().clone(),
+        prior.agent_id().clone(),
+        prior.workflow_id().clone(),
+        prior.assignment_id().clone(),
+        prior.assignment_scope().clone(),
+        prior.assignment_epoch(),
+        prior.attempt_number(),
+        ContextReceiptId::parse(&format!("context-{digest}"))?,
+        PolicyDecisionId::parse(&format!("policy-{digest}"))?,
+        EffectId::parse(&format!("effect-{digest}"))?,
+        IdempotencyKey::parse(&format!("{}:{digest}", prior.session_id().as_str()))?,
+        prior.deadline_milliseconds(),
+    );
+    return Ok(HarnessState::new(effect));
 }
 
 /// Creates a stopped successor that preserves immutable effect provenance.
@@ -861,9 +898,8 @@ mod tests {
             Err(HarnessError::InvalidAgentId)
         );
         let serialized = format!("\"{over_limit}\"");
-        let deserialization_error = match serde_json::from_str::<AgentId>(&serialized) {
-            Ok(_) => panic!("over-limit durable text must not deserialize"),
-            Err(error) => error,
+        let Err(deserialization_error) = serde_json::from_str::<AgentId>(&serialized) else {
+            panic!("over-limit durable text must not deserialize");
         };
         assert!(
             deserialization_error
@@ -913,9 +949,10 @@ mod tests {
         reason = "test pattern failures must name unexpected trampoline results"
     )]
     fn matching_success_completes_and_terminal_state_does_not_mutate() {
-        let waiting = match step(&HarnessState::new(effect()), None) {
-            TrampolineStep::Continue { state, .. } => state,
-            _ => panic!("ready state must continue"),
+        let TrampolineStep::Continue { state: waiting, .. } =
+            step(&HarnessState::new(effect()), None)
+        else {
+            panic!("ready state must continue");
         };
         let complete = step(&waiting, Some(&observation("effect-1")));
         let completed_state = match complete {
@@ -937,14 +974,50 @@ mod tests {
 
     #[test]
     #[expect(
+        clippy::expect_used,
+        clippy::panic,
+        reason = "the successor test isolates the two expected trampoline states before asserting the durable identity derivation"
+    )]
+    fn completed_workflow_mints_its_own_distinct_successor_effect() {
+        let first = effect();
+        let TrampolineStep::Continue { state: waiting, .. } =
+            step(&HarnessState::new(first.clone()), None)
+        else {
+            panic!("ready state must continue");
+        };
+        let TrampolineStep::Complete {
+            state: completed, ..
+        } = step(&waiting, Some(&observation("effect-1")))
+        else {
+            panic!("observed state must complete");
+        };
+
+        let successor = continue_after_completion(&completed)
+            .expect("completed workflow owns its continuation");
+
+        assert_eq!(successor.phase(), HarnessPhase::Ready);
+        assert_ne!(successor.initial_effect().effect_id(), first.effect_id());
+        assert_ne!(
+            successor.initial_effect().idempotency_key(),
+            first.idempotency_key()
+        );
+        assert_eq!(
+            successor.initial_effect().assignment_scope(),
+            first.assignment_scope()
+        );
+    }
+
+    #[test]
+    #[expect(
         clippy::panic,
         clippy::wildcard_enum_match_arm,
         reason = "test pattern failures must name unexpected trampoline results"
     )]
     fn failed_unknown_missing_and_mismatched_observations_stop_without_reemitting() {
-        let waiting = match step(&HarnessState::new(effect()), None) {
-            TrampolineStep::Continue { state, .. } => state,
-            _ => panic!("ready state must continue"),
+        let TrampolineStep::Continue { state: waiting, .. } =
+            step(&HarnessState::new(effect()), None)
+        else {
+            panic!("ready state must continue");
         };
         let cases = [
             (None, HarnessError::MissingObservation),

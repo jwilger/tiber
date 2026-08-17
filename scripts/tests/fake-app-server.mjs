@@ -145,6 +145,12 @@ function runAppServer() {
         turn: { id: turnId, items: [], status: "completed" },
       },
     });
+    if (process.env.TIBER_FIXTURE_TURN_COMPLETED_SENTINEL) {
+      fs.writeFileSync(
+        process.env.TIBER_FIXTURE_TURN_COMPLETED_SENTINEL,
+        `${turnId}\n`,
+      );
+    }
   }
 
   input.on("line", async (line) => {
@@ -179,6 +185,9 @@ function runAppServer() {
               : "fixture/0.147.0",
         },
       });
+      if (process.env.TIBER_FIXTURE_INITIALIZED_SENTINEL) {
+        fs.writeFileSync(process.env.TIBER_FIXTURE_INITIALIZED_SENTINEL, "initialized\n");
+      }
     } else if (message.method === "permissionProfile/list") {
       send({
         id: message.id,
@@ -238,6 +247,7 @@ function runAppServer() {
       if (fixtureMode === "delayed-start") {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
+      if (fixtureMode === "hold-thread-start") return;
       send({
         id: message.id,
         result: effectiveThreadStartResult(threadId),
@@ -269,6 +279,9 @@ function runAppServer() {
         },
       });
     } else if (message.method === "turn/start") {
+      if (process.env.TIBER_FIXTURE_INVOCATIONS) {
+        fs.appendFileSync(process.env.TIBER_FIXTURE_INVOCATIONS, "turn/start\n");
+      }
       if (effectiveProfileMismatch) {
         send({
           error: {
@@ -306,7 +319,11 @@ function runAppServer() {
         });
       }
       const assistantDeltas =
-        fixtureMode === "split-stream"
+        fixtureMode === "oversized-assistant"
+          ? Array.from({ length: 257 }, () => "x".repeat(1024))
+          : fixtureMode === "control-assistant"
+          ? ["PROVIDER_BEFORE\u001b[31mPROVIDER_AFTER"]
+          : fixtureMode === "split-stream"
           ? ["hello ", "from Tiber"]
           : ["hello from Tiber"];
       if (fixtureMode === "delayed-stream") {
@@ -322,6 +339,12 @@ function runAppServer() {
             turnId,
           },
         });
+      }
+      if (fixtureMode === "control-assistant") {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (fixtureMode === "oversized-assistant" && process.env.TIBER_FIXTURE_OVERSIZED_SENTINEL) {
+        fs.writeFileSync(process.env.TIBER_FIXTURE_OVERSIZED_SENTINEL, "oversized\n");
       }
       send({
         method: "item/started",

@@ -15,11 +15,20 @@ use std::{
 use eventcore_fs::{FileEventStore, FsConfig, FsyncPolicy};
 use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamWrites};
 use tempfile::TempDir;
+use tiber_session_service::{
+    InferenceObservationPublication, InferenceRequestPublication, SessionFact,
+    SessionStartPublication, SessionSuccessorPublication,
+};
 use tiber_tasks_service::{
     AcceptanceAddPublication, AcceptanceCheckPublication, DependencyLinkPublication,
     SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication, TaskAbandonmentPublication,
     TaskActivationPublication, TaskCompletionPublication, TaskCreationPublication,
     TaskDetailsPublication, TaskPriorityPublication,
+};
+use tiber_workflow_core::TiberEffect;
+use tiber_workflow_service::{
+    WorkflowAdvancePublication, WorkflowEffectRequestPublication, WorkflowFact,
+    WorkflowInitializationPublication, WorkflowObservationPublication,
 };
 
 use crate::{
@@ -70,6 +79,9 @@ pub enum TiberPublicationError {
     /// A fact targeted a stream omitted from the command's consistency boundary.
     #[error("tiber_store_publication_undeclared_stream")]
     UndeclaredStream,
+    /// Session and workflow tokens described different effects.
+    #[error("tiber_store_publication_workflow_effect_mismatch")]
+    WorkflowEffectMismatch,
     /// Publication may have reached the authority but could not be confirmed conclusively.
     #[error("tiber_store_publication_ambiguous")]
     Ambiguous,
@@ -96,6 +108,7 @@ impl TiberPublicationError {
             Self::Conflict => "tiber_store_publication_conflict",
             Self::Empty => "tiber_store_publication_empty",
             Self::UndeclaredStream => "tiber_store_publication_undeclared_stream",
+            Self::WorkflowEffectMismatch => "tiber_store_publication_workflow_effect_mismatch",
             Self::Ambiguous => "tiber_store_publication_ambiguous",
             Self::Store(error) => error.code(),
             Self::EventStore(_) => "tiber_store_publication_event_store_failed",
@@ -112,7 +125,9 @@ impl TiberPublicationError {
     )]
     pub const fn retryability(&self) -> Retryability {
         match self {
-            Self::Empty | Self::UndeclaredStream => Retryability::Permanent,
+            Self::Empty | Self::UndeclaredStream | Self::WorkflowEffectMismatch => {
+                Retryability::Permanent
+            }
             Self::Store(error) => error.retryability(),
             Self::EventStore(error) => retryability_for_event_store(error),
             Self::AuthorityChanged | Self::Conflict | Self::Ambiguous => Retryability::Retryable,
@@ -171,6 +186,137 @@ impl fmt::Debug for TiberEventPublisher {
     reason = "the publisher API follows stage opening, inspection, then one-shot append/publication flow"
 )]
 impl TiberEventPublisher {
+    /// Atomically publishes a prompt and its workflow-owned effect request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when the closed publications disagree, `EventCore`
+    /// staging fails, signing fails, or the candidate cannot be confirmed.
+    #[inline]
+    pub async fn publish_inference_request_with_workflow(
+        &mut self,
+        session: InferenceRequestPublication,
+        initialization: WorkflowInitializationPublication,
+        request: WorkflowEffectRequestPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (session_event, session_streams) = session.into_event_and_consistency_streams();
+        let initialization_predecessor = initialization.predecessor_effect_id().cloned();
+        let (initialized, workflow_streams) = initialization.into_event_and_consistency_streams();
+        let (requested, request_streams) = request.into_event_and_consistency_streams();
+        if workflow_streams.last() != request_streams.first() {
+            return Err(TiberPublicationError::UndeclaredStream);
+        }
+        let SessionFact::InferenceRequested {
+            effect: session_effect,
+            predecessor_effect_id: session_predecessor,
+            ..
+        } = session_event.fact().clone()
+        else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        let WorkflowFact::WorkflowInitialized { state } = initialized.fact().clone() else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        let WorkflowFact::EffectRequested {
+            effect: TiberEffect::Infer(workflow_effect),
+            ..
+        } = requested.fact().clone()
+        else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        if session_predecessor != initialization_predecessor
+            || session_effect != workflow_effect
+            || &session_effect != state.initial_effect()
+        {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        }
+        let session_writes = self.build_writes(&session_streams, vec![session_event])?;
+        let _session = self.store.append_events(session_writes).await?;
+        let workflow_writes = self.build_writes(&workflow_streams, vec![initialized, requested])?;
+        let _workflow = self.store.append_events(workflow_writes).await?;
+        let candidate = self.create_signed_candidate()?;
+        self.publish_candidate(&candidate)
+    }
+
+    /// Atomically publishes assistant transcript and its workflow observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when the closed publications disagree, `EventCore`
+    /// staging fails, signing fails, or the candidate cannot be confirmed.
+    #[inline]
+    pub async fn publish_inference_observation_with_workflow(
+        &mut self,
+        session: InferenceObservationPublication,
+        observation: WorkflowObservationPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (session_event, session_streams) = session.into_event_and_consistency_streams();
+        let (workflow_event, workflow_streams) = observation.into_event_and_consistency_streams();
+        let SessionFact::InferenceObserved { effect_id, .. } = session_event.fact().clone() else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        let WorkflowFact::EffectObserved {
+            observation: workflow_observation,
+        } = workflow_event.fact().clone()
+        else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        if &effect_id != workflow_observation.effect_id() {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        }
+        let session_writes = self.build_writes(&session_streams, vec![session_event])?;
+        let _session = self.store.append_events(session_writes).await?;
+        let workflow_writes = self.build_writes(&workflow_streams, vec![workflow_event])?;
+        let _workflow = self.store.append_events(workflow_writes).await?;
+        let candidate = self.create_signed_candidate()?;
+        self.publish_candidate(&candidate)
+    }
+
+    /// Publishes the deterministic terminal workflow advance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when `EventCore` staging fails, signing fails, or
+    /// the candidate cannot be confirmed.
+    #[inline]
+    pub async fn publish_workflow_advance(
+        &mut self,
+        advance: WorkflowAdvancePublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = advance.into_event_and_consistency_streams();
+        self.append(&streams, vec![event]).await
+    }
+
+    /// Publishes one modeled task-bound session start.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed publication failure when signed authority changes,
+    /// signing fails, or publication cannot be confirmed.
+    #[inline]
+    pub async fn publish_session_start(
+        &mut self,
+        publication: SessionStartPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, consistency_streams) = publication.into_event_and_consistency_streams();
+        self.append(&consistency_streams, vec![event]).await
+    }
+
+    /// Publishes one modeled transfer to the successor task-bound session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when `EventCore` staging fails, signing fails, or
+    /// the candidate cannot be confirmed.
+    #[inline]
+    pub async fn publish_session_successor(
+        &mut self,
+        publication: SessionSuccessorPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, consistency_streams) = publication.into_event_and_consistency_streams();
+        self.append(&consistency_streams, vec![event]).await
+    }
+
     /// Publishes one modeled backlog creation and resulting strict board order.
     ///
     /// # Errors

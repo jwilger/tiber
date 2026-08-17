@@ -10,6 +10,7 @@ members = [
   "crates/tiber-repository-core",
   "crates/tiber-repository-linux",
   "crates/tiber-review",
+  "crates/tiber-session-service",
   "crates/tiber-store-git",
   "crates/tiber-tasks-core",
   "crates/tiber-tasks-service",
@@ -44,3 +45,6 @@ unsafe_code = "forbid"
 pedantic = { level = "warn", priority = -1 }
 restriction = { level = "warn", priority = -1 }
 blanket_clippy_restriction_lints = "allow"
+expect_used = "allow"
+implicit_return = "allow"
+question_mark_used = "allow"

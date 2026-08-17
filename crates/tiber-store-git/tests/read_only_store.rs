@@ -89,10 +89,7 @@ mod tests {
         where
             D: serde::Deserializer<'de>,
         {
-            let wire = match CountedFixtureEventWire::deserialize(deserializer) {
-                Ok(wire) => wire,
-                Err(error) => return Err(error),
-            };
+            let wire = CountedFixtureEventWire::deserialize(deserializer)?;
             COUNTED_EVENT_DESERIALIZATIONS.fetch_add(1, Ordering::Relaxed);
             Ok(Self {
                 stream_id: wire.stream_id,

@@ -162,13 +162,11 @@ fn apply_write(
     if content_length > MAX_REPOSITORY_CONTENT_BYTES {
         return rejected(RepositoryMutationFailureCode::PreDispatchRejected);
     }
-    let expected_content = match Sha256Digest::parse(content_digest) {
-        Ok(digest) => digest,
-        Err(_) => return rejected(RepositoryMutationFailureCode::PreDispatchRejected),
+    let Ok(expected_content) = Sha256Digest::parse(content_digest) else {
+        return rejected(RepositoryMutationFailureCode::PreDispatchRejected);
     };
-    let (parent, name) = match open_parent(root, path) {
-        Ok(parts) => parts,
-        Err(_) => return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied),
+    let Ok((parent, name)) = open_parent(root, path) else {
+        return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
     };
     if content.len() != content_length || Sha256Digest::of(content) != expected_content {
         return rejected(RepositoryMutationFailureCode::PreDispatchRejected);
@@ -278,13 +276,11 @@ fn install_staged_write(
     reason = "the closed delete interpreter returns its terminal or ambiguous worker response directly"
 )]
 fn apply_delete(root: &OwnedFd, path: &str, expected_hex: &str) -> WorkerResponse {
-    let expected_digest = match Sha256Digest::parse(expected_hex) {
-        Ok(digest) => digest,
-        Err(_) => return rejected(RepositoryMutationFailureCode::PreDispatchRejected),
+    let Ok(expected_digest) = Sha256Digest::parse(expected_hex) else {
+        return rejected(RepositoryMutationFailureCode::PreDispatchRejected);
     };
-    let (parent, name) = match open_parent(root, path) {
-        Ok(parts) => parts,
-        Err(_) => return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied),
+    let Ok((parent, name)) = open_parent(root, path) else {
+        return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
     };
     let Some(state) = target_regular_state(&parent, &name) else {
         return rejected(RepositoryMutationFailureCode::PreconditionNotMet);

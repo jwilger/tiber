@@ -173,14 +173,11 @@ pub fn inspect_protocol_schema(schema: &str) -> Result<CompatibilityReport, Comp
             "expected the verified Codex 0.147.0 authority-surface projection",
         ));
     }
-    let thread_start_properties = match document
+    let Some(thread_start_properties) = document
         .pointer("/definitions/ThreadStartParams/properties")
         .and_then(serde_json::Value::as_object)
-    {
-        Some(properties) => properties,
-        None => {
-            return Err(unrecognized_schema("missing ThreadStartParams.properties"));
-        }
+    else {
+        return Err(unrecognized_schema("missing ThreadStartParams.properties"));
     };
     if thread_start_properties.len() != CODEX_0_147_THREAD_START_FIELDS.len()
         || !CODEX_0_147_THREAD_START_FIELDS
@@ -191,10 +188,7 @@ pub fn inspect_protocol_schema(schema: &str) -> Result<CompatibilityReport, Comp
             "ThreadStartParams differs from the verified 0.147 authority surface",
         ));
     }
-    let thread_item_types = match parse_thread_item_types(&document) {
-        Ok(item_types) => item_types,
-        Err(error) => return Err(error),
-    };
+    let thread_item_types = parse_thread_item_types(&document)?;
     if thread_item_types != CODEX_0_147_THREAD_ITEM_TYPES {
         return Err(unrecognized_schema(
             "ThreadItem differs from the verified 0.147 authority surface",

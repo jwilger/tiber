@@ -1,5 +1,5 @@
 [package]
-name = "tiber-workflow-service"
+name = "tiber-session-service"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -8,13 +8,12 @@ version.workspace = true
 [dependencies]
 eventcore.workspace = true
 serde.workspace = true
+sha2.workspace = true
+tiber-tasks-core = { path = "../tiber-tasks-core" }
 tiber-workflow-core = { path = "../tiber-workflow-core" }
 
 [dev-dependencies]
 eventcore = { version = "=2.0.1", features = ["experimental-model-check"] }
-eventcore-memory = "=2.0.1"
-eventcore-types.workspace = true
-futures = "=0.3.32"
 serde_json.workspace = true
 
 [lints]

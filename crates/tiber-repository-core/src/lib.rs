@@ -371,10 +371,7 @@ impl<'de> Deserialize<'de> for RepositoryPath {
     where
         D: Deserializer<'de>,
     {
-        let decoded = match String::deserialize(deserializer) {
-            Ok(decoded) => decoded,
-            Err(error) => return Err(error),
-        };
+        let decoded = String::deserialize(deserializer)?;
         match Self::parse(&decoded) {
             Ok(parsed) => Ok(parsed),
             Err(error) => Err(D::Error::custom(error)),
@@ -527,10 +524,7 @@ impl<'de> Deserialize<'de> for Sha256Digest {
     where
         D: Deserializer<'de>,
     {
-        let decoded = match String::deserialize(deserializer) {
-            Ok(decoded) => decoded,
-            Err(error) => return Err(error),
-        };
+        let decoded = String::deserialize(deserializer)?;
         match Self::parse(&decoded) {
             Ok(parsed) => Ok(parsed),
             Err(error) => Err(D::Error::custom(error)),
@@ -1171,10 +1165,7 @@ impl<'de> Deserialize<'de> for RepositoryMutationIdentity {
     where
         D: Deserializer<'de>,
     {
-        let decoded = match RepositoryMutationIdentityWire::deserialize(deserializer) {
-            Ok(decoded) => decoded,
-            Err(error) => return Err(error),
-        };
+        let decoded = RepositoryMutationIdentityWire::deserialize(deserializer)?;
         let RepositoryMutationIdentityWire {
             content_digest,
             kind,
@@ -1531,10 +1522,7 @@ impl<'de> Deserialize<'de> for RepositoryReconciliationOutcome {
     where
         D: Deserializer<'de>,
     {
-        let decoded = match RepositoryReconciliationOutcomeWire::deserialize(deserializer) {
-            Ok(decoded) => decoded,
-            Err(error) => return Err(error),
-        };
+        let decoded = RepositoryReconciliationOutcomeWire::deserialize(deserializer)?;
         match decoded {
             RepositoryReconciliationOutcomeWire::Applied(receipt)
                 if receipt.state() == RepositoryReconciliationState::Applied =>
@@ -1810,12 +1798,11 @@ mod tests {
     fn owner_approval_bound_to_a_prior_assignment_context_is_stale() {
         let (proposal_a, assignment_a, policy_a, approval_id) = valid_write_request();
         let approval_a = RepositoryMutationApproval::issue(approval_id, &proposal_a, &policy_a);
-        let stale_provenance = match provenance_mismatches(assignment_a.provenance())
+        let Some(stale_provenance) = provenance_mismatches(assignment_a.provenance())
             .into_iter()
             .next()
-        {
-            Some(provenance) => provenance,
-            None => panic!("the complete provenance mismatch fixture must not be empty"),
+        else {
+            panic!("the complete provenance mismatch fixture must not be empty");
         };
         let assignment_b = RepositoryAssignmentContext::new(
             stale_provenance,
@@ -2448,20 +2435,20 @@ mod tests {
         expected: RepositoryReconciliationState,
         identity: &RepositoryMutationIdentity,
     ) {
-        let receipt = match (outcome, expected) {
-            (
-                RepositoryReconciliationOutcome::Applied(receipt),
-                RepositoryReconciliationState::Applied,
-            )
-            | (
-                RepositoryReconciliationOutcome::NotApplied(receipt),
-                RepositoryReconciliationState::NotApplied,
-            )
-            | (
-                RepositoryReconciliationOutcome::StillUnknown(receipt),
-                RepositoryReconciliationState::StillUnknown,
-            ) => receipt,
-            _ => panic!("reconciliation outcome variant must match its closed state"),
+        let ((
+            RepositoryReconciliationOutcome::Applied(receipt),
+            RepositoryReconciliationState::Applied,
+        )
+        | (
+            RepositoryReconciliationOutcome::NotApplied(receipt),
+            RepositoryReconciliationState::NotApplied,
+        )
+        | (
+            RepositoryReconciliationOutcome::StillUnknown(receipt),
+            RepositoryReconciliationState::StillUnknown,
+        )) = (outcome, expected)
+        else {
+            panic!("reconciliation outcome variant must match its closed state");
         };
         assert_eq!(receipt.state(), expected);
         assert_eq!(receipt.identity(), identity);

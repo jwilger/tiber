@@ -260,10 +260,7 @@ impl<'de> Deserialize<'de> for MemoryTag {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = match String::deserialize(deserializer) {
-            Ok(value) => value,
-            Err(error) => return Err(error),
-        };
+        let value = String::deserialize(deserializer)?;
         match Self::parse(&value) {
             Ok(parsed) => Ok(parsed),
             Err(error) => Err(D::Error::custom(error)),
@@ -441,10 +438,7 @@ impl MemoryScope {
         let Some((_namespace, raw_document_id)) = value.rsplit_once(':') else {
             return Err(MemoryContractError::Invalid);
         };
-        let document_id = match MemoryDocumentId::parse(raw_document_id) {
-            Ok(document_id) => document_id,
-            Err(error) => return Err(error),
-        };
+        let document_id = MemoryDocumentId::parse(raw_document_id)?;
         let expected = self.backend_document_id(&document_id);
         if expected.as_str() != value {
             return Err(MemoryContractError::ScopeMismatch);
@@ -592,10 +586,7 @@ impl<'de> Deserialize<'de> for MemoryText {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = match String::deserialize(deserializer) {
-            Ok(value) => value,
-            Err(error) => return Err(error),
-        };
+        let value = String::deserialize(deserializer)?;
         match Self::parse(&value) {
             Ok(parsed) => Ok(parsed),
             Err(error) => Err(D::Error::custom(error)),

@@ -6,9 +6,11 @@ Tiber is a standalone, local-first development harness for one repository
 owner. Tiber owns the authoritative state and execution of development work.
 Its `codex app-server` inference design passed the corrected Phase 1
 effective-authority spike and is the accepted v1 transport. A source-level
-interactive transcript/composer slice now consumes streamed typed app-server
-events; durable sessions and the complete terminal interaction remain to be
-implemented.
+interactive transcript/composer now runs task-bound durable sessions through
+the checked workflow trampoline. Prompts, workflow effects, observations,
+receipts, and transcript facts are published to signed authority before their
+dependent action; interrupted uncertain effects stop at an explicit reconcile
+next action rather than being replayed.
 
 The v1 product and executable are named `tiber`. The existing task board is
 named Tiber Tasks. Running `tiber` without arguments opens the current
@@ -36,7 +38,7 @@ activate only the current eligible next task while no other task is active. An
 exact retry for that sole active task succeeds without publishing another
 authority revision. It does not implement scheduling or a workflow loop.
 
-The first native workflow slice is deliberately internal.
+The native workflow is the authority for interactive inference.
 `tiber-workflow-core` provides serializable semantic identities, a total
 `step(state, observation)` trampoline, and one closed `Infer` effect with
 bounded deadline, provenance, and idempotency data.
@@ -45,9 +47,10 @@ initialize a workflow, request the effect, record its observation, and advance
 the trampoline. Recording an observation persists `EffectObserved` in its own
 transaction; only a later advance decision may call `step` to request, complete,
 or stop. The service exposes neither a generic workflow append nor an effect
-executor. It is not yet connected to the app-server, TUI, or CLI; app-server
-tools remain inert, while scheduling, effect reconciliation, durable interactive
-sessions, and UI integration remain later native slices.
+executor. The CLI interprets only its closed `Infer` effect through app-server,
+records the observation and terminal advance durably, and restores the TUI
+projection on relaunch. App-server tools remain inert; broader scheduling and
+operator-directed resolution of uncertain effects remain later native slices.
 
 The native task surface also has one explicit legacy-data repair, not a general
 write: `subtask repair-duplicate`. It requires a one-based occurrence and a new

@@ -57,6 +57,8 @@ pub enum ProjectionEvent {
         message: String,
         retryable: bool,
     },
+    /// A durable inference request has no terminal observation and requires reconciliation.
+    ReconciliationRequired { code: String, message: String },
 }
 
 /// Current presentation phase; it carries no workflow authority.
@@ -67,6 +69,8 @@ enum PresentationPhase {
     Ready,
     /// One inference turn is producing observations.
     Streaming,
+    /// Durable workflow authority must be reconciled before another prompt.
+    Reconcile,
 }
 
 /// One transcript row rendered by the presentation.
@@ -166,6 +170,14 @@ impl ConversationProjection {
                 });
                 self.phase = PresentationPhase::Ready;
             }
+            ProjectionEvent::ReconciliationRequired { code, message } => {
+                self.push_entry(TranscriptEntry::Failure {
+                    code: sanitize_terminal_text(&code),
+                    message: sanitize_terminal_text(&message),
+                    retryable: false,
+                });
+                self.phase = PresentationPhase::Reconcile;
+            }
         }
     }
 
@@ -258,6 +270,7 @@ pub fn render(frame: &mut Frame<'_>, projection: &ConversationProjection) {
             "streaming \u{b7} model effects remain inert",
             Style::default().fg(Color::Cyan),
         ),
+        PresentationPhase::Reconcile => ("reconcile required", Style::default().fg(Color::Yellow)),
     };
     frame.render_widget(Paragraph::new(status).style(status_style), status_area);
     frame.render_widget(
@@ -267,6 +280,7 @@ pub fn render(frame: &mut Frame<'_>, projection: &ConversationProjection) {
     let footer = match projection.phase {
         PresentationPhase::Ready => "enter send \u{b7} ctrl+c quit",
         PresentationPhase::Streaming => "streaming \u{b7} ctrl+c quit \u{b7} tools are inert",
+        PresentationPhase::Reconcile => "reconcile required \u{b7} ctrl+c quit",
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),

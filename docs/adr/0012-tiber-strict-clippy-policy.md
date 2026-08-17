@@ -17,15 +17,28 @@ grandfathered warnings hide defects and make future toolchain changes noisy.
 
 Every shipping crate inherits workspace lints. Enable `pedantic` and
 `restriction` at warning priority -1, allow
-`blanket_clippy_restriction_lints`, and fail
+`blanket_clippy_restriction_lints`, `clippy::expect_used`,
+`clippy::implicit_return`, and `clippy::question_mark_used`; then fail
 `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 Forbid unsafe code. Library code contains no `unwrap`, `expect`, `panic`,
 `todo`, or `unimplemented`.
+
+The three global Clippy allowances remove stylistic noise from typed
+fallible-control-flow and test fixture code; they do not authorize fallible
+shortcuts in shipping behavior. The functional-core and black-box TDD rules
+remain the controlling constraints for those decisions.
 
 Fix warnings where practical. Permit only narrowly scoped
 `#[expect(clippy::lint_name, reason = "…")]`. Blanket
 `#[allow(clippy::…)]`, unreasoned suppression, and grandfathered fork source
 are prohibited. Workspace exceptions require an amendment to this ADR.
+`ModelEvent` is the sole crate-level Clippy exception: its EventCore derive
+generates public checked-model helpers at the invoking crate scope, and the
+macro exposes no item-local lint hook for those generated helpers. A crate that
+directly invokes that derive may use one reasoned crate-inner expectation for
+only `clippy::exhaustive_structs` and `clippy::impl_trait_in_params`; it must
+name this macro limitation. It does not apply to handwritten items or any other
+lint.
 The pinned RMCP 3.1.2 `ClientHandler` API leaves three required callbacks
 deprecated without a supported replacement: `create_message` for explicit
 sampling refusal, `list_roots` for Tiber-owned roots, and

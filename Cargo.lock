@@ -2028,12 +2028,17 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "thiserror",
  "tiber-app-server",
+ "tiber-session-service",
  "tiber-store-git",
  "tiber-tasks-core",
  "tiber-tasks-service",
  "tiber-tui",
+ "tiber-workflow-core",
+ "tiber-workflow-service",
  "tokio",
  "uuid",
 ]
@@ -2147,6 +2152,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiber-session-service"
+version = "0.1.0"
+dependencies = [
+ "eventcore",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tiber-tasks-core",
+ "tiber-workflow-core",
+]
+
+[[package]]
 name = "tiber-store-git"
 version = "0.1.0"
 dependencies = [
@@ -2156,8 +2173,11 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tiber-session-service",
  "tiber-tasks-core",
  "tiber-tasks-service",
+ "tiber-workflow-core",
+ "tiber-workflow-service",
  "tokio",
  "wait-timeout",
 ]
@@ -2199,6 +2219,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2210,6 +2231,7 @@ dependencies = [
  "eventcore-types",
  "futures",
  "serde",
+ "serde_json",
  "tiber-workflow-core",
 ]
 

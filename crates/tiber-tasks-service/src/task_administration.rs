@@ -161,9 +161,7 @@ impl CreationState {
             order: Vec::new(),
         };
         for event in events {
-            if let Err(error) = state.fold_event(event) {
-                return Err(error);
-            }
+            state.fold_event(event)?;
         }
         Ok(state)
     }
@@ -177,11 +175,7 @@ impl CreationState {
     fn fold_event(&mut self, event: &TaskEvent) -> Result<(), TaskCommandError> {
         match event {
             TaskEvent::TaskCreated(created) => {
-                if let Err(error) =
-                    validate_task_fact_stream(&created.task.stem, &created.stream_id)
-                {
-                    return Err(error);
-                }
+                validate_task_fact_stream(&created.task.stem, &created.stream_id)?;
                 let previous = self
                     .current_tasks
                     .insert(created.task.stem.clone(), created.task.title.clone());
@@ -193,9 +187,7 @@ impl CreationState {
                 Ok(())
             }
             TaskEvent::HistoricalTaskRemoved(removed) => {
-                if let Err(error) = validate_task_fact_stream(&removed.stem, &removed.stream_id) {
-                    return Err(error);
-                }
+                validate_task_fact_stream(&removed.stem, &removed.stream_id)?;
                 if self.current_tasks.remove(&removed.stem).is_none() {
                     return Err(TaskCommandError::TaskMissing {
                         task: removed.stem.clone(),
@@ -218,9 +210,7 @@ impl CreationState {
                     if order.stream_id != repaired.stream_id {
                         return Err(TaskCommandError::TaskCreationMalformedHistory);
                     }
-                    if let Err(error) = self.replace_order(&order.stream_id, &order.order) {
-                        return Err(error);
-                    }
+                    self.replace_order(&order.stream_id, &order.order)?;
                 }
                 Ok(())
             }

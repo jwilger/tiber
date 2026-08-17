@@ -363,13 +363,8 @@ impl LinuxRepositoryService {
             return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
         };
         let journal_root = state_root.join("journal");
-        let projection = match recovery::load(&journal_root, &self.config.repository_id) {
-            Ok(projection) => projection,
-            Err(_) => {
-                return Err(
-                    mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
-                );
-            }
+        let Ok(projection) = recovery::load(&journal_root, &self.config.repository_id) else {
+            return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
         };
         match projection.dispatch_replay(&identity) {
             Ok(JournalDispatchReplay::New) => {}
@@ -396,9 +391,9 @@ impl LinuxRepositoryService {
         {
             return Err(mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected));
         }
-        let prepared_projection = match recovery::load(&journal_root, &self.config.repository_id) {
-            Ok(loaded_projection) => loaded_projection,
-            Err(_) => return Ok(mutation.into_ambiguity()),
+        let Ok(prepared_projection) = recovery::load(&journal_root, &self.config.repository_id)
+        else {
+            return Ok(mutation.into_ambiguity());
         };
 
         let outcome = (|| {

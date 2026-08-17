@@ -221,18 +221,9 @@ mod tests {
             },
             _ => None,
         };
-        let stem = match payload.get("stem").or(task_stem).or(closure_stem) {
-            Some(stem) => stem,
-            None => return None,
-        };
-        let task_id = match stem.as_str() {
-            Some(task_id) => task_id,
-            None => return None,
-        };
-        let subject = match task_id.strip_prefix("fixture-task-") {
-            Some(subject) => subject,
-            None => return None,
-        };
+        let stem = payload.get("stem").or(task_stem).or(closure_stem)?;
+        let task_id = stem.as_str()?;
+        let subject = task_id.strip_prefix("fixture-task-")?;
 
         subject.parse::<u8>().ok()
     }

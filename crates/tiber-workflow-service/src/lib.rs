@@ -4,26 +4,64 @@
 //! service persists a shell observation in its own transaction before a later
 //! command asks the pure core to advance the trampoline.
 
+#![expect(
+    clippy::exhaustive_structs,
+    clippy::impl_trait_in_params,
+    reason = "EventCore's ModelEvent derive generates public checked-model helpers at crate scope without an item-local lint hook"
+)]
+
 use core::{error::Error, fmt};
 
 use eventcore::{
-    CommandError, Event, ModelCommand, ModelEvent, ModelInput, ModelOutput, ModelState, StreamId,
-    mapping,
-    model::{ModelCommandLogic, Modeled, ModeledEvents, StreamIdentity as _},
+    CommandError, CommandLogic, Event, ModelCommand, ModelEvent, ModelInput, ModelOutput,
+    ModelState, StreamId, mapping,
+    model::{ModelCommandLogic, Modeled, ModeledCommand, ModeledEvents, StreamIdentity},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
 use tiber_workflow_core::{
     EffectId, EffectObservation, EffectReceiptId, HarnessError, HarnessPhase, HarnessState,
-    TiberEffect, TrampolineStep, step,
+    TiberEffect, TrampolineStep, continue_after_completion, step,
 };
+
+/// Defines opaque checked workflow publication tokens.
+macro_rules! workflow_publication {
+    ($name:ident) => {
+        /// Opaque checked workflow fact accepted by the signed publication adapter.
+        pub struct $name {
+            /// Exact stream fence returned by the checked command.
+            consistency_streams: [StreamId; 1],
+            /// Checked durable workflow event.
+            event: WorkflowEvent,
+        }
+
+        impl $name {
+            /// Borrows the checked event for composing a later modeled decision.
+            #[must_use]
+            #[inline]
+            pub const fn event(&self) -> &WorkflowEvent {
+                &self.event
+            }
+            /// Transfers the checked fact and exact consistency stream.
+            #[must_use]
+            #[inline]
+            pub fn into_event_and_consistency_streams(self) -> (WorkflowEvent, [StreamId; 1]) {
+                (self.event, self.consistency_streams)
+            }
+        }
+    };
+}
 
 /// Errors raised while converting between the semantic workflow stream and an
 /// external stream identifier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum WorkflowServiceError {
+    /// A checked workflow command did not emit exactly one fact.
+    InvalidModeledEmission,
     /// The encoded stream did not have the workflow-session form.
     InvalidStream,
+    /// A checked workflow command rejected the supplied history.
+    ModeledCommandFailed,
 }
 
 impl WorkflowServiceError {
@@ -37,6 +75,8 @@ impl WorkflowServiceError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::InvalidStream => "workflow_invalid_stream",
+            Self::ModeledCommandFailed => "workflow_modeled_command_failed",
+            Self::InvalidModeledEmission => "workflow_invalid_modeled_emission",
         }
     }
 }
@@ -60,10 +100,45 @@ impl fmt::Display for WorkflowServiceError {
 impl Error for WorkflowServiceError {}
 
 /// Semantic stream identity for one durable Tiber session workflow.
-#[derive(Clone, Debug, Eq, PartialEq, eventcore::StreamIdentity)]
-pub struct WorkflowStream(StreamId);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowStream {
+    /// Effect identity when this is a bounded per-effect stream.
+    effect_id: Option<EffectId>,
+    /// Exact durable stream identity.
+    id: StreamId,
+    /// Session identity encoded by this durable stream.
+    session: tiber_workflow_core::SessionId,
+}
+
+#[expect(
+    clippy::missing_inline_in_public_items,
+    reason = "EventCore's stream-identity trait exposes the exact stored stream without an adapter-owned transformation"
+)]
+impl StreamIdentity for WorkflowStream {
+    fn as_stream_id(&self) -> &StreamId {
+        &self.id
+    }
+}
 
 impl WorkflowStream {
+    /// Creates the execution stream for one exact inference effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkflowServiceError::InvalidStream`] when `EventCore` rejects
+    /// the effect-derived stream identifier.
+    #[inline]
+    pub fn for_effect(
+        effect: &tiber_workflow_core::InferEffect,
+    ) -> Result<Self, WorkflowServiceError> {
+        StreamId::try_new(format!("tiber:workflow:{}", effect.effect_id().as_str()))
+            .map(|id| Self {
+                id,
+                session: effect.session_id().clone(),
+                effect_id: Some(effect.effect_id().clone()),
+            })
+            .map_err(|_source| WorkflowServiceError::InvalidStream)
+    }
     /// Creates the durable workflow stream associated with one session.
     ///
     /// # Errors
@@ -75,11 +150,14 @@ impl WorkflowStream {
         clippy::implicit_return,
         reason = "the semantic stream constructor directly returns EventCore's parsed result"
     )]
-    pub fn for_session(
-        session: &tiber_workflow_core::SessionId,
-    ) -> Result<Self, WorkflowServiceError> {
+    #[cfg(test)]
+    fn for_session(session: &tiber_workflow_core::SessionId) -> Result<Self, WorkflowServiceError> {
         StreamId::try_new(format!("tiber:workflow:{}", session.as_str()))
-            .map(Self)
+            .map(|id| Self {
+                id,
+                session: session.clone(),
+                effect_id: None,
+            })
             .map_err(|_source| WorkflowServiceError::InvalidStream)
     }
 
@@ -95,22 +173,23 @@ impl WorkflowStream {
         reason = "the semantic stream parser directly returns the typed session result"
     )]
     pub fn session(&self) -> Result<tiber_workflow_core::SessionId, WorkflowServiceError> {
-        let raw = self.0.as_ref();
-        let Some(session) = raw.strip_prefix("tiber:workflow:") else {
-            return Err(WorkflowServiceError::InvalidStream);
-        };
-        tiber_workflow_core::SessionId::parse(session)
-            .map_err(|_source| WorkflowServiceError::InvalidStream)
+        Ok(self.session.clone())
+    }
+
+    /// Returns the exact durable stream identifier.
+    #[must_use]
+    #[inline]
+    pub const fn stream_id(&self) -> &StreamId {
+        &self.id
     }
 }
 
 /// Immutable workflow facts emitted by the closed native command surface.
 #[expect(
     clippy::arbitrary_source_item_ordering,
-    clippy::large_enum_variant,
     reason = "fact variants follow durable lifecycle order and retain complete serializable checkpoints"
 )]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub enum WorkflowFact {
     /// The immutable initial continuation state was accepted for this stream.
@@ -136,6 +215,8 @@ pub enum WorkflowFact {
         state: HarnessState,
         /// Receipt for the successfully observed effect.
         receipt: EffectReceiptId,
+        /// Workflow-owned ready continuation for the next owner turn.
+        successor: HarnessState,
     },
     /// The workflow reached a typed stopped terminal state.
     WorkflowStopped {
@@ -146,21 +227,127 @@ pub enum WorkflowFact {
     },
 }
 
-/// Durable `EventCore` event for one native workflow stream.
+/// Deserialization-only compatibility shape for retained workflow facts.
 #[expect(
     clippy::arbitrary_source_item_ordering,
-    reason = "stream then fact is the durable-envelope order"
+    reason = "the compatibility wire mirrors the durable fact lifecycle order exactly"
 )]
+#[derive(Deserialize)]
+enum WorkflowFactWire {
+    /// The immutable initial continuation state was accepted for this stream.
+    WorkflowInitialized {
+        /// Pure state from which the trampoline begins.
+        state: HarnessState,
+    },
+    /// The core requested exactly one typed effect for the shell to execute.
+    EffectRequested {
+        /// Checkpoint to resume only after an observation is durable.
+        state: HarnessState,
+        /// The closed effect envelope carrying complete provenance.
+        effect: TiberEffect,
+    },
+    /// The shell durably recorded its result for one requested effect.
+    EffectObserved {
+        /// The result that a later request command may feed to the pure core.
+        observation: EffectObservation,
+    },
+    /// The workflow reached a successful terminal state.
+    WorkflowCompleted {
+        /// Terminal pure state.
+        state: HarnessState,
+        /// Receipt for the successfully observed effect.
+        receipt: EffectReceiptId,
+        /// Successor added after the original durable schema.
+        #[serde(default)]
+        successor: Option<HarnessState>,
+    },
+    /// The workflow reached a typed stopped terminal state.
+    WorkflowStopped {
+        /// Terminal pure state.
+        state: HarnessState,
+        /// Typed reason the core declined to continue.
+        error: HarnessError,
+    },
+}
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Serde's default in-place deserialization correctly delegates to this compatibility decoder"
+)]
+impl<'de> Deserialize<'de> for WorkflowFact {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match WorkflowFactWire::deserialize(deserializer)? {
+            WorkflowFactWire::WorkflowInitialized { state } => {
+                Ok(Self::WorkflowInitialized { state })
+            }
+            WorkflowFactWire::EffectRequested { state, effect } => {
+                Ok(Self::EffectRequested { state, effect })
+            }
+            WorkflowFactWire::EffectObserved { observation } => {
+                Ok(Self::EffectObserved { observation })
+            }
+            WorkflowFactWire::WorkflowCompleted {
+                state,
+                receipt,
+                successor: retained_successor,
+            } => {
+                let successor = retained_successor.map_or_else(
+                    || {
+                        continue_after_completion(&state)
+                            .map_err(|error| D::Error::custom(error.code()))
+                    },
+                    Ok,
+                )?;
+                Ok(Self::WorkflowCompleted {
+                    state,
+                    receipt,
+                    successor,
+                })
+            }
+            WorkflowFactWire::WorkflowStopped { state, error } => {
+                Ok(Self::WorkflowStopped { state, error })
+            }
+        }
+    }
+}
+
+/// Durable `EventCore` event for one native workflow stream.
 #[derive(Clone, Debug, Deserialize, ModelEvent, Serialize)]
-struct WorkflowEvent {
-    /// Owning workflow stream.
-    stream: StreamId,
+#[non_exhaustive]
+pub struct WorkflowEvent {
     /// Immutable business fact.
     fact: WorkflowFact,
+    /// Owning workflow stream.
+    stream: StreamId,
+}
+
+impl WorkflowEvent {
+    /// Returns the immutable business fact.
+    #[must_use]
+    #[inline]
+    pub const fn fact(&self) -> &WorkflowFact {
+        &self.fact
+    }
+
+    /// Returns the owning workflow stream.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::same_name_method,
+        reason = "the public durable-envelope accessor intentionally matches EventCore's required stream_id contract"
+    )]
+    pub const fn stream_id(&self) -> &StreamId {
+        &self.stream
+    }
 }
 
 #[expect(
     clippy::implicit_return,
+    clippy::missing_inline_in_public_items,
     reason = "EventCore's Event contract fixes method names while the durable stream accessor is primary"
 )]
 impl Event for WorkflowEvent {
@@ -227,6 +414,43 @@ impl WorkflowEventView {
         &self.stream
     }
 }
+
+/// Opaque checked initialization accepted by the signed publication adapter.
+pub struct WorkflowInitializationPublication {
+    /// Exact streams whose versions fence the initialization decision.
+    consistency_streams: Vec<StreamId>,
+    /// Checked durable workflow event.
+    event: WorkflowEvent,
+    /// Completed predecessor effect for a successor initialization.
+    predecessor_effect_id: Option<EffectId>,
+}
+
+impl WorkflowInitializationPublication {
+    /// Borrows the checked event for composing its first effect request.
+    #[must_use]
+    #[inline]
+    pub const fn event(&self) -> &WorkflowEvent {
+        &self.event
+    }
+
+    /// Transfers the checked fact and exact consistency streams.
+    #[must_use]
+    #[inline]
+    pub fn into_event_and_consistency_streams(self) -> (WorkflowEvent, Vec<StreamId>) {
+        (self.event, self.consistency_streams)
+    }
+
+    /// Borrows the predecessor identity carried by successor authority.
+    #[must_use]
+    #[inline]
+    pub const fn predecessor_effect_id(&self) -> Option<&EffectId> {
+        self.predecessor_effect_id.as_ref()
+    }
+}
+
+workflow_publication!(WorkflowEffectRequestPublication);
+workflow_publication!(WorkflowObservationPublication);
+workflow_publication!(WorkflowAdvancePublication);
 
 #[expect(
     clippy::arbitrary_source_item_ordering,
@@ -785,6 +1009,285 @@ impl ModelCommandLogic for RequestNextEffect {
     }
 }
 
+#[derive(ModelInput)]
+/// Origin streams accepted by successor initialization.
+struct InitializeSuccessorWorkflowRequest {
+    /// Completed predecessor workflow whose terminal fact grants authority.
+    #[model(origin)]
+    predecessor: WorkflowStream,
+    /// Exact effect-bound stream receiving the derived successor state.
+    #[model(origin)]
+    successor: WorkflowStream,
+}
+
+#[derive(ModelCommand)]
+/// Initializes only the exact successor retained by a completed workflow.
+struct InitializeSuccessorWorkflow {
+    /// Completed predecessor workflow stream read by the decision.
+    #[stream]
+    predecessor: WorkflowStream,
+    /// Exact effect-bound successor stream receiving initialization.
+    #[stream]
+    successor: WorkflowStream,
+}
+
+mapping! {
+    InitializeSuccessorRequestToPredecessor:
+        InitializeSuccessorWorkflowRequest.predecessor => InitializeSuccessorWorkflow.predecessor
+        using clone;
+}
+mapping! {
+    InitializeSuccessorRequestToSuccessor:
+        InitializeSuccessorWorkflowRequest.successor => InitializeSuccessorWorkflow.successor
+        using clone;
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the successor-authority fold follows the predecessor workflow lifecycle"
+)]
+#[derive(ModelState)]
+/// Replay state needed to derive one exact successor initialization.
+struct InitializeSuccessorWorkflowState {
+    /// Whether predecessor initialization was accepted.
+    #[model(default)]
+    initialized: bool,
+    /// Original ready continuation of the predecessor.
+    #[model(default)]
+    initial_state: Option<HarnessState>,
+    /// Waiting checkpoint attached to the predecessor request.
+    #[model(default)]
+    pending_state: Option<HarnessState>,
+    /// Identity of the predecessor's outstanding effect.
+    #[model(default)]
+    pending_effect_id: Option<EffectId>,
+    /// Durable outcome for the predecessor effect.
+    #[model(default)]
+    observation: Option<EffectObservation>,
+    /// Exact successor retained by a valid completion fact.
+    #[model(default)]
+    successor_state: Option<HarnessState>,
+    /// Permanent retained-history rejection fence.
+    #[model(default)]
+    malformed_history: bool,
+    /// Whether a terminal predecessor fact was encountered.
+    #[model(default)]
+    terminal: bool,
+}
+
+#[derive(Clone)]
+/// Closed context consumed by the successor initialization mapper.
+struct InitializeSuccessorWorkflowContext {
+    /// Permanent retained-history rejection fence.
+    malformed_history: bool,
+    /// Exact ready successor derived from retained completion.
+    successor_state: Option<HarnessState>,
+    /// Whether the predecessor reached one valid terminal fact.
+    terminal: bool,
+}
+
+#[derive(ModelOutput)]
+/// Successor initialization decision projection.
+struct InitializeSuccessorWorkflowDecision {
+    /// Complete folded authority needed to emit initialization.
+    context: InitializeSuccessorWorkflowContext,
+}
+
+mapping! {
+    InitializeSuccessorStateToDecision:
+        (InitializeSuccessorWorkflowState.initialized, InitializeSuccessorWorkflowState.initial_state, InitializeSuccessorWorkflowState.pending_state, InitializeSuccessorWorkflowState.pending_effect_id, InitializeSuccessorWorkflowState.observation, InitializeSuccessorWorkflowState.successor_state, InitializeSuccessorWorkflowState.malformed_history, InitializeSuccessorWorkflowState.terminal) => InitializeSuccessorWorkflowDecision.context
+        using successor_initialization_context;
+}
+mapping! {
+    InitializeSuccessorStreamToEvent:
+        InitializeSuccessorWorkflow.successor => WorkflowEvent.stream
+        using workflow_stream;
+}
+mapping! {
+    InitializeSuccessorToFact:
+        (InitializeSuccessorWorkflow.predecessor, InitializeSuccessorWorkflow.successor, InitializeSuccessorWorkflowDecision.context) => WorkflowEvent.fact
+        using try successor_initialized_fact, error = CommandError;
+}
+
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    clippy::implicit_return,
+    clippy::missing_trait_methods,
+    clippy::pattern_type_mismatch,
+    clippy::question_mark_used,
+    clippy::shadow_unrelated,
+    reason = "EventCore fixes command-trait signatures while the fold validates one exact completed predecessor"
+)]
+impl ModelCommandLogic for InitializeSuccessorWorkflow {
+    type Event = WorkflowEvent;
+    type State = InitializeSuccessorWorkflowState;
+
+    fn evolve(&self, state: Modeled<Self::State>, event: &Self::Event) -> Modeled<Self::State> {
+        let view = WorkflowEventView::from_event(event);
+        let event_stream_matches = view.stream() == self.predecessor.as_stream_id();
+        let mut folded = state.into_inner();
+        match view.fact() {
+            WorkflowFact::WorkflowInitialized { state } => {
+                let valid = event_stream_matches
+                    && !folded.malformed_history
+                    && !folded.initialized
+                    && !folded.terminal
+                    && initialization_is_well_formed(&self.predecessor, state);
+                folded.malformed_history |= !valid;
+                if valid {
+                    folded.initialized = true;
+                    folded.initial_state = Some(state.clone());
+                }
+            }
+            WorkflowFact::EffectRequested { state, effect } => {
+                let valid = event_stream_matches
+                    && !folded.malformed_history
+                    && folded.initialized
+                    && !folded.terminal
+                    && folded.pending_state.is_none()
+                    && folded.pending_effect_id.is_none()
+                    && folded.observation.is_none()
+                    && effect_request_is_well_formed(
+                        &self.predecessor,
+                        folded.initial_state.as_ref(),
+                        state,
+                        effect,
+                    );
+                folded.malformed_history |= !valid;
+                if valid {
+                    folded.pending_state = Some(state.clone());
+                    folded.pending_effect_id = Some(effect_id(effect));
+                }
+            }
+            WorkflowFact::EffectObserved { observation } => {
+                let matching_pending = folded
+                    .pending_effect_id
+                    .as_ref()
+                    .is_some_and(|pending| pending == observation.effect_id());
+                let valid = event_stream_matches
+                    && !folded.malformed_history
+                    && folded.initialized
+                    && !folded.terminal
+                    && folded.observation.is_none()
+                    && matching_pending;
+                folded.malformed_history |= !valid;
+                if valid {
+                    folded.observation = Some(observation.clone());
+                }
+            }
+            terminal @ (WorkflowFact::WorkflowCompleted { .. }
+            | WorkflowFact::WorkflowStopped { .. }) => {
+                let valid = event_stream_matches
+                    && !folded.malformed_history
+                    && folded.initialized
+                    && !folded.terminal
+                    && terminal_fact_is_well_formed(
+                        folded.pending_state.as_ref(),
+                        folded.observation.as_ref(),
+                        terminal,
+                    );
+                folded.malformed_history |= !valid;
+                folded.terminal = true;
+                if valid && let WorkflowFact::WorkflowCompleted { successor, .. } = terminal {
+                    folded.successor_state = Some(successor.clone());
+                }
+            }
+        }
+        Modeled::from_built(folded)
+    }
+
+    fn decide(
+        &self,
+        state: Modeled<Self::State>,
+    ) -> Result<ModeledEvents<Self::Event>, CommandError> {
+        let decision = InitializeSuccessorWorkflowDecision::model_builder()
+            .context(InitializeSuccessorStateToDecision::apply((
+                state.as_ref(),
+                state.as_ref(),
+                state.as_ref(),
+                state.as_ref(),
+                state.as_ref(),
+                state.as_ref(),
+                state.as_ref(),
+                state.as_ref(),
+            )))
+            .build();
+        Ok(ModeledEvents::one(
+            WorkflowEvent::model_builder()
+                .stream(InitializeSuccessorStreamToEvent::apply(self))
+                .fact(InitializeSuccessorToFact::apply((
+                    self,
+                    self,
+                    decision.as_ref(),
+                ))?)
+                .build(),
+        ))
+    }
+}
+
+/// Projects the complete predecessor fold into successor-initialization authority.
+#[expect(
+    clippy::ref_option,
+    clippy::single_call_fn,
+    clippy::too_many_arguments,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "the checked-model mapper consumes every narrow predecessor replay field before projecting successor authority"
+)]
+fn successor_initialization_context(
+    initialized: &bool,
+    initial_state: &Option<HarnessState>,
+    pending_state: &Option<HarnessState>,
+    pending_effect_id: &Option<EffectId>,
+    observation: &Option<EffectObservation>,
+    successor_state: &Option<HarnessState>,
+    malformed_history: &bool,
+    terminal: &bool,
+) -> InitializeSuccessorWorkflowContext {
+    let structurally_complete = *initialized
+        && initial_state.is_some()
+        && pending_state.is_some()
+        && pending_effect_id.is_some()
+        && observation.is_some();
+    InitializeSuccessorWorkflowContext {
+        malformed_history: *malformed_history || !structurally_complete,
+        successor_state: successor_state.clone(),
+        terminal: *terminal,
+    }
+}
+
+/// Builds the sole successor initialization fact from validated predecessor authority.
+#[expect(
+    clippy::implicit_return,
+    clippy::question_mark_used,
+    clippy::single_call_fn,
+    reason = "the checked mapper emits only the completed predecessor's exact ready successor"
+)]
+fn successor_initialized_fact(
+    predecessor: &WorkflowStream,
+    successor: &WorkflowStream,
+    context: &InitializeSuccessorWorkflowContext,
+) -> Result<WorkflowFact, CommandError> {
+    if context.malformed_history || !context.terminal {
+        return Err(command_error("workflow_successor_history_invalid"));
+    }
+    let state = context
+        .successor_state
+        .as_ref()
+        .ok_or_else(|| command_error("workflow_successor_not_completed"))?;
+    let predecessor_effect_id = predecessor
+        .effect_id
+        .as_ref()
+        .ok_or_else(|| command_error("workflow_successor_predecessor_not_effect_bound"))?;
+    if state.initial_effect().effect_id() == predecessor_effect_id
+        || !initialization_is_well_formed(successor, state)
+    {
+        return Err(command_error("workflow_successor_mismatch"));
+    }
+    Ok(WorkflowFact::WorkflowInitialized {
+        state: state.clone(),
+    })
+}
+
 /// Converts a stable workflow validation code into `EventCore`'s command error.
 #[expect(
     clippy::implicit_return,
@@ -836,6 +1339,10 @@ fn effect_request_is_well_formed(
     let TiberEffect::Infer(inference) = effect;
     state.phase() == HarnessPhase::WaitingForInference
         && inference.session_id() == &stream_session
+        && stream
+            .effect_id
+            .as_ref()
+            .is_none_or(|effect_id| inference.effect_id() == effect_id)
         && bound_initial_state.initial_effect() == state.initial_effect()
         && inference == state.initial_effect()
 }
@@ -849,7 +1356,12 @@ fn initialization_is_well_formed(stream: &WorkflowStream, state: &HarnessState) 
     let Ok(stream_session) = stream.session() else {
         return false;
     };
-    state.phase() == HarnessPhase::Ready && state.initial_effect().session_id() == &stream_session
+    state.phase() == HarnessPhase::Ready
+        && state.initial_effect().session_id() == &stream_session
+        && stream
+            .effect_id
+            .as_ref()
+            .is_none_or(|effect_id| state.initial_effect().effect_id() == effect_id)
 }
 
 /// Validates that a retained terminal fact exactly matches the pure core step.
@@ -872,7 +1384,10 @@ fn terminal_fact_is_well_formed(
             WorkflowFact::WorkflowCompleted {
                 state: fact_state,
                 receipt: fact_receipt,
-            } if state == *fact_state && receipt == *fact_receipt
+                successor,
+            } if state == *fact_state
+                && receipt == *fact_receipt
+                && continue_after_completion(&state).is_ok_and(|expected| expected == *successor)
         ),
         TrampolineStep::Stop { state, error } => matches!(
             fact,
@@ -928,6 +1443,13 @@ fn initialized_fact(
         .map_err(|_source| command_error("workflow_invalid_stream"))?;
     if state.initial_effect().session_id() != &stream_session {
         return Err(command_error("workflow_initial_state_session_mismatch"));
+    }
+    if stream
+        .effect_id
+        .as_ref()
+        .is_some_and(|effect_id| state.initial_effect().effect_id() != effect_id)
+    {
+        return Err(command_error("workflow_initial_state_effect_mismatch"));
     }
     Ok(WorkflowFact::WorkflowInitialized {
         state: state.clone(),
@@ -1065,9 +1587,12 @@ fn fact_from_step(
 ) -> Result<WorkflowFact, CommandError> {
     match step {
         TrampolineStep::Continue { state, effect } => checked_effect_request(stream, state, effect),
-        TrampolineStep::Complete { state, receipt } => {
-            Ok(WorkflowFact::WorkflowCompleted { state, receipt })
-        }
+        TrampolineStep::Complete { state, receipt } => Ok(WorkflowFact::WorkflowCompleted {
+            successor: continue_after_completion(&state)
+                .map_err(|error| command_error(error.code()))?,
+            state,
+            receipt,
+        }),
         TrampolineStep::Stop { state, error } => Ok(WorkflowFact::WorkflowStopped { state, error }),
     }
 }
@@ -1124,10 +1649,17 @@ fn next_effect_fact(
     clippy::implicit_return,
     reason = "the public factory directly builds the checked command from its parsed request"
 )]
-pub fn initialize_workflow(
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "the shipping workflow boundary has one initialization construction site"
+    )
+)]
+fn initialize_workflow(
     stream: WorkflowStream,
     state: HarnessState,
-) -> impl eventcore::CommandLogic {
+) -> ModeledCommand<InitializeWorkflow> {
     let request = InitializeWorkflowRequest::model_builder()
         .stream(stream)
         .state(state)
@@ -1135,6 +1667,35 @@ pub fn initialize_workflow(
     InitializeWorkflow::model_builder()
         .stream(InitializeWorkflowRequestToStream::apply(request.as_ref()))
         .state(InitializeWorkflowRequestToState::apply(request.as_ref()))
+        .build()
+}
+
+/// Builds the checked command that derives an exact completed-workflow successor.
+#[must_use]
+#[inline]
+#[expect(
+    clippy::implicit_return,
+    reason = "the factory maps only its two effect-bound stream origins into the checked command"
+)]
+#[expect(
+    clippy::single_call_fn,
+    reason = "the continuation boundary has one successor-command construction site"
+)]
+fn initialize_successor_workflow(
+    predecessor: WorkflowStream,
+    successor: WorkflowStream,
+) -> ModeledCommand<InitializeSuccessorWorkflow> {
+    let request = InitializeSuccessorWorkflowRequest::model_builder()
+        .predecessor(predecessor)
+        .successor(successor)
+        .build();
+    InitializeSuccessorWorkflow::model_builder()
+        .predecessor(InitializeSuccessorRequestToPredecessor::apply(
+            request.as_ref(),
+        ))
+        .successor(InitializeSuccessorRequestToSuccessor::apply(
+            request.as_ref(),
+        ))
         .build()
 }
 
@@ -1149,10 +1710,17 @@ pub fn initialize_workflow(
     clippy::implicit_return,
     reason = "the public factory directly builds the checked command from its parsed request"
 )]
-pub fn record_observation(
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "the shipping workflow boundary has one observation construction site"
+    )
+)]
+fn record_observation(
     stream: WorkflowStream,
     observation: EffectObservation,
-) -> impl eventcore::CommandLogic {
+) -> ModeledCommand<RecordObservation> {
     let request = RecordObservationRequest::model_builder()
         .stream(stream)
         .observation(observation)
@@ -1174,7 +1742,7 @@ pub fn record_observation(
     clippy::implicit_return,
     reason = "the public factory directly builds the checked stream-only command"
 )]
-pub fn request_next_effect(stream: WorkflowStream) -> impl eventcore::CommandLogic {
+fn request_next_effect(stream: WorkflowStream) -> ModeledCommand<RequestNextEffect> {
     let request = RequestNextEffectRequest::model_builder()
         .stream(stream)
         .build();
@@ -1183,9 +1751,156 @@ pub fn request_next_effect(stream: WorkflowStream) -> impl eventcore::CommandLog
         .build()
 }
 
+/// Decides one workflow initialization fact from empty execution history.
+///
+/// # Errors
+///
+/// Returns [`WorkflowServiceError`] when the checked initialization command
+/// cannot emit one exact fact.
+#[inline]
+pub fn decide_initialize_workflow(
+    stream: WorkflowStream,
+    state: HarnessState,
+) -> Result<WorkflowInitializationPublication, WorkflowServiceError> {
+    let consistency = stream.id.clone();
+    let command = initialize_workflow(stream, state);
+    let events: Vec<WorkflowEvent> = CommandLogic::handle(&command, Modeled::default())
+        .map_err(|_source| WorkflowServiceError::ModeledCommandFailed)?
+        .into();
+    let [event] = events
+        .try_into()
+        .map_err(|_events| WorkflowServiceError::InvalidModeledEmission)?;
+    Ok(WorkflowInitializationPublication {
+        event,
+        consistency_streams: vec![consistency],
+        predecessor_effect_id: None,
+    })
+}
+
+/// Derives initialization for the exact successor retained by durable completion.
+///
+/// # Errors
+///
+/// Returns [`WorkflowServiceError`] when the predecessor history is malformed,
+/// stopped, incomplete, or names a different successor effect.
+#[inline]
+pub fn decide_initialize_successor_workflow(
+    history: &[WorkflowEvent],
+    predecessor: WorkflowStream,
+    successor: WorkflowStream,
+) -> Result<WorkflowInitializationPublication, WorkflowServiceError> {
+    let predecessor_consistency = predecessor.id.clone();
+    let successor_consistency = successor.id.clone();
+    let predecessor_effect_id = predecessor.effect_id.clone();
+    let command = initialize_successor_workflow(predecessor, successor);
+    let mut state: Modeled<InitializeSuccessorWorkflowState> = Modeled::default();
+    for event in history {
+        state = ModelCommandLogic::evolve(command.as_ref(), state, event);
+    }
+    let events: Vec<WorkflowEvent> = CommandLogic::handle(&command, state)
+        .map_err(|_source| WorkflowServiceError::ModeledCommandFailed)?
+        .into();
+    let [event] = events
+        .try_into()
+        .map_err(|_events| WorkflowServiceError::InvalidModeledEmission)?;
+    Ok(WorkflowInitializationPublication {
+        event,
+        consistency_streams: vec![predecessor_consistency, successor_consistency],
+        predecessor_effect_id,
+    })
+}
+
+/// Decides the exact first effect requested by one initialized execution.
+///
+/// # Errors
+///
+/// Returns [`WorkflowServiceError`] when retained history cannot authorize one
+/// exact next-effect fact.
+#[inline]
+pub fn decide_request_next_effect(
+    history: &[WorkflowEvent],
+    stream: WorkflowStream,
+) -> Result<WorkflowEffectRequestPublication, WorkflowServiceError> {
+    let consistency = stream.id.clone();
+    let command = request_next_effect(stream);
+    let mut state: Modeled<RequestNextEffectState> = Modeled::default();
+    for event in history {
+        state = ModelCommandLogic::evolve(command.as_ref(), state, event);
+    }
+    let events: Vec<WorkflowEvent> = CommandLogic::handle(&command, state)
+        .map_err(|_source| WorkflowServiceError::ModeledCommandFailed)?
+        .into();
+    let [event] = events
+        .try_into()
+        .map_err(|_events| WorkflowServiceError::InvalidModeledEmission)?;
+    Ok(WorkflowEffectRequestPublication {
+        event,
+        consistency_streams: [consistency],
+    })
+}
+
+/// Decides one durable shell observation for its pending effect.
+///
+/// # Errors
+///
+/// Returns [`WorkflowServiceError`] when retained history does not authorize
+/// the supplied observation.
+#[inline]
+pub fn decide_record_observation(
+    history: &[WorkflowEvent],
+    stream: WorkflowStream,
+    observation: EffectObservation,
+) -> Result<WorkflowObservationPublication, WorkflowServiceError> {
+    let consistency = stream.id.clone();
+    let command = record_observation(stream, observation);
+    let mut state: Modeled<RecordObservationState> = Modeled::default();
+    for event in history {
+        state = ModelCommandLogic::evolve(command.as_ref(), state, event);
+    }
+    let events: Vec<WorkflowEvent> = CommandLogic::handle(&command, state)
+        .map_err(|_source| WorkflowServiceError::ModeledCommandFailed)?
+        .into();
+    let [event] = events
+        .try_into()
+        .map_err(|_events| WorkflowServiceError::InvalidModeledEmission)?;
+    Ok(WorkflowObservationPublication {
+        event,
+        consistency_streams: [consistency],
+    })
+}
+
+/// Advances an observed execution to its deterministic terminal fact.
+///
+/// # Errors
+///
+/// Returns [`WorkflowServiceError`] when retained history cannot authorize one
+/// deterministic terminal fact.
+#[inline]
+pub fn decide_advance_workflow(
+    history: &[WorkflowEvent],
+    stream: WorkflowStream,
+) -> Result<WorkflowAdvancePublication, WorkflowServiceError> {
+    let consistency = stream.id.clone();
+    let command = request_next_effect(stream);
+    let mut state: Modeled<RequestNextEffectState> = Modeled::default();
+    for event in history {
+        state = ModelCommandLogic::evolve(command.as_ref(), state, event);
+    }
+    let events: Vec<WorkflowEvent> = CommandLogic::handle(&command, state)
+        .map_err(|_source| WorkflowServiceError::ModeledCommandFailed)?
+        .into();
+    let [event] = events
+        .try_into()
+        .map_err(|_events| WorkflowServiceError::InvalidModeledEmission)?;
+    Ok(WorkflowAdvancePublication {
+        event,
+        consistency_streams: [consistency],
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use core::fmt;
+    use core::{fmt, slice};
 
     use eventcore::model::{CheckStatus, StreamIdentity as _, check};
     use eventcore::{RetryPolicy, execute};
@@ -1200,6 +1915,128 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    #[expect(
+        clippy::absolute_paths,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::pattern_type_mismatch,
+        reason = "the closed-publication test uses explicit fixture setup and verifies its one modeled terminal fact"
+    )]
+    fn closed_publications_drive_one_complete_effect_execution() {
+        let stream = workflow_stream();
+        let initialized = decide_initialize_workflow(stream.clone(), workflow_state())
+            .expect("initialization modeled")
+            .into_event_and_consistency_streams()
+            .0;
+        let requested =
+            decide_request_next_effect(core::slice::from_ref(&initialized), stream.clone())
+                .expect("request modeled")
+                .into_event_and_consistency_streams()
+                .0;
+        assert!(matches!(
+            requested.fact(),
+            WorkflowFact::EffectRequested { .. }
+        ));
+        let observed = decide_record_observation(
+            &[initialized.clone(), requested.clone()],
+            stream.clone(),
+            success_observation("effect-1"),
+        )
+        .expect("observation modeled")
+        .into_event_and_consistency_streams()
+        .0;
+        let completed = decide_advance_workflow(&[initialized, requested, observed], stream)
+            .expect("advance modeled")
+            .into_event_and_consistency_streams()
+            .0;
+        let WorkflowFact::WorkflowCompleted { successor, .. } = completed.fact() else {
+            panic!("successful advance must preserve its workflow-owned successor");
+        };
+        assert_eq!(successor.phase(), HarnessPhase::Ready);
+        assert_ne!(
+            successor.initial_effect().effect_id(),
+            workflow_state().initial_effect().effect_id()
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::pattern_type_mismatch,
+        reason = "the baseline compatibility fixture must expose deserialization or replay rejection exactly"
+    )]
+    fn baseline_completion_without_successor_replays_with_derived_authority() {
+        let predecessor =
+            WorkflowStream::for_effect(&initial_effect()).expect("predecessor stream");
+        let initialized = decide_initialize_workflow(predecessor.clone(), workflow_state())
+            .expect("initialization modeled")
+            .into_event_and_consistency_streams()
+            .0;
+        let requested =
+            decide_request_next_effect(slice::from_ref(&initialized), predecessor.clone())
+                .expect("request modeled")
+                .into_event_and_consistency_streams()
+                .0;
+        let observed = decide_record_observation(
+            &[initialized.clone(), requested.clone()],
+            predecessor.clone(),
+            success_observation("effect-1"),
+        )
+        .expect("observation modeled")
+        .into_event_and_consistency_streams()
+        .0;
+        let completed = decide_advance_workflow(
+            &[initialized.clone(), requested.clone(), observed.clone()],
+            predecessor.clone(),
+        )
+        .expect("advance modeled")
+        .into_event_and_consistency_streams()
+        .0;
+        let WorkflowFact::WorkflowCompleted { successor, .. } = completed.fact() else {
+            panic!("successful advance must produce a successor");
+        };
+        let expected_successor = successor.clone();
+        let current_completion = serde_json::to_value(&completed).expect("completion serializes");
+        let serialized_successor = current_completion
+            .get("fact")
+            .and_then(|fact| fact.get("WorkflowCompleted"))
+            .and_then(|fact| fact.get("successor"));
+        assert!(
+            serialized_successor.is_some_and(serde_json::Value::is_object),
+            "new completion facts must persist workflow-owned successor authority"
+        );
+        let baseline_fact = serde_json::from_str(
+            r#"{"WorkflowCompleted":{"state":{"initial_effect":{"agent_id":"agent-1","assignment_epoch":1,"assignment_id":"assignment-1","assignment_scope":"scope-1","attempt_number":1,"context_receipt_id":"context-1","deadline_milliseconds":1000,"effect_id":"effect-1","idempotency_key":"idempotency-1","policy_decision_id":"policy-1","session_id":"session-1","workflow_id":"workflow-1"},"phase":"Completed"},"receipt":"receipt-1"}}"#,
+        )
+        .expect("the c692eeba completion fact schema remains readable");
+        let baseline_completion = WorkflowEvent {
+            fact: baseline_fact,
+            stream: predecessor.as_stream_id().clone(),
+        };
+        let history = [initialized, requested, observed, baseline_completion];
+        let successor_stream = WorkflowStream::for_effect(expected_successor.initial_effect())
+            .expect("successor stream");
+
+        let publication =
+            decide_initialize_successor_workflow(&history, predecessor, successor_stream)
+                .expect("baseline completion authorizes its deterministic successor");
+        assert_eq!(
+            publication.event().fact(),
+            &WorkflowFact::WorkflowInitialized {
+                state: expected_successor,
+            }
+        );
+    }
+
+    #[test]
+    fn per_effect_stream_rejects_a_different_same_session_effect() {
+        let stream = WorkflowStream::for_effect(&effect_two()).expect("effect stream");
+
+        assert!(decide_initialize_workflow(stream, workflow_state()).is_err());
+    }
 
     #[expect(
         clippy::implicit_return,
@@ -1229,6 +2066,28 @@ mod tests {
             parsed("effect-1", EffectId::parse),
             parsed("idempotency-1", IdempotencyKey::parse),
             DeadlineMilliseconds::parse(1_000).expect("fixture deadline is valid"),
+        )
+    }
+
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the one-purpose alternate-effect fixture isolates same-session stream rejection"
+    )]
+    fn effect_two() -> InferEffect {
+        let base = initial_effect();
+        InferEffect::new(
+            base.session_id().clone(),
+            base.agent_id().clone(),
+            base.workflow_id().clone(),
+            base.assignment_id().clone(),
+            base.assignment_scope().clone(),
+            base.assignment_epoch(),
+            base.attempt_number(),
+            base.context_receipt_id().clone(),
+            base.policy_decision_id().clone(),
+            parsed("effect-2", EffectId::parse),
+            parsed("idempotency-2", IdempotencyKey::parse),
+            base.deadline_milliseconds(),
         )
     }
 
@@ -1617,6 +2476,7 @@ mod tests {
                 WorkflowFact::WorkflowCompleted {
                     state: waiting,
                     receipt: parsed("bogus-receipt", EffectReceiptId::parse),
+                    successor: HarnessState::new(initial_effect()),
                 },
             ],
         );
@@ -1669,6 +2529,7 @@ mod tests {
                 WorkflowFact::WorkflowCompleted {
                     state: complete_state,
                     receipt: parsed("wrong-receipt", EffectReceiptId::parse),
+                    successor: HarnessState::new(initial_effect()),
                 },
             ],
         );

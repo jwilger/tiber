@@ -2184,11 +2184,9 @@ impl RmcpClient {
                 return Err(bind_failure(error));
             }
         };
-        let reconciliation_result = if let Ok(ServerResult::CallToolResult(call_result)) =
+        let Ok(ServerResult::CallToolResult(reconciliation_result)) =
             self.request(request, &request_options, operation).await
-        {
-            call_result
-        } else {
+        else {
             self.close_inner().await;
             return Ok(authorization.bind_outcome(ReconciliationOutcome::StillUnknown));
         };

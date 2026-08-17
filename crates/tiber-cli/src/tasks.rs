@@ -1163,6 +1163,17 @@ fn start_task(repository: &Path, reference: &TaskReference) -> Result<String, Ta
     ))
 }
 
+/// Activates one exact task identity through the same native modeled boundary as the CLI.
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "rustfmt canonicalizes the module-relative visibility to pub(super)"
+)]
+pub(super) fn start_task_by_id(repository: &Path, task: &TaskId) -> Result<(), TaskCliError> {
+    let reference = TaskReference::parse(task.as_str()).map_err(TaskCliError::Projection)?;
+    let _owner_output = start_task(repository, &reference)?;
+    Ok(())
+}
+
 /// Parses OS arguments once at the command boundary.
 fn parse_arguments(arguments: impl Iterator<Item = OsString>) -> Result<Vec<String>, TaskCliError> {
     arguments
@@ -1189,7 +1200,11 @@ fn load_projection(repository: &Path) -> Result<TaskBoardProjection, TaskCliErro
     clippy::question_mark_used,
     reason = "the command boundary preserves a matching immutable history and revision through typed source failures"
 )]
-fn load_history_and_revision(
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "rustfmt canonicalizes the module-relative visibility to pub(super)"
+)]
+pub(super) fn load_history_and_revision(
     repository: &Path,
 ) -> Result<(TaskHistory, TiberRevision), TaskCliError> {
     let store = TiberEventStore::open(repository).map_err(TaskCliError::Store)?;
@@ -1442,7 +1457,11 @@ fn corrected_subtask_preimage(
 /// rather than sorting independent `EventCore` projection cursors. This
 /// deliberately excludes unrelated legacy workflow streams that share
 /// `tiber.domain_event`.
-fn read_history(store: &TiberEventStore) -> Result<TaskHistory, TaskCliError> {
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "rustfmt canonicalizes the module-relative visibility to pub(super)"
+)]
+pub(super) fn read_history(store: &TiberEventStore) -> Result<TaskHistory, TaskCliError> {
     let stream_patterns = task_history_stream_patterns()?;
     let reader = store
         .verified_transaction_reader::<TaskEvent>(&stream_patterns)

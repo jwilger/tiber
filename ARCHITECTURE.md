@@ -174,13 +174,19 @@ API-key-mode setup is a direct inherited-stdin handoff to the isolated Codex
 CLI, followed by app-server account-state verification; it is never an
 app-server request carrying credential data. The deterministic fake-server
 contract covers those behaviors.
-The initial TUI slice renders those typed events and emits only typed composer
-intents. A cancellable inference worker keeps terminal input responsive during
-turn startup and streaming; durable conversation state and protocol-level turn
-interruption remain subsequent vertical slices.
+The TUI renders those typed events and emits only typed composer intents. A
+cancellable inference worker keeps terminal input responsive during turn
+startup and streaming. The CLI restores its projection from signed session
+facts and interprets only a workflow-owned durable inference request.
 The app-server remains a transport-only boundary: it is not an
-`tiber-workflow-service` effect runner, and its tool requests remain inert
-structured data. No CLI or TUI workflow runner is connected in this slice.
+independent authority, and its tool requests remain inert structured data. The
+CLI runner stages the prompt plus workflow initialization/effect request in its
+private disposable EventCore store, then publishes one signed Git candidate as
+the atomic authority change before dispatch. Intermediate `append_events`
+results are never repository authority. Observation and workflow receipt are
+staged the same way and become authoritative through one signed candidate;
+the deterministic terminal advance is a later exact-revision publication made
+before presenting completion.
 
 ## Native workflow and Tiber Tasks
 
@@ -227,9 +233,10 @@ the native surface. When retained lifecycle state is already `Done` but strict
 board order still names the task, the command publishes only the closed order
 repair and never re-emits a transition. Every publication declares only the
 board and addressed task stream as its consistency boundary. Publication
-reconciliation, workflow scheduling, effect interpretation, durable interactive
-session binding, and app-server/CLI/TUI workflow-runner integration remain
-subsequent vertical slices. Internal actions never call legacy MCP or shell
+Broader workflow scheduling remains a subsequent vertical slice. Durable
+interactive session binding and the closed app-server/CLI/TUI inference runner
+are implemented; an uncertain dispatched effect is exposed as `reconcile` and
+is never automatically replayed. Internal actions never call legacy MCP or shell
 back into the `tiber` executable.
 
 The same closed publication boundary admits one exceptional history-repair
