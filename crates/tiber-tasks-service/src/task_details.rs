@@ -1,19 +1,5 @@
 //! Modeled decision for replacing one task's editable details.
 
-#![expect(
-    clippy::arbitrary_source_item_ordering,
-    clippy::implicit_return,
-    clippy::missing_trait_methods,
-    clippy::pattern_type_mismatch,
-    clippy::question_mark_used,
-    clippy::shadow_reuse,
-    clippy::shadow_unrelated,
-    clippy::single_call_fn,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::wildcard_enum_match_arm,
-    reason = "the command-local EventCore graph follows fold, modeled provenance, and publication flow; its private graph nodes and exhaustive-forward-compatible event fold remain confined to this module"
-)]
-
 use super::TaskCommandError;
 use crate::TaskDetailsPublication;
 use alloc::{string::String, vec::Vec};
@@ -28,6 +14,10 @@ use tiber_tasks_core::{TaskDetailsUpdated, TaskEvent, TaskId, TaskTitle};
 
 /// One exact replacement of the owner-editable task details.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the request fields follow addressed task then owner-visible title, summary, and decision-context flow"
+)]
 pub struct UpdateTaskDetails {
     /// Addressed durable task identity.
     task: TaskId,
@@ -38,6 +28,11 @@ pub struct UpdateTaskDetails {
     /// Exact replacement decision context.
     context: String,
 }
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    clippy::implicit_return,
+    reason = "the semantic request API presents construction followed by the exact retry-bound values consumed by the CLI adapter"
+)]
 impl UpdateTaskDetails {
     /// Creates one semantic details-replacement request.
     #[must_use]
@@ -70,6 +65,10 @@ impl UpdateTaskDetails {
 }
 
 /// Minimal current task state needed to decide one details replacement.
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the fold state follows existence, preserved tags, then owner-visible title, summary, and context reconciliation flow"
+)]
 struct DetailsState {
     /// Whether the addressed task currently exists.
     exists: bool,
@@ -84,6 +83,14 @@ struct DetailsState {
 }
 impl DetailsState {
     /// Folds only existence and editable details for the addressed task.
+    #[expect(
+        clippy::implicit_return,
+        clippy::pattern_type_mismatch,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        clippy::wildcard_enum_match_arm,
+        reason = "the command-local fold uses borrowed closed event patterns, typed propagation, and deliberately ignores facts outside its minimal details authority"
+    )]
     fn fold(events: &[TaskEvent], task: &TaskId) -> Result<Self, TaskCommandError> {
         let mut state = Self {
             exists: false,
@@ -198,9 +205,17 @@ struct ModeledDetailsUpdated {
     title: TaskTitle,
 }
 impl Event for ModeledDetailsUpdated {
+    #[expect(
+        clippy::implicit_return,
+        reason = "the stable modeled event name is the complete result"
+    )]
     fn event_type_name() -> &'static str {
         "TiberModeledTaskDetailsUpdated"
     }
+    #[expect(
+        clippy::implicit_return,
+        reason = "the modeled fact carries exactly one addressed stream"
+    )]
     fn stream_id(&self) -> &StreamId {
         &self.stream
     }
@@ -232,6 +247,11 @@ mapping! { ViewTask: ModeledDetailsUpdated.task => DetailsView.task using clone;
 mapping! { ViewTitle: ModeledDetailsUpdated.title => DetailsView.title using clone; }
 impl DetailsView {
     /// Consumes every modeled fact field into the publication view.
+    #[expect(
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the named provenance projection makes complete modeled-field consumption visible at the publication boundary"
+    )]
     fn from_event(event: &ModeledDetailsUpdated) -> Self {
         Self::model_builder()
             .context(ViewContext::apply(event))
@@ -267,9 +287,18 @@ mapping! { FactTags: ModeledUpdateDetails.tags => ModeledDetailsUpdated.tags usi
 mapping! { FactTask: ModeledUpdateDetails.task => ModeledDetailsUpdated.task using clone; }
 mapping! { FactTitle: ModeledUpdateDetails.title => ModeledDetailsUpdated.title using clone; }
 mapping! { FactEmitted: DetailsDecision.emitted => ModeledDetailsUpdated.emitted using try emit_once, error = CommandError; }
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "EventCore supplies static stream discovery for the checked modeled command"
+)]
 impl ModelCommandLogic for ModeledUpdateDetails {
     type Event = ModeledDetailsUpdated;
     type State = DetailsModelState;
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        reason = "the modeled decision directly constructs its one fact while preserving the checked emission-guard failure"
+    )]
     fn decide(
         &self,
         state: Modeled<Self::State>,
@@ -289,6 +318,11 @@ impl ModelCommandLogic for ModeledUpdateDetails {
                 .build(),
         ))
     }
+    #[expect(
+        clippy::implicit_return,
+        clippy::shadow_reuse,
+        reason = "the evolved modeled state intentionally reuses the consumed state binding before returning its rebuilt value"
+    )]
     fn evolve(&self, state: Modeled<Self::State>, _event: &Self::Event) -> Modeled<Self::State> {
         let mut state = state.into_inner();
         state.emitted = true;
@@ -296,6 +330,12 @@ impl ModelCommandLogic for ModeledUpdateDetails {
     }
 }
 /// Permits exactly the first modeled details emission.
+#[expect(
+    clippy::implicit_return,
+    clippy::single_call_fn,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "EventCore's checked mapping requires this named borrowed scalar conversion for the one-use emission guard"
+)]
 fn emit_once(emitted: &bool) -> Result<bool, CommandError> {
     if *emitted {
         return Err("tasks_modeled_details_already_emitted".into());
@@ -304,6 +344,13 @@ fn emit_once(emitted: &bool) -> Result<bool, CommandError> {
 }
 
 /// Returns the opaque modeled publication for one details replacement.
+#[expect(
+    clippy::implicit_return,
+    clippy::question_mark_used,
+    clippy::shadow_unrelated,
+    clippy::single_call_fn,
+    reason = "the command boundary sequences its narrow fold and checked model, then reuses the conventional events name for the modeled output batch"
+)]
 pub fn decide_update_task_details(
     events: &[TaskEvent],
     request: &UpdateTaskDetails,
@@ -356,11 +403,19 @@ pub fn decide_update_task_details(
     .map(Some)
 }
 /// Derives the canonical addressed-task stream.
+#[expect(
+    clippy::implicit_return,
+    reason = "the named stream derivation preserves its typed validation result directly"
+)]
 fn task_stream(task: &TaskId) -> Result<StreamId, TaskCommandError> {
     StreamId::try_new(format!("tiber:task:{}", task.as_str()))
         .map_err(|_source| TaskCommandError::InvalidTaskStream)
 }
 /// Rejects an addressed fact outside the board or canonical task stream.
+#[expect(
+    clippy::implicit_return,
+    reason = "the compact authority predicate returns its typed success or failure directly"
+)]
 fn require_stream(
     task: &TaskId,
     actual: &StreamId,
