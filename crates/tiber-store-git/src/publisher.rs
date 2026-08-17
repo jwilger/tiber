@@ -19,6 +19,7 @@ use tiber_tasks_service::{
     AcceptanceAddPublication, AcceptanceCheckPublication, DependencyLinkPublication,
     SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication, TaskActivationPublication,
     TaskCompletionPublication, TaskCreationPublication, TaskDetailsPublication,
+    TaskPriorityPublication,
 };
 
 use crate::{
@@ -228,6 +229,21 @@ impl TiberEventPublisher {
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (events, streams) = publication.into_events_and_consistency_streams();
         return self.append(&streams, events).await;
+    }
+
+    /// Publishes one modeled strict board-priority movement.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed publication failure when board authority changes,
+    /// signing fails, or the remote result cannot be safely reconciled.
+    #[inline]
+    pub async fn publish_task_priority(
+        &mut self,
+        publication: TaskPriorityPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = publication.into_event_and_consistency_streams();
+        return self.append(&streams, vec![event]).await;
     }
 
     /// Opens a publishable snapshot only if it still equals the already-read authority revision.

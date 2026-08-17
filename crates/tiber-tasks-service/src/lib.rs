@@ -38,6 +38,54 @@ pub struct DependencyLinkPublication {
     blocker_fact: TaskLinksChanged,
 }
 
+/// Opaque publication for one modeled strict board-priority movement.
+#[derive(Debug, Eq, PartialEq)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the opaque token stores the modeled fact before the consistency fence used to publish it"
+)]
+pub struct TaskPriorityPublication {
+    /// Sole complete strict-order fact authorized for publication.
+    fact: TaskOrder,
+    /// Exact board and both addressed-task streams read by the decision.
+    consistency_streams: [StreamId; 3],
+}
+
+impl TaskPriorityPublication {
+    /// Creates the closed priority token from one modeled board fact.
+    #[expect(
+        clippy::implicit_return,
+        clippy::single_call_fn,
+        reason = "the sole command-local constructor validates modeled provenance before returning the closed token"
+    )]
+    pub(crate) fn from_modeled_fact(
+        fact: TaskOrder,
+        consistency_streams: [StreamId; 3],
+    ) -> Result<Self, command::TaskCommandError> {
+        if fact.stream_id != consistency_streams[0] {
+            return Err(command::TaskCommandError::InvalidModeledTaskPriorityPublication);
+        }
+        Ok(Self {
+            fact,
+            consistency_streams,
+        })
+    }
+
+    /// Transfers the modeled fact and its exact three-stream fence.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot opaque transfer returns its complete event and fence directly"
+    )]
+    pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 3]) {
+        (
+            TaskEvent::TaskPriorityChanged(self.fact),
+            self.consistency_streams,
+        )
+    }
+}
+
 impl DependencyLinkPublication {
     /// Creates the closed reciprocal dependency token from modeled facts.
     #[expect(

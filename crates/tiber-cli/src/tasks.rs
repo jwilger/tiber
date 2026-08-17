@@ -15,11 +15,12 @@ use tiber_store_git::{
 use tiber_tasks_core::{Subtask, Task, TaskCoreError, TaskEvent, TaskId, TaskStatus, TaskTitle};
 use tiber_tasks_service::command::{
     AcceptanceIndex, AddAcceptance, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask,
-    CreateTask, LinkBlockedBy, RepairDuplicateSubtaskId, StartTask, SubtaskOccurrence,
-    SubtaskReplacementId, TaskCommandError, TaskCreationDecision, UpdateTaskDetails,
-    decide_add_acceptance, decide_check_acceptance, decide_check_subtask_occurrence,
-    decide_complete_task, decide_create_task, decide_link_blocked_by,
-    decide_repair_duplicate_subtask_id, decide_start_task, decide_update_task_details,
+    CreateTask, LinkBlockedBy, PrioritizeTask, RepairDuplicateSubtaskId, StartTask,
+    SubtaskOccurrence, SubtaskReplacementId, TaskCommandError, TaskCreationDecision,
+    UpdateTaskDetails, decide_add_acceptance, decide_check_acceptance,
+    decide_check_subtask_occurrence, decide_complete_task, decide_create_task,
+    decide_link_blocked_by, decide_prioritize_task, decide_repair_duplicate_subtask_id,
+    decide_start_task, decide_update_task_details,
 };
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -33,7 +34,7 @@ const TASK_HISTORY_PAGE_SIZE: usize = 64;
     clippy::pub_with_shorthand,
     reason = "the parent command shell consumes the one canonical task grammar without widening it to the crate"
 )]
-pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
+pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
 
 /// The exact durable stream patterns that comprise native Tiber Tasks history.
 ///
@@ -84,6 +85,9 @@ pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, Tas
         } => add_acceptance(repository, &reference, criterion),
         TaskCommand::LinkBlockedBy { reference, blocker } => {
             link_blocked_by(repository, &reference, &blocker)
+        }
+        TaskCommand::Prioritize { reference, before } => {
+            prioritize_task(repository, &reference, &before)
         }
         TaskCommand::SubtaskRepairDuplicate {
             reference,
@@ -166,6 +170,13 @@ pub(super) enum TaskCommand {
         reference: TaskReference,
         /// The task that blocks the target.
         blocker: TaskReference,
+    },
+    /// Moves one open task immediately before another in strict board order.
+    Prioritize {
+        /// Task to move.
+        reference: TaskReference,
+        /// Task that must immediately follow the moved task.
+        before: TaskReference,
     },
     /// Corrects one exact malformed duplicate subtask identity through the signed native write boundary.
     SubtaskRepairDuplicate {
@@ -286,6 +297,15 @@ pub(super) enum TaskCliError {
         /// Underlying typed publication outcome.
         source: Box<TiberPublicationError>,
     },
+    /// Priority publication failed while retaining both resolved retry endpoints.
+    TaskPriorityPublication {
+        /// Task moved by the exact retry intent.
+        task: TaskId,
+        /// Anchor that must immediately follow the moved task.
+        before: TaskId,
+        /// Underlying typed publication outcome.
+        source: Box<TiberPublicationError>,
+    },
     /// The CLI could not create its bounded local async runtime for `EventCore` append work.
     Runtime(io::Error),
     /// A static native task stream pattern was rejected by the `EventCore` boundary.
@@ -317,7 +337,8 @@ impl TaskCliError {
             Self::CreationPublication { source, .. }
             | Self::UpdatePublication { source, .. }
             | Self::AcceptanceAddPublication { source, .. }
-            | Self::DependencyLinkPublication { source, .. } => source.code(),
+            | Self::DependencyLinkPublication { source, .. }
+            | Self::TaskPriorityPublication { source, .. } => source.code(),
             Self::Runtime(_) => "tiber_tasks_runtime_unavailable",
             Self::StreamPattern => "tiber_tasks_stream_pattern_invalid",
             Self::ProjectionTaskMissing => "tiber_tasks_projection_task_missing",
@@ -410,6 +431,7 @@ impl TaskCliError {
             | Self::UpdatePublication { .. }
             | Self::AcceptanceAddPublication { .. }
             | Self::DependencyLinkPublication { .. }
+            | Self::TaskPriorityPublication { .. }
             | Self::Runtime(_)
             | Self::StreamPattern
             | Self::ProjectionTaskMissing => None,
@@ -480,6 +502,21 @@ impl fmt::Display for TaskCliError {
             }
             Self::Command(TaskCommandError::DependencySelfLink { task }) => {
                 return write!(f, "task `{}` cannot be blocked by itself", task.as_str());
+            }
+            Self::Command(TaskCommandError::TaskPrioritySelfReference { task }) => {
+                return write!(
+                    f,
+                    "task `{}` cannot be prioritized before itself",
+                    task.as_str()
+                );
+            }
+            Self::Command(TaskCommandError::TaskPriorityEndpointNotOpen { task, status }) => {
+                return write!(
+                    f,
+                    "task `{}` is currently `{}`, so it cannot define open-board priority",
+                    task.as_str(),
+                    status_name(*status)
+                );
             }
             Self::Command(TaskCommandError::SubtaskOccurrenceUnchecked { task, occurrence }) => {
                 let displayed_occurrence = occurrence.zero_based_value().saturating_add(1);
@@ -569,6 +606,21 @@ impl fmt::Display for TaskCliError {
                 }
                 "the authoritative Tiber dependency link could not be published"
             }
+            Self::TaskPriorityPublication {
+                task,
+                before,
+                source,
+            } => {
+                if matches!(source.as_ref(), TiberPublicationError::Ambiguous) {
+                    return write!(
+                        f,
+                        "priority change may already be durable; retry exactly: `tiber tasks prioritize {} --before {}`",
+                        quote_shell_argument(task.as_str()),
+                        quote_shell_argument(before.as_str())
+                    );
+                }
+                "the authoritative Tiber priority change could not be published"
+            }
             Self::Runtime(_) => "the local task runtime could not be started",
             Self::StreamPattern => "the native task stream selection is invalid",
             Self::Projection(TaskProjectionError::TaskReferenceMissing { reference }) => {
@@ -610,7 +662,8 @@ impl Error for TaskCliError {
             Self::CreationPublication { source, .. }
             | Self::UpdatePublication { source, .. }
             | Self::AcceptanceAddPublication { source, .. }
-            | Self::DependencyLinkPublication { source, .. } => Some(source.as_ref()),
+            | Self::DependencyLinkPublication { source, .. }
+            | Self::TaskPriorityPublication { source, .. } => Some(source.as_ref()),
             Self::Runtime(error) => Some(error),
             Self::Core(error) => Some(error),
             Self::MissingSubcommand
@@ -688,6 +741,13 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
             [kind, reference, blocker] if kind == "blocked-by" => Ok(TaskCommand::LinkBlockedBy {
                 reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
                 blocker: TaskReference::parse(blocker).map_err(TaskCliError::Projection)?,
+            }),
+            _ => Err(TaskCliError::InvalidArguments),
+        },
+        "prioritize" => match arguments {
+            [reference, flag, before] if flag == "--before" => Ok(TaskCommand::Prioritize {
+                reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+                before: TaskReference::parse(before).map_err(TaskCliError::Projection)?,
             }),
             _ => Err(TaskCliError::InvalidArguments),
         },
@@ -845,6 +905,54 @@ fn link_blocked_by(
         "linked {} blocked by {} at {}\n",
         request.task().as_str(),
         request.blocker().as_str(),
+        outcome.revision().as_str()
+    ))
+}
+
+/// Decides and publishes one strict board-priority movement.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the imperative CLI boundary preserves typed propagation across canonical history, modeled decision, exact fences, and signed publication"
+)]
+fn prioritize_task(
+    repository: &Path,
+    reference: &TaskReference,
+    before_reference: &TaskReference,
+) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let before = projection
+        .resolve_task_reference(before_reference)
+        .map_err(TaskCliError::Projection)?;
+    let request = PrioritizeTask::new(task.clone(), before.clone());
+    let Some(publication) =
+        decide_prioritize_task(history.events(), &request).map_err(TaskCliError::Command)?
+    else {
+        return Ok(format!(
+            "{} already prioritized before {}\n",
+            task.as_str(),
+            before.as_str()
+        ));
+    };
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_task_priority(publication))
+        .map_err(|source| TaskCliError::TaskPriorityPublication {
+            task: task.clone(),
+            before: before.clone(),
+            source: Box::new(source),
+        })?;
+    Ok(format!(
+        "prioritized {} before {} at {}\n",
+        request.task().as_str(),
+        request.before().as_str(),
         outcome.revision().as_str()
     ))
 }

@@ -12,6 +12,8 @@ mod dependency_link;
 mod task_administration;
 #[path = "task_details.rs"]
 mod task_details;
+#[path = "task_priority.rs"]
+mod task_priority;
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::{error::Error, fmt};
@@ -49,6 +51,8 @@ pub type UpdateTaskDetails = task_details::UpdateTaskDetails;
 pub type AddAcceptance = acceptance_add::AddAcceptance;
 /// Request to make one task durably blocked by another task.
 pub type LinkBlockedBy = dependency_link::LinkBlockedBy;
+/// Request to move one open task immediately before another in strict board order.
+pub type PrioritizeTask = task_priority::PrioritizeTask;
 
 /// A zero-based durable acceptance-item position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -771,6 +775,20 @@ pub enum TaskCommandError {
     TaskActivationMalformedHistory,
     /// The current strict board order cannot authorize task creation.
     TaskCreationMalformedHistory,
+    /// The current strict board order cannot authorize the requested priority movement.
+    TaskPriorityMalformedHistory,
+    /// A priority request named the same task as both movement endpoints.
+    TaskPrioritySelfReference {
+        /// Task supplied as both the moved task and its anchor.
+        task: TaskId,
+    },
+    /// One addressed priority endpoint is not currently on the open board.
+    TaskPriorityEndpointNotOpen {
+        /// Terminal endpoint task.
+        task: TaskId,
+        /// Current terminal lifecycle state.
+        status: TaskStatus,
+    },
     /// The requested task has no creation fact in the supplied canonical history.
     TaskMissing {
         /// The absent task identity.
@@ -922,6 +940,10 @@ pub enum TaskCommandError {
     ModeledDependencyLinkDecisionFailed,
     /// The checked command did not produce one valid reciprocal dependency-link batch.
     InvalidModeledDependencyLinkPublication,
+    /// The checked `EventCore` command could not produce its priority fact.
+    ModeledTaskPriorityDecisionFailed,
+    /// The checked command did not produce one valid strict-order fact.
+    InvalidModeledTaskPriorityPublication,
 }
 
 impl TaskCommandError {
@@ -952,6 +974,11 @@ impl TaskCommandError {
                 "tasks_command_task_activation_malformed_history"
             }
             Self::TaskCreationMalformedHistory => "tasks_command_task_creation_malformed_history",
+            Self::TaskPriorityMalformedHistory => "tasks_command_task_priority_malformed_history",
+            Self::TaskPrioritySelfReference { .. } => "tasks_command_task_priority_self_reference",
+            Self::TaskPriorityEndpointNotOpen { .. } => {
+                "tasks_command_task_priority_endpoint_not_open"
+            }
             Self::TaskMissing { .. } => "tasks_command_task_missing",
             Self::DependencySelfLink { .. } => "tasks_command_dependency_self_link",
             Self::DuplicateTaskCreation { .. } => "tasks_command_duplicate_task_creation",
@@ -1037,6 +1064,12 @@ impl TaskCommandError {
             }
             Self::InvalidModeledDependencyLinkPublication => {
                 "tasks_command_invalid_modeled_dependency_link_publication"
+            }
+            Self::ModeledTaskPriorityDecisionFailed => {
+                "tasks_command_modeled_task_priority_decision_failed"
+            }
+            Self::InvalidModeledTaskPriorityPublication => {
+                "tasks_command_invalid_modeled_task_priority_publication"
             }
         }
     }
@@ -4162,6 +4195,24 @@ pub fn decide_add_acceptance(
     request: &AddAcceptance,
 ) -> Result<Option<crate::AcceptanceAddPublication>, TaskCommandError> {
     return acceptance_add::decide_add_acceptance(events, request);
+}
+
+/// Decides one strict priority movement from canonical task history.
+///
+/// # Errors
+///
+/// Returns the command-local typed failure when canonical history or the
+/// modeled decision cannot authorize the requested movement.
+#[inline]
+#[expect(
+    clippy::needless_return,
+    reason = "the public decision facade uses an explicit return consistently with adjacent forwarding boundaries"
+)]
+pub fn decide_prioritize_task(
+    events: &[TaskEvent],
+    request: &PrioritizeTask,
+) -> Result<Option<crate::TaskPriorityPublication>, TaskCommandError> {
+    return task_priority::decide_prioritize_task(events, request);
 }
 
 /// Decides one reciprocal blocked-by dependency through its command-specific model.
