@@ -51,6 +51,72 @@ pub struct TaskPriorityPublication {
     consistency_streams: [StreamId; 3],
 }
 
+/// Opaque modeled abandonment batch and exact consistency fence.
+pub struct TaskAbandonmentPublication {
+    /// Exact board and addressed-task streams read by the modeled decision.
+    consistency_streams: [StreamId; 2],
+    /// Complete strict board order authorized for publication.
+    order: TaskOrder,
+    /// Terminal task transition authorized for publication.
+    transition: TaskTransitioned,
+}
+impl TaskAbandonmentPublication {
+    /// Closes modeled abandonment facts and their exact consistency fence into
+    /// one opaque publication token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed command error when the modeled transition, resulting
+    /// order, or consistency streams do not describe the same abandonment.
+    #[expect(
+        clippy::needless_pass_by_value,
+        clippy::needless_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the sole modeled abandonment boundary consumes its closed fact values, validates their semantic identity with typed propagation, and follows the project explicit-return policy"
+    )]
+    pub(crate) fn from_modeled_facts(
+        task: TaskId,
+        transition: TaskTransitioned,
+        order: TaskOrder,
+        consistency_streams: [StreamId; 2],
+    ) -> Result<Self, command::TaskCommandError> {
+        let expected = command::acceptance_consistency_streams(&task)?;
+        if expected != consistency_streams
+            || transition.stream_id != consistency_streams[1]
+            || transition.stem != task
+            || transition.status != TaskStatus::Abandoned
+            || transition.claim.is_some()
+            || order.stream_id != consistency_streams[0]
+            || order.order.contains(&task)
+        {
+            return Err(command::TaskCommandError::InvalidModeledTaskAbandonmentPublication);
+        }
+        return Ok(Self {
+            consistency_streams,
+            order,
+            transition,
+        });
+    }
+    /// Transfers the closed modeled batch and its exact consistency fence to
+    /// the publication adapter.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::needless_return,
+        reason = "the ownership-transfer boundary follows the project explicit-return policy"
+    )]
+    pub fn into_events_and_consistency_streams(self) -> (Vec<TaskEvent>, [StreamId; 2]) {
+        return (
+            vec![
+                TaskEvent::TaskTransitioned(self.transition),
+                TaskEvent::TaskPriorityChanged(self.order),
+            ],
+            self.consistency_streams,
+        );
+    }
+}
+
 impl TaskPriorityPublication {
     /// Creates the closed priority token from one modeled board fact.
     #[expect(

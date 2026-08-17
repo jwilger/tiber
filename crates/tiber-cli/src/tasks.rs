@@ -14,10 +14,10 @@ use tiber_store_git::{
 };
 use tiber_tasks_core::{Subtask, Task, TaskCoreError, TaskEvent, TaskId, TaskStatus, TaskTitle};
 use tiber_tasks_service::command::{
-    AcceptanceIndex, AddAcceptance, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask,
-    CreateTask, LinkBlockedBy, PrioritizeTask, RepairDuplicateSubtaskId, StartTask,
+    AbandonTask, AcceptanceIndex, AddAcceptance, CheckAcceptance, CheckSubtaskOccurrence,
+    CompleteTask, CreateTask, LinkBlockedBy, PrioritizeTask, RepairDuplicateSubtaskId, StartTask,
     SubtaskOccurrence, SubtaskReplacementId, TaskCommandError, TaskCreationDecision,
-    UpdateTaskDetails, decide_add_acceptance, decide_check_acceptance,
+    UpdateTaskDetails, decide_abandon_task, decide_add_acceptance, decide_check_acceptance,
     decide_check_subtask_occurrence, decide_complete_task, decide_create_task,
     decide_link_blocked_by, decide_prioritize_task, decide_repair_duplicate_subtask_id,
     decide_start_task, decide_update_task_details,
@@ -34,7 +34,7 @@ const TASK_HISTORY_PAGE_SIZE: usize = 64;
     clippy::pub_with_shorthand,
     reason = "the parent command shell consumes the one canonical task grammar without widening it to the crate"
 )]
-pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
+pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> <done|abandoned>";
 
 /// The exact durable stream patterns that comprise native Tiber Tasks history.
 ///
@@ -100,6 +100,7 @@ pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, Tas
         } => check_subtask_occurrence(repository, &reference, occurrence),
         TaskCommand::Start { reference } => start_task(repository, &reference),
         TaskCommand::TransitionDone { reference } => complete_task(repository, &reference),
+        TaskCommand::TransitionAbandoned { reference } => abandon_task(repository, &reference),
         TaskCommand::List(status) => {
             let projection = load_projection(repository)?;
             Ok(list_tasks(&projection, status))
@@ -197,6 +198,11 @@ pub(super) enum TaskCommand {
     /// Completes one current task through the signed native write boundary.
     TransitionDone {
         /// The parsed task reference resolved after canonical history is read.
+        reference: TaskReference,
+    },
+    /// Abandons one current open task.
+    TransitionAbandoned {
+        /// Parsed task reference resolved after canonical history is read.
         reference: TaskReference,
     },
     /// Lists all current tasks, optionally restricted to one status.
@@ -306,6 +312,13 @@ pub(super) enum TaskCliError {
         /// Underlying typed publication outcome.
         source: Box<TiberPublicationError>,
     },
+    /// Abandonment publication failed while retaining the resolved retry target.
+    TaskAbandonmentPublication {
+        /// Durable task identity bound to the exact retry.
+        task: TaskId,
+        /// Underlying typed publication outcome.
+        source: Box<TiberPublicationError>,
+    },
     /// The CLI could not create its bounded local async runtime for `EventCore` append work.
     Runtime(io::Error),
     /// A static native task stream pattern was rejected by the `EventCore` boundary.
@@ -338,7 +351,8 @@ impl TaskCliError {
             | Self::UpdatePublication { source, .. }
             | Self::AcceptanceAddPublication { source, .. }
             | Self::DependencyLinkPublication { source, .. }
-            | Self::TaskPriorityPublication { source, .. } => source.code(),
+            | Self::TaskPriorityPublication { source, .. }
+            | Self::TaskAbandonmentPublication { source, .. } => source.code(),
             Self::Runtime(_) => "tiber_tasks_runtime_unavailable",
             Self::StreamPattern => "tiber_tasks_stream_pattern_invalid",
             Self::ProjectionTaskMissing => "tiber_tasks_projection_task_missing",
@@ -432,6 +446,7 @@ impl TaskCliError {
             | Self::AcceptanceAddPublication { .. }
             | Self::DependencyLinkPublication { .. }
             | Self::TaskPriorityPublication { .. }
+            | Self::TaskAbandonmentPublication { .. }
             | Self::Runtime(_)
             | Self::StreamPattern
             | Self::ProjectionTaskMissing => None,
@@ -514,6 +529,14 @@ impl fmt::Display for TaskCliError {
                 return write!(
                     f,
                     "task `{}` is currently `{}`, so it cannot define open-board priority",
+                    task.as_str(),
+                    status_name(*status)
+                );
+            }
+            Self::Command(TaskCommandError::TaskAbandonmentNotBacklog { task, status }) => {
+                return write!(
+                    f,
+                    "task `{}` is currently `{}`; abandonment requires `backlog`",
                     task.as_str(),
                     status_name(*status)
                 );
@@ -621,6 +644,16 @@ impl fmt::Display for TaskCliError {
                 }
                 "the authoritative Tiber priority change could not be published"
             }
+            Self::TaskAbandonmentPublication { task, source } => {
+                if matches!(source.as_ref(), TiberPublicationError::Ambiguous) {
+                    return write!(
+                        f,
+                        "task abandonment may already be durable; retry exactly: `tiber tasks transition {} abandoned`",
+                        quote_shell_argument(task.as_str())
+                    );
+                }
+                "the authoritative Tiber task abandonment could not be published"
+            }
             Self::Runtime(_) => "the local task runtime could not be started",
             Self::StreamPattern => "the native task stream selection is invalid",
             Self::Projection(TaskProjectionError::TaskReferenceMissing { reference }) => {
@@ -663,7 +696,8 @@ impl Error for TaskCliError {
             | Self::UpdatePublication { source, .. }
             | Self::AcceptanceAddPublication { source, .. }
             | Self::DependencyLinkPublication { source, .. }
-            | Self::TaskPriorityPublication { source, .. } => Some(source.as_ref()),
+            | Self::TaskPriorityPublication { source, .. }
+            | Self::TaskAbandonmentPublication { source, .. } => Some(source.as_ref()),
             Self::Runtime(error) => Some(error),
             Self::Core(error) => Some(error),
             Self::MissingSubcommand
@@ -815,6 +849,9 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
             [reference, status] if status == "done" => Ok(TaskCommand::TransitionDone {
                 reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
             }),
+            [reference, status] if status == "abandoned" => Ok(TaskCommand::TransitionAbandoned {
+                reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+            }),
             _ => Err(TaskCliError::InvalidArguments),
         },
         _ => Err(TaskCliError::UnknownSubcommand),
@@ -953,6 +990,41 @@ fn prioritize_task(
         "prioritized {} before {} at {}\n",
         request.task().as_str(),
         request.before().as_str(),
+        outcome.revision().as_str()
+    ))
+}
+
+/// Decides and publishes one task abandonment.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the command boundary preserves typed history, projection, decision, runtime, and publication failures through one railway"
+)]
+fn abandon_task(repository: &Path, reference: &TaskReference) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let request = AbandonTask::new(task.clone());
+    let Some(publication) =
+        decide_abandon_task(history.events(), &request).map_err(TaskCliError::Command)?
+    else {
+        return Ok(format!("{} already abandoned\n", task.as_str()));
+    };
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_task_abandonment(publication))
+        .map_err(|source| TaskCliError::TaskAbandonmentPublication {
+            task: task.clone(),
+            source: Box::new(source),
+        })?;
+    Ok(format!(
+        "abandoned {} at {}\n",
+        request.task().as_str(),
         outcome.revision().as_str()
     ))
 }

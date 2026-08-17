@@ -17,9 +17,9 @@ use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamW
 use tempfile::TempDir;
 use tiber_tasks_service::{
     AcceptanceAddPublication, AcceptanceCheckPublication, DependencyLinkPublication,
-    SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication, TaskActivationPublication,
-    TaskCompletionPublication, TaskCreationPublication, TaskDetailsPublication,
-    TaskPriorityPublication,
+    SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication, TaskAbandonmentPublication,
+    TaskActivationPublication, TaskCompletionPublication, TaskCreationPublication,
+    TaskDetailsPublication, TaskPriorityPublication,
 };
 
 use crate::{
@@ -244,6 +244,22 @@ impl TiberEventPublisher {
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (event, streams) = publication.into_event_and_consistency_streams();
         return self.append(&streams, vec![event]).await;
+    }
+
+    /// Publishes one modeled task abandonment and resulting board order.
+    /// Publishes one modeled task abandonment batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed publication error when the modeled batch cannot be
+    /// appended, committed, pushed, or reconciled against task authority.
+    #[inline]
+    pub async fn publish_task_abandonment(
+        &mut self,
+        publication: TaskAbandonmentPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (events, streams) = publication.into_events_and_consistency_streams();
+        return self.append(&streams, events).await;
     }
 
     /// Opens a publishable snapshot only if it still equals the already-read authority revision.

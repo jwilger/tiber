@@ -35,6 +35,7 @@ mod tests {
     const FIRST_PRIORITY_TASK_ID: &str = "20260812-b222-first-priority";
     const PAGE_SPANNING_UPDATES: usize = 65;
     const SECOND_PRIORITY_TASK_ID: &str = "20260812-c333-first-priority";
+    const SHELL_SENSITIVE_TASK_ID: &str = "20260812-e555-owner's-task";
     const CLOSED_TASK_ID: &str = "20260812-d444-closed-task";
     const BLOCKER_TASK_ID: &str = "20260812-e555-blocking-task";
     const BLOCKED_TASK_ID: &str = "20260812-f666-blocked-task";
@@ -408,6 +409,40 @@ mod tests {
             }
         }
 
+        async fn signed_shell_sensitive_abandonment_history() -> Self {
+            let fixture = Self::signed_ordered_history().await;
+            let task = task_stream(SHELL_SENSITIVE_TASK_ID);
+            let board = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(task.clone(), StreamVersion::new(0))
+                .expect("shell-sensitive task stream should register")
+                .register_stream(board.clone(), StreamVersion::new(2))
+                .expect("fixture board stream should register after order and details")
+                .append(task_created(
+                    &task,
+                    SHELL_SENSITIVE_TASK_ID,
+                    "Owner's task",
+                    "backlog",
+                ))
+                .expect("shell-sensitive task should append")
+                .append(board_reordered(&[
+                    SECOND_PRIORITY_TASK_ID,
+                    FIRST_PRIORITY_TASK_ID,
+                    SHELL_SENSITIVE_TASK_ID,
+                ]))
+                .expect("shell-sensitive board order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("shell-sensitive history should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
         async fn signed_abandoned_priority_history() -> Self {
             let fixture = Self::signed_ordered_history().await;
             let board_stream = StreamId::try_new("tiber:board".to_owned())
@@ -426,6 +461,28 @@ mod tests {
                 .append_events(writes)
                 .await
                 .expect("fixture abandonment should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        async fn signed_foreign_stream_abandonment_history() -> Self {
+            let fixture = Self::signed_ordered_history().await;
+            let foreign_stream = task_stream(SECOND_PRIORITY_TASK_ID);
+            let writes = StreamWrites::new()
+                .register_stream(foreign_stream.clone(), StreamVersion::new(1))
+                .expect("foreign task stream should register after creation")
+                .append(event(json!({
+                    "event": "task_transitioned", "stream_id": foreign_stream.as_ref(),
+                    "stem": FIRST_PRIORITY_TASK_ID, "status": "abandoned", "claim": null
+                })))
+                .expect("foreign-stream abandonment fact should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("foreign-stream abandonment should persist");
             drop(store);
             commit_signed_tiber_history(&fixture.repository);
             fixture
@@ -616,16 +673,26 @@ mod tests {
             let fixture = Self::signed_ordered_history().await;
             let board_stream = StreamId::try_new("tiber:board".to_owned())
                 .expect("fixture board stream should be valid");
+            let third_stream = task_stream(SHELL_SENSITIVE_TASK_ID);
             let writes = StreamWrites::new()
+                .register_stream(third_stream.clone(), StreamVersion::new(0))
+                .expect("third task stream should register")
                 .register_stream(board_stream.clone(), StreamVersion::new(2))
                 .expect("fixture board stream should register after retained order facts")
+                .append(task_created(
+                    &third_stream,
+                    SHELL_SENSITIVE_TASK_ID,
+                    "Owner's task",
+                    "backlog",
+                ))
+                .expect("third task should append")
                 .append(event(json!({
                     "event": "task_validation_repaired",
                     "stream_id": board_stream.as_ref(),
                     "link_changes": [],
                     "order_change": {
                         "stream_id": board_stream.as_ref(),
-                        "order": [FIRST_PRIORITY_TASK_ID, SECOND_PRIORITY_TASK_ID]
+                        "order": [SECOND_PRIORITY_TASK_ID, SHELL_SENSITIVE_TASK_ID, FIRST_PRIORITY_TASK_ID]
                     },
                     "repairs": [{
                         "repair": "board_entry_added",
@@ -786,7 +853,6 @@ mod tests {
         #[expect(
             clippy::expect_used,
             clippy::implicit_return,
-            clippy::single_call_fn,
             reason = "the malformed-order fixture must fail fast while constructing one signed duplicate board occurrence"
         )]
         async fn signed_duplicate_board_order_history() -> Self {
@@ -804,6 +870,26 @@ mod tests {
                 .append_events(writes)
                 .await
                 .expect("duplicate board order fact should persist");
+            drop(store);
+            commit_signed_tiber_history(&fixture.repository);
+            fixture
+        }
+
+        async fn signed_missing_target_board_order_history() -> Self {
+            let fixture = Self::signed_paged_history().await;
+            let board_stream = StreamId::try_new("tiber:board".to_owned())
+                .expect("fixture board stream should be valid");
+            let writes = StreamWrites::new()
+                .register_stream(board_stream, StreamVersion::new(1))
+                .expect("fixture board stream should register at its current version")
+                .append(board_reordered(&[]))
+                .expect("missing-target board order should append");
+            let store = FileEventStore::open(fixture.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            let _slice = store
+                .append_events(writes)
+                .await
+                .expect("missing-target board order should persist");
             drop(store);
             commit_signed_tiber_history(&fixture.repository);
             fixture
@@ -846,7 +932,6 @@ mod tests {
         #[expect(
             clippy::expect_used,
             clippy::implicit_return,
-            clippy::single_call_fn,
             reason = "the malformed-order fixture must fail fast while carrying one board order fact on a retained task stream"
         )]
         async fn signed_foreign_stream_board_order_history() -> Self {
@@ -906,7 +991,6 @@ mod tests {
         #[expect(
             clippy::expect_used,
             clippy::implicit_return,
-            clippy::single_call_fn,
             reason = "the malformed-order fixture must fail fast while carrying one commit-closure order on a retained task stream"
         )]
         async fn signed_foreign_stream_commit_closure_history() -> Self {
@@ -1598,6 +1682,342 @@ mod tests {
             git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
             after_first,
             "an exact durable retry must not publish a second priority revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_removes_one_backlog_task_from_the_open_board() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let abandoned =
+            fixture.tiber(&["tasks", "transition", FIRST_PRIORITY_TASK_ID, "abandoned"]);
+
+        assert_success(&abandoned);
+        let after = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        assert_ne!(after, before);
+        assert_eq!(
+            String::from_utf8_lossy(&abandoned.stdout),
+            format!("abandoned {FIRST_PRIORITY_TASK_ID} at {after}\n")
+        );
+        let open = fixture.tiber(&["tasks", "list"]);
+        assert_success(&open);
+        assert_eq!(
+            String::from_utf8_lossy(&open.stdout),
+            format!("{SECOND_PRIORITY_TASK_ID}\tbacklog\tSecond priority task\n")
+        );
+        let terminal = fixture.tiber(&["tasks", "list", "--status", "abandoned"]);
+        assert_success(&terminal);
+        assert_eq!(
+            String::from_utf8_lossy(&terminal.stdout),
+            format!("{FIRST_PRIORITY_TASK_ID}\tabandoned\tFirst priority task revised by board\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_uses_the_latest_repaired_board_order() {
+        let fixture = TaskFixture::signed_validation_repaired_order().await;
+
+        let abandoned =
+            fixture.tiber(&["tasks", "transition", FIRST_PRIORITY_TASK_ID, "abandoned"]);
+
+        assert_success(&abandoned);
+        let open = fixture.tiber(&["tasks", "list"]);
+        assert_success(&open);
+        assert_eq!(
+            String::from_utf8_lossy(&open.stdout),
+            format!(
+                "{SECOND_PRIORITY_TASK_ID}\tbacklog\tSecond priority task\n{SHELL_SENSITIVE_TASK_ID}\tbacklog\tOwner's task\n"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_rejects_an_active_task_without_advancing_authority() {
+        let fixture = TaskFixture::signed_active_paged_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", TASK_ID, "abandoned"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_task_abandonment_not_backlog: task `{TASK_ID}` is currently `in-progress`; abandonment requires `backlog`\n"
+            )
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "an active task refusal must not advance task authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_rejects_a_done_task_without_advancing_authority() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", CLOSED_TASK_ID, "abandoned"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "tasks_command_task_abandonment_not_backlog: task `{CLOSED_TASK_ID}` is currently `done`; abandonment requires `backlog`\n"
+            )
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a done task refusal must not advance task authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_reconciles_an_exact_durable_retry() {
+        let fixture = TaskFixture::signed_ordered_history().await;
+        let first = fixture.tiber(&["tasks", "transition", FIRST_PRIORITY_TASK_ID, "abandoned"]);
+        assert_success(&first);
+        let after_first = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let repeated = fixture.tiber(&["tasks", "transition", FIRST_PRIORITY_TASK_ID, "abandoned"]);
+
+        assert_success(&repeated);
+        assert_eq!(
+            String::from_utf8_lossy(&repeated.stdout),
+            format!("{FIRST_PRIORITY_TASK_ID} already abandoned\n")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            after_first,
+            "an exact durable retry must not publish a second abandonment revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_rejects_a_matching_fact_from_a_foreign_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_abandonment_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", FIRST_PRIORITY_TASK_ID, "abandoned"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .starts_with("tasks_command_target_task_fact_unexpected_stream:")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a foreign-stream transition must not authorize abandonment reconciliation"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_rejects_board_order_from_a_foreign_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_board_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", TASK_ID, "abandoned"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "tasks_command_task_abandonment_malformed_history: the authoritative Tiber task history could not decide that task change\n"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a foreign-stream board order must not authorize abandonment"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_rejects_an_order_missing_the_target() {
+        let fixture = TaskFixture::signed_missing_target_board_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", TASK_ID, "abandoned"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "tasks_command_task_abandonment_malformed_history: the authoritative Tiber task history could not decide that task change\n"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_rejects_duplicate_target_order_membership() {
+        let fixture = TaskFixture::signed_duplicate_board_order_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", TASK_ID, "abandoned"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .starts_with("tasks_command_task_abandonment_malformed_history:")
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_rejects_commit_closure_from_a_foreign_stream() {
+        let fixture = TaskFixture::signed_foreign_stream_commit_closure_history().await;
+        let before = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+
+        let output = fixture.tiber(&["tasks", "transition", TASK_ID, "abandoned"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "tasks_command_task_abandonment_malformed_history: the authoritative Tiber task history could not decide that task change\n"
+        );
+        assert_eq!(
+            git_output(&fixture.repository, ["rev-parse", TIBER_REF]),
+            before,
+            "a foreign-stream commit closure must not authorize abandonment"
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_transition_abandoned_reconciles_a_shell_safe_retry_after_ambiguous_publication()
+    {
+        let fixture = TaskFixture::signed_shell_sensitive_abandonment_history().await;
+        let remote = fixture._directory.path().join("abandonment-remote.git");
+        git(
+            fixture._directory.path(),
+            [
+                "clone",
+                "--bare",
+                fixture.repository.to_str().expect("fixture path is UTF-8"),
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        git(
+            &fixture.repository,
+            [
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        let base = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
+        let commands = fixture
+            ._directory
+            .path()
+            .join("abandonment-ambiguous-commands");
+        fs::create_dir_all(&commands).expect("wrapper directory should be created");
+        let wrapper = commands.join("git");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+operation=
+for argument in "$@"; do
+  if [ "$argument" = "push" ]; then operation=push; fi
+  if [ "$argument" = "ls-remote" ]; then operation=ls-remote; fi
+done
+if [ "$operation" = "ls-remote" ] && [ -f "$TIBER_PUSH_MARKER" ]; then
+  printf '%s\trefs/heads/tiber\n' "$TIBER_STALE_HEAD"
+  exit 0
+fi
+if [ "$operation" = "push" ]; then
+  "$TIBER_REAL_GIT" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then : > "$TIBER_PUSH_MARKER"; fi
+  exit "$status"
+fi
+exec "$TIBER_REAL_GIT" "$@"
+"#,
+        )
+        .expect("Git wrapper should be written");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("wrapper executable");
+        let real_git = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("Git discovery")
+                .stdout,
+        )
+        .expect("Git path UTF-8")
+        .trim()
+        .to_owned();
+        let path = format!(
+            "{}:{}",
+            commands.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let marker = fixture._directory.path().join("abandonment-push-completed");
+        let ambiguous = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(["tasks", "transition", "20260812-e555", "abandoned"])
+            .current_dir(&fixture.repository)
+            .env("PATH", path)
+            .env("TIBER_REAL_GIT", real_git)
+            .env("TIBER_PUSH_MARKER", &marker)
+            .env("TIBER_STALE_HEAD", &base)
+            .output()
+            .expect("Tiber CLI");
+
+        assert!(!ambiguous.status.success());
+        let remote_after_ambiguous = git_output(&remote, ["rev-parse", TIBER_REF]);
+        assert_ne!(
+            remote_after_ambiguous,
+            base,
+            "ambiguous command stderr: {}",
+            String::from_utf8_lossy(&ambiguous.stderr)
+        );
+        let diagnostic = String::from_utf8_lossy(&ambiguous.stderr);
+        let retry_command = diagnostic
+            .strip_prefix("tiber_store_publication_ambiguous: task abandonment may already be durable; retry exactly: `")
+            .and_then(|text| text.strip_suffix("`\n"))
+            .expect("exact abandonment retry diagnostic");
+        assert_eq!(
+            retry_command, "tiber tasks transition '20260812-e555-owner'\\''s-task' abandoned",
+            "the displayed retry must quote the resolved semantic task argument"
+        );
+        let tiber_directory = Path::new(env!("CARGO_BIN_EXE_tiber"))
+            .parent()
+            .expect("binary parent");
+        let retry_path = format!(
+            "{}:{}",
+            tiber_directory.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let reconciled = Command::new("sh")
+            .args(["-c", retry_command])
+            .current_dir(&fixture.repository)
+            .env("PATH", retry_path)
+            .output()
+            .expect("retry command");
+        assert_success(&reconciled);
+        assert_eq!(
+            String::from_utf8_lossy(&reconciled.stdout),
+            format!("{SHELL_SENSITIVE_TASK_ID} already abandoned\n")
+        );
+        assert_eq!(
+            git_output(&remote, ["rev-parse", TIBER_REF]),
+            remote_after_ambiguous,
+            "reconciliation must not publish a second abandonment revision"
         );
     }
 
@@ -3888,7 +4308,9 @@ exec "$TIBER_REAL_GIT" "$@"
                 .contains("subtask check <ref> <one-based-occurrence>")
         );
         assert!(String::from_utf8_lossy(&nested.stderr).contains("start <ref>"));
-        assert!(String::from_utf8_lossy(&nested.stderr).contains("transition <ref> done"));
+        assert!(
+            String::from_utf8_lossy(&nested.stderr).contains("transition <ref> <done|abandoned>")
+        );
 
         let top_level = Command::new(env!("CARGO_BIN_EXE_tiber"))
             .arg("unsupported")
@@ -3905,7 +4327,10 @@ exec "$TIBER_REAL_GIT" "$@"
                 .contains("subtask check <ref> <one-based-occurrence>")
         );
         assert!(String::from_utf8_lossy(&top_level.stderr).contains("start <ref>"));
-        assert!(String::from_utf8_lossy(&top_level.stderr).contains("transition <ref> done"));
+        assert!(
+            String::from_utf8_lossy(&top_level.stderr)
+                .contains("transition <ref> <done|abandoned>")
+        );
     }
 
     #[test]
@@ -3915,8 +4340,8 @@ exec "$TIBER_REAL_GIT" "$@"
     )]
     fn explicit_help_flags_succeed_without_an_error_diagnostic() {
         let directory = TempDir::new().expect("fixture directory should be created");
-        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
-        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
+        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> <done|abandoned>>]\n";
+        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> <done|abandoned>>\n";
         let usage_exit_code: i32 = 2;
         let cases: &[(&[&str], &str)] = &[
             (&["--help"], root_usage),
@@ -4002,7 +4427,7 @@ exec "$TIBER_REAL_GIT" "$@"
         assert!(String::from_utf8_lossy(&output.stderr).is_empty());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
+            "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> <done|abandoned>>\n"
         );
     }
 

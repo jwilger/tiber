@@ -4,6 +4,8 @@
 //! adapter. They deliberately do not reuse [`crate::TaskBoardProjection`],
 //! whose broad state is query-only rather than write authority.
 
+#[path = "abandonment.rs"]
+mod abandonment;
 #[path = "acceptance_add.rs"]
 mod acceptance_add;
 #[path = "dependency_link.rs"]
@@ -49,6 +51,8 @@ pub type TaskCreationDecision = task_administration::TaskCreationDecision;
 pub type UpdateTaskDetails = task_details::UpdateTaskDetails;
 /// Request to append one exact unchecked acceptance criterion.
 pub type AddAcceptance = acceptance_add::AddAcceptance;
+/// Request to abandon one current open task.
+pub type AbandonTask = abandonment::AbandonTask;
 /// Request to make one task durably blocked by another task.
 pub type LinkBlockedBy = dependency_link::LinkBlockedBy;
 /// Request to move one open task immediately before another in strict board order.
@@ -775,8 +779,12 @@ pub enum TaskCommandError {
     TaskActivationMalformedHistory,
     /// The current strict board order cannot authorize task creation.
     TaskCreationMalformedHistory,
+    /// An abandonment request addressed a task that is not currently queued.
+    TaskAbandonmentNotBacklog { task: TaskId, status: TaskStatus },
     /// The current strict board order cannot authorize the requested priority movement.
     TaskPriorityMalformedHistory,
+    /// Board-wide facts needed for abandonment came from an unfenced stream.
+    TaskAbandonmentMalformedHistory,
     /// A priority request named the same task as both movement endpoints.
     TaskPrioritySelfReference {
         /// Task supplied as both the moved task and its anchor.
@@ -944,6 +952,10 @@ pub enum TaskCommandError {
     ModeledTaskPriorityDecisionFailed,
     /// The checked command did not produce one valid strict-order fact.
     InvalidModeledTaskPriorityPublication,
+    /// The checked model could not decide abandonment.
+    ModeledTaskAbandonmentDecisionFailed,
+    /// The checked model did not produce one valid abandonment.
+    InvalidModeledTaskAbandonmentPublication,
 }
 
 impl TaskCommandError {
@@ -974,7 +986,11 @@ impl TaskCommandError {
                 "tasks_command_task_activation_malformed_history"
             }
             Self::TaskCreationMalformedHistory => "tasks_command_task_creation_malformed_history",
+            Self::TaskAbandonmentNotBacklog { .. } => "tasks_command_task_abandonment_not_backlog",
             Self::TaskPriorityMalformedHistory => "tasks_command_task_priority_malformed_history",
+            Self::TaskAbandonmentMalformedHistory => {
+                "tasks_command_task_abandonment_malformed_history"
+            }
             Self::TaskPrioritySelfReference { .. } => "tasks_command_task_priority_self_reference",
             Self::TaskPriorityEndpointNotOpen { .. } => {
                 "tasks_command_task_priority_endpoint_not_open"
@@ -1070,6 +1086,12 @@ impl TaskCommandError {
             }
             Self::InvalidModeledTaskPriorityPublication => {
                 "tasks_command_invalid_modeled_task_priority_publication"
+            }
+            Self::ModeledTaskAbandonmentDecisionFailed => {
+                "tasks_command_modeled_task_abandonment_decision_failed"
+            }
+            Self::InvalidModeledTaskAbandonmentPublication => {
+                "tasks_command_invalid_modeled_task_abandonment_publication"
             }
         }
     }
@@ -4195,6 +4217,25 @@ pub fn decide_add_acceptance(
     request: &AddAcceptance,
 ) -> Result<Option<crate::AcceptanceAddPublication>, TaskCommandError> {
     return acceptance_add::decide_add_acceptance(events, request);
+}
+
+/// Decides one task abandonment from canonical task history.
+///
+/// # Errors
+///
+/// Returns a typed command error when the retained task lifetime or board order
+/// is malformed, the requested lifecycle is ineligible, or the checked model
+/// cannot produce a valid abandonment decision.
+#[inline]
+#[expect(
+    clippy::needless_return,
+    reason = "the public command facade follows the project explicit-return policy while preserving the established command module surface"
+)]
+pub fn decide_abandon_task(
+    events: &[TaskEvent],
+    request: &AbandonTask,
+) -> Result<Option<crate::TaskAbandonmentPublication>, TaskCommandError> {
+    return abandonment::decide(events, request);
 }
 
 /// Decides one strict priority movement from canonical task history.
