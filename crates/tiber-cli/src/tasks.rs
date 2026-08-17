@@ -16,9 +16,9 @@ use tiber_tasks_core::{Subtask, Task, TaskCoreError, TaskEvent, TaskId, TaskStat
 use tiber_tasks_service::command::{
     AcceptanceIndex, CheckAcceptance, CheckSubtaskOccurrence, CompleteTask, CreateTask,
     RepairDuplicateSubtaskId, StartTask, SubtaskOccurrence, SubtaskReplacementId, TaskCommandError,
-    TaskCreationDecision, decide_check_acceptance, decide_check_subtask_occurrence,
-    decide_complete_task, decide_create_task, decide_repair_duplicate_subtask_id,
-    decide_start_task, decide_update_task_details, UpdateTaskDetails,
+    TaskCreationDecision, UpdateTaskDetails, decide_check_acceptance,
+    decide_check_subtask_occurrence, decide_complete_task, decide_create_task,
+    decide_repair_duplicate_subtask_id, decide_start_task, decide_update_task_details,
 };
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -68,9 +68,12 @@ pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, Tas
     match command {
         TaskCommand::Help => Ok(help_output()),
         TaskCommand::Create { id_prefix, title } => create_task(repository, id_prefix, title),
-        TaskCommand::Update { reference, title, summary, context } => {
-            update_task(repository, &reference, title, summary, context)
-        }
+        TaskCommand::Update {
+            reference,
+            title,
+            summary,
+            context,
+        } => update_task(repository, &reference, title, summary, context),
         TaskCommand::AcceptanceCheck { reference, index } => {
             check_acceptance(repository, &reference, index)
         }
@@ -121,9 +124,13 @@ pub(super) enum TaskCommand {
     },
     /// Replaces the title, summary, and context of one existing task.
     Update {
+        /// Parsed task reference resolved after canonical history is read.
         reference: TaskReference,
+        /// Exact replacement title.
         title: TaskTitle,
+        /// Exact replacement summary.
         summary: String,
+        /// Exact replacement decision context.
         context: String,
     },
     /// Activates one strict-next eligible backlog task through the signed native write boundary.
@@ -224,15 +231,20 @@ pub(super) enum TaskCliError {
         /// Canonical title bound to that creation intent.
         title: TaskTitle,
         /// Underlying typed publication outcome.
-        source: TiberPublicationError,
+        source: Box<TiberPublicationError>,
     },
     /// Task-details publication failed while retaining its exact retry intent.
     UpdatePublication {
+        /// Durable task identity bound to the retry.
         task: TaskId,
+        /// Exact replacement title bound to the retry.
         title: TaskTitle,
+        /// Exact replacement summary bound to the retry.
         summary: String,
+        /// Exact replacement context bound to the retry.
         context: String,
-        source: TiberPublicationError,
+        /// Underlying typed publication outcome.
+        source: Box<TiberPublicationError>,
     },
     /// The CLI could not create its bounded local async runtime for `EventCore` append work.
     Runtime(io::Error),
@@ -262,8 +274,9 @@ impl TaskCliError {
             Self::Projection(error) => error.code(),
             Self::Command(error) => error.code(),
             Self::Publication(error) => error.code(),
-            Self::CreationPublication { source, .. } => source.code(),
-            Self::UpdatePublication { source, .. } => source.code(),
+            Self::CreationPublication { source, .. } | Self::UpdatePublication { source, .. } => {
+                source.code()
+            }
             Self::Runtime(_) => "tiber_tasks_runtime_unavailable",
             Self::StreamPattern => "tiber_tasks_stream_pattern_invalid",
             Self::ProjectionTaskMissing => "tiber_tasks_projection_task_missing",
@@ -449,16 +462,16 @@ impl fmt::Display for TaskCliError {
             Self::CreationPublication {
                 id_prefix,
                 title,
-                source: TiberPublicationError::Ambiguous,
+                source,
             } => {
-                let quoted_id_prefix = quote_shell_argument(id_prefix.as_str());
-                let quoted_title = quote_shell_argument(title.as_str());
-                return write!(
-                    f,
-                    "task creation may already be durable; retry exactly: `tiber tasks create --id {quoted_id_prefix} {quoted_title}`"
-                );
-            }
-            Self::CreationPublication { .. } => {
+                if matches!(source.as_ref(), TiberPublicationError::Ambiguous) {
+                    let quoted_id_prefix = quote_shell_argument(id_prefix.as_str());
+                    let quoted_title = quote_shell_argument(title.as_str());
+                    return write!(
+                        f,
+                        "task creation may already be durable; retry exactly: `tiber tasks create --id {quoted_id_prefix} {quoted_title}`"
+                    );
+                }
                 "the authoritative Tiber task creation could not be published"
             }
             Self::UpdatePublication {
@@ -466,18 +479,18 @@ impl fmt::Display for TaskCliError {
                 title,
                 summary,
                 context,
-                source: TiberPublicationError::Ambiguous,
+                source,
             } => {
-                return write!(
-                    f,
-                    "task update may already be durable; retry exactly: `tiber tasks update {} --title {} --summary {} --context {}`",
-                    quote_shell_argument(task.as_str()),
-                    quote_shell_argument(title.as_str()),
-                    quote_shell_argument(summary),
-                    quote_shell_argument(context)
-                );
-            }
-            Self::UpdatePublication { .. } => {
+                if matches!(source.as_ref(), TiberPublicationError::Ambiguous) {
+                    return write!(
+                        f,
+                        "task update may already be durable; retry exactly: `tiber tasks update {} --title {} --summary {} --context {}`",
+                        quote_shell_argument(task.as_str()),
+                        quote_shell_argument(title.as_str()),
+                        quote_shell_argument(summary),
+                        quote_shell_argument(context)
+                    );
+                }
                 "the authoritative Tiber task update could not be published"
             }
             Self::Runtime(_) => "the local task runtime could not be started",
@@ -518,8 +531,9 @@ impl Error for TaskCliError {
             Self::Projection(error) => Some(error),
             Self::Command(error) => Some(error),
             Self::Publication(error) => Some(error),
-            Self::CreationPublication { source, .. } => Some(source),
-            Self::UpdatePublication { source, .. } => Some(source),
+            Self::CreationPublication { source, .. } | Self::UpdatePublication { source, .. } => {
+                Some(source.as_ref())
+            }
             Self::Runtime(error) => Some(error),
             Self::Core(error) => Some(error),
             Self::MissingSubcommand
@@ -542,6 +556,7 @@ fn quote_shell_argument(argument: &str) -> String {
 #[expect(
     clippy::pattern_type_mismatch,
     clippy::question_mark_used,
+    clippy::too_many_lines,
     reason = "the closed CLI grammar uses slice patterns and typed propagation at its parse boundary"
 )]
 /// Validates the nested command grammar before accessing any repository state.
@@ -570,8 +585,17 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
             _ => Err(TaskCliError::InvalidArguments),
         },
         "update" => match arguments {
-            [reference, title_flag, title, summary_flag, summary, context_flag, context]
-                if title_flag == "--title" && summary_flag == "--summary" && context_flag == "--context" =>
+            [
+                reference,
+                title_flag,
+                title,
+                summary_flag,
+                summary,
+                context_flag,
+                context,
+            ] if title_flag == "--title"
+                && summary_flag == "--summary"
+                && context_flag == "--context" =>
             {
                 Ok(TaskCommand::Update {
                     reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
@@ -683,7 +707,7 @@ fn create_task(
         .map_err(|source| TaskCliError::CreationPublication {
             id_prefix,
             title,
-            source,
+            source: Box::new(source),
         })?;
     Ok(format!(
         "created {} at {}\n",
@@ -705,6 +729,10 @@ fn creation_metadata() -> Result<(TaskId, String), TaskCliError> {
 }
 
 /// Decides and publishes one exact replacement of editable task details.
+#[expect(
+    clippy::question_mark_used,
+    reason = "the imperative update boundary sequences typed history, decision, publication, and retry failures"
+)]
 fn update_task(
     repository: &Path,
     reference: &TaskReference,
@@ -718,8 +746,9 @@ fn update_task(
         .resolve_task_reference(reference)
         .map_err(TaskCliError::Projection)?;
     let request = UpdateTaskDetails::new(task.clone(), title, summary, context);
-    let Some(publication) = decide_update_task_details(history.events(), &request)
-        .map_err(TaskCliError::Command)? else {
+    let Some(publication) =
+        decide_update_task_details(history.events(), &request).map_err(TaskCliError::Command)?
+    else {
         return Ok(format!("{} already updated\n", task.as_str()));
     };
     let mut publisher =
@@ -734,7 +763,7 @@ fn update_task(
             title: request.title().clone(),
             summary: request.summary().to_owned(),
             context: request.context().to_owned(),
-            source,
+            source: Box::new(source),
         })?;
     Ok(format!(
         "updated {} at {}\n",

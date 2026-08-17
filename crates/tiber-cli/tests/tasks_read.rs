@@ -1220,9 +1220,9 @@ mod tests {
         assert!(shown.contains(
             "summary: Persist the owner-visible conversation and its exact next action.\n"
         ));
-        assert!(shown.contains(
-            "context: Drive the packaged Tiber binary through exit and relaunch.\n"
-        ));
+        assert!(
+            shown.contains("context: Drive the packaged Tiber binary through exit and relaunch.\n")
+        );
         assert!(shown.contains("tags: native\n"));
     }
 
@@ -1230,13 +1230,31 @@ mod tests {
     async fn tasks_update_reconciles_the_exact_retry_after_ambiguous_publication() {
         let fixture = TaskFixture::signed_paged_history().await;
         let remote = fixture._directory.path().join("update-remote.git");
-        git(fixture._directory.path(), ["clone", "--bare", fixture.repository.to_str().expect("fixture path is UTF-8"), remote.to_str().expect("remote path is UTF-8")]);
-        git(&fixture.repository, ["remote", "add", "origin", remote.to_str().expect("remote path is UTF-8")]);
+        git(
+            fixture._directory.path(),
+            [
+                "clone",
+                "--bare",
+                fixture.repository.to_str().expect("fixture path is UTF-8"),
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
+        git(
+            &fixture.repository,
+            [
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path is UTF-8"),
+            ],
+        );
         let base = git_output(&fixture.repository, ["rev-parse", TIBER_REF]);
         let commands = fixture._directory.path().join("update-ambiguous-commands");
         fs::create_dir_all(&commands).expect("wrapper directory should be created");
         let wrapper = commands.join("git");
-        fs::write(&wrapper, r#"#!/bin/sh
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
 operation=
 for argument in "$@"; do
   if [ "$argument" = "push" ]; then operation=push; fi
@@ -1253,27 +1271,78 @@ if [ "$operation" = "push" ]; then
   exit "$status"
 fi
 exec "$TIBER_REAL_GIT" "$@"
-"#).expect("Git wrapper should be written");
-        let mut permissions = fs::metadata(&wrapper).expect("wrapper metadata").permissions();
+"#,
+        )
+        .expect("Git wrapper should be written");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&wrapper, permissions).expect("wrapper executable");
-        let real_git = String::from_utf8(Command::new("sh").args(["-c", "command -v git"]).output().expect("Git discovery").stdout).expect("Git path UTF-8").trim().to_owned();
-        let path = format!("{}:{}", commands.display(), std::env::var("PATH").unwrap_or_default());
+        let real_git = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("Git discovery")
+                .stdout,
+        )
+        .expect("Git path UTF-8")
+        .trim()
+        .to_owned();
+        let path = format!(
+            "{}:{}",
+            commands.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let marker = fixture._directory.path().join("update-push-completed");
-        let invocation = ["tasks", "update", TASK_ID, "--title", "Ambiguous title", "--summary", "Ambiguous summary", "--context", "Ambiguous context"];
-        let ambiguous = Command::new(env!("CARGO_BIN_EXE_tiber")).args(invocation).current_dir(&fixture.repository)
-            .env("PATH", path).env("TIBER_REAL_GIT", real_git).env("TIBER_PUSH_MARKER", &marker).env("TIBER_STALE_HEAD", base).output().expect("Tiber CLI");
+        let invocation = [
+            "tasks",
+            "update",
+            TASK_ID,
+            "--title",
+            "Ambiguous title",
+            "--summary",
+            "Ambiguous summary",
+            "--context",
+            "Ambiguous context",
+        ];
+        let ambiguous = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .args(invocation)
+            .current_dir(&fixture.repository)
+            .env("PATH", path)
+            .env("TIBER_REAL_GIT", real_git)
+            .env("TIBER_PUSH_MARKER", &marker)
+            .env("TIBER_STALE_HEAD", base)
+            .output()
+            .expect("Tiber CLI");
         assert!(!ambiguous.status.success());
         let diagnostic = String::from_utf8_lossy(&ambiguous.stderr);
         let remote_after_ambiguous = git_output(&remote, ["rev-parse", TIBER_REF]);
         let retry_command = diagnostic.strip_prefix("tiber_store_publication_ambiguous: task update may already be durable; retry exactly: `")
             .and_then(|text| text.strip_suffix("`\n")).expect("exact retry diagnostic");
-        let tiber_directory = Path::new(env!("CARGO_BIN_EXE_tiber")).parent().expect("binary parent");
-        let retry_path = format!("{}:{}", tiber_directory.display(), std::env::var("PATH").unwrap_or_default());
-        let reconciled = Command::new("sh").args(["-c", retry_command]).current_dir(&fixture.repository).env("PATH", retry_path).output().expect("retry command");
+        let tiber_directory = Path::new(env!("CARGO_BIN_EXE_tiber"))
+            .parent()
+            .expect("binary parent");
+        let retry_path = format!(
+            "{}:{}",
+            tiber_directory.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let reconciled = Command::new("sh")
+            .args(["-c", retry_command])
+            .current_dir(&fixture.repository)
+            .env("PATH", retry_path)
+            .output()
+            .expect("retry command");
         assert_success(&reconciled);
-        assert_eq!(String::from_utf8_lossy(&reconciled.stdout), format!("{TASK_ID} already updated\n"));
-        assert_eq!(git_output(&remote, ["rev-parse", TIBER_REF]), remote_after_ambiguous);
+        assert_eq!(
+            String::from_utf8_lossy(&reconciled.stdout),
+            format!("{TASK_ID} already updated\n")
+        );
+        assert_eq!(
+            git_output(&remote, ["rev-parse", TIBER_REF]),
+            remote_after_ambiguous
+        );
     }
 
     #[tokio::test]

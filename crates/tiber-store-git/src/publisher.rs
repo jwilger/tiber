@@ -186,12 +186,18 @@ impl TiberEventPublisher {
     }
 
     /// Publishes one modeled replacement of a task's editable details.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed publication failure when task authority changes,
+    /// signing fails, or the remote result cannot be safely reconciled.
+    #[inline]
     pub async fn publish_task_details(
         &mut self,
         publication: TaskDetailsPublication,
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (event, streams) = publication.into_event_and_consistency_streams();
-        self.append(&streams, vec![event]).await
+        return self.append(&streams, vec![event]).await;
     }
 
     /// Opens a publishable snapshot only if it still equals the already-read authority revision.

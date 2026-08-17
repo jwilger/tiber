@@ -536,7 +536,14 @@ impl TaskDetailsUpdated {
         summary: String,
         context: String,
     ) -> Self {
-        Self { stream_id, stem, title, tags, summary, context }
+        Self {
+            stream_id,
+            stem,
+            title,
+            tags,
+            summary,
+            context,
+        }
     }
 }
 

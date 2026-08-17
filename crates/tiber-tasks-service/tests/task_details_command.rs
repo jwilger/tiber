@@ -1,4 +1,10 @@
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::expect_used,
+    clippy::implicit_return,
+    clippy::tests_outside_test_module,
+    reason = "the bounded EventCore command fixture fails loudly and directly inspects modeled task-details publications"
+)]
 
 use eventcore::model::{CheckStatus, check};
 use tiber_tasks_core::{TaskEvent, TaskId, TaskTitle};
@@ -12,7 +18,8 @@ fn created() -> TaskEvent {
             "pr_mr_status": null, "pr_mr_url": null, "status": "backlog",
             "stem": "20260816-test-details", "subtasks": [], "summary": "old",
             "tags": ["native"], "title": "Old" }
-    })).expect("valid created fixture")
+    }))
+    .expect("valid created fixture")
 }
 
 fn request() -> UpdateTaskDetails {
@@ -29,7 +36,8 @@ fn updated(title: &str, summary: &str, context: &str) -> TaskEvent {
         "event": "task_details_updated", "stream_id": "tiber:task:20260816-test-details",
         "stem": "20260816-test-details", "title": title, "tags": ["native"],
         "summary": summary, "context": context
-    })).expect("valid updated fixture")
+    }))
+    .expect("valid updated fixture")
 }
 
 #[test]
@@ -56,7 +64,8 @@ fn exact_durable_details_reconcile_without_a_second_publication() {
     let decision = decide_update_task_details(
         &[created(), updated("New", "new summary", "new context")],
         &request(),
-    ).expect("exact durable state is valid");
+    )
+    .expect("exact durable state is valid");
     assert!(decision.is_none());
 }
 
@@ -69,6 +78,7 @@ fn a_later_different_update_does_not_reconcile_an_old_ambiguous_attempt() {
             updated("Changed later", "different", "different"),
         ],
         &request(),
-    ).expect("changed durable state is valid");
+    )
+    .expect("changed durable state is valid");
     assert!(decision.is_some());
 }

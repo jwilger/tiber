@@ -42,9 +42,6 @@ pub type TaskCreationDecision = task_administration::TaskCreationDecision;
 /// Request to replace the owner-editable details of one task.
 pub type UpdateTaskDetails = task_details::UpdateTaskDetails;
 
-/// Decides one exact replacement of a task's editable details.
-pub use task_details::decide_update_task_details;
-
 /// A zero-based durable acceptance-item position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AcceptanceIndex(usize);
@@ -4096,6 +4093,24 @@ pub fn acceptance_consistency_streams(task: &TaskId) -> Result<[StreamId; 2], Ta
     Ok([board, task_stream])
 }
 
+/// Decides one exact replacement of a task's editable details.
+///
+/// # Errors
+///
+/// Returns a typed task-command failure when canonical history cannot
+/// authorize the requested replacement or its modeled publication.
+#[inline]
+#[expect(
+    clippy::implicit_return,
+    reason = "the public command facade preserves the task-local decision result directly"
+)]
+pub fn decide_update_task_details(
+    events: &[TaskEvent],
+    request: &UpdateTaskDetails,
+) -> Result<Option<crate::TaskDetailsPublication>, TaskCommandError> {
+    task_details::decide_update_task_details(events, request)
+}
+
 /// Decides the two-fact publication for one new backlog task.
 ///
 /// The fold retains only current task identities and strict open-task order.
@@ -4107,14 +4122,14 @@ pub fn acceptance_consistency_streams(task: &TaskId) -> Result<[StreamId; 2], Ta
 /// publication violates creation authority.
 #[inline]
 #[expect(
-    clippy::implicit_return,
-    reason = "the public forwarding boundary preserves the typed decision result"
+    clippy::needless_return,
+    reason = "the workspace requires explicit returns while Clippy also reports the resulting forwarding return as needless"
 )]
 pub fn decide_create_task(
     events: &[TaskEvent],
     request: &CreateTask,
 ) -> Result<TaskCreationDecision, TaskCommandError> {
-    task_administration::decide_create_task(events, request)
+    return task_administration::decide_create_task(events, request);
 }
 
 /// Decides the check-only publication needed to check a current acceptance item.

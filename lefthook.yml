@@ -4,11 +4,8 @@ assert_lefthook_installed: true
 pre-commit:
   commands:
     tiber-format:
-      root: "."
       run: nix develop -c cargo fmt --all --check
     tiber-clippy:
-      root: "."
       run: nix develop -c cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
     tiber-unit-tests:
-      root: "."
       run: nix develop -c cargo test --locked --workspace --all-features --lib --bins

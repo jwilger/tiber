@@ -26,11 +26,26 @@ use tiber_tasks_core::{
 /// Opaque publication for one modeled task-details replacement.
 #[derive(Debug, Eq, PartialEq)]
 pub struct TaskDetailsPublication {
-    fact: TaskDetailsUpdated,
+    /// Exact board and addressed-task streams read by the details decision.
     consistency_streams: [StreamId; 2],
+    /// Sole modeled task-details fact authorized for publication.
+    fact: TaskDetailsUpdated,
 }
 
 impl TaskDetailsPublication {
+    /// Creates the closed details token from one modeled fact and its task-stream authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed command failure when the modeled fact is not on the
+    /// addressed task stream or the required board stream cannot be derived.
+    #[expect(
+        clippy::implicit_return,
+        clippy::question_mark_used,
+        clippy::single_call_fn,
+        reason = "the closed-token constructor validates modeled provenance before returning the exact two-stream fence"
+    )]
+    #[inline]
     pub(crate) fn from_modeled_fact(
         fact: TaskDetailsUpdated,
         consistency_stream: StreamId,
@@ -44,13 +59,24 @@ impl TaskDetailsPublication {
         }
         let board_stream = StreamId::try_new("tiber:board".to_owned())
             .map_err(|_source| command::TaskCommandError::InvalidTaskStream)?;
-        Ok(Self { fact, consistency_streams: [board_stream, consistency_stream] })
+        Ok(Self {
+            consistency_streams: [board_stream, consistency_stream],
+            fact,
+        })
     }
 
     /// Transfers the modeled fact and its exact board-and-task stream fences.
     #[must_use]
+    #[inline]
+    #[expect(
+        clippy::implicit_return,
+        reason = "the one-shot opaque transfer is the complete final value"
+    )]
     pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 2]) {
-        (TaskEvent::TaskDetailsUpdated(self.fact), self.consistency_streams)
+        (
+            TaskEvent::TaskDetailsUpdated(self.fact),
+            self.consistency_streams,
+        )
     }
 }
 
