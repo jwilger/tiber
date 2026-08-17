@@ -525,6 +525,21 @@ pub struct TaskDetailsUpdated {
     pub context: String,
 }
 
+impl TaskDetailsUpdated {
+    /// Creates one named complete task-details replacement fact.
+    #[must_use]
+    pub fn new(
+        stream_id: StreamId,
+        stem: TaskId,
+        title: TaskTitle,
+        tags: Vec<String>,
+        summary: String,
+        context: String,
+    ) -> Self {
+        Self { stream_id, stem, title, tags, summary, context }
+    }
+}
+
 /// Historical source-event payload for a claim-only update.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]

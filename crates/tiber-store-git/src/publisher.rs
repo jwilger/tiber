@@ -18,6 +18,7 @@ use tempfile::TempDir;
 use tiber_tasks_service::{
     AcceptanceCheckPublication, SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication,
     TaskActivationPublication, TaskCompletionPublication, TaskCreationPublication,
+    TaskDetailsPublication,
 };
 
 use crate::{
@@ -182,6 +183,15 @@ impl TiberEventPublisher {
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (events, consistency_streams) = publication.into_events_and_consistency_streams();
         return self.append(&consistency_streams, events).await;
+    }
+
+    /// Publishes one modeled replacement of a task's editable details.
+    pub async fn publish_task_details(
+        &mut self,
+        publication: TaskDetailsPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = publication.into_event_and_consistency_streams();
+        self.append(&streams, vec![event]).await
     }
 
     /// Opens a publishable snapshot only if it still equals the already-read authority revision.

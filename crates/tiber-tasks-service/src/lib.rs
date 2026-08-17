@@ -23,6 +23,37 @@ use tiber_tasks_core::{
     TaskSubtaskOccurrenceChecked, TaskTransitioned,
 };
 
+/// Opaque publication for one modeled task-details replacement.
+#[derive(Debug, Eq, PartialEq)]
+pub struct TaskDetailsPublication {
+    fact: TaskDetailsUpdated,
+    consistency_streams: [StreamId; 2],
+}
+
+impl TaskDetailsPublication {
+    pub(crate) fn from_modeled_fact(
+        fact: TaskDetailsUpdated,
+        consistency_stream: StreamId,
+    ) -> Result<Self, command::TaskCommandError> {
+        let expected = consistency_stream
+            .as_ref()
+            .strip_prefix("tiber:task:")
+            .unwrap_or_default();
+        if fact.stream_id != consistency_stream || fact.stem.as_str() != expected {
+            return Err(command::TaskCommandError::InvalidModeledTaskDetailsPublication);
+        }
+        let board_stream = StreamId::try_new("tiber:board".to_owned())
+            .map_err(|_source| command::TaskCommandError::InvalidTaskStream)?;
+        Ok(Self { fact, consistency_streams: [board_stream, consistency_stream] })
+    }
+
+    /// Transfers the modeled fact and its exact board-and-task stream fences.
+    #[must_use]
+    pub fn into_event_and_consistency_streams(self) -> (TaskEvent, [StreamId; 2]) {
+        (TaskEvent::TaskDetailsUpdated(self.fact), self.consistency_streams)
+    }
+}
+
 /// The only publication input for creating one backlog task.
 ///
 /// This opaque token carries the modeled creation fact and resulting strict

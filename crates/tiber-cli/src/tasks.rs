@@ -18,7 +18,7 @@ use tiber_tasks_service::command::{
     RepairDuplicateSubtaskId, StartTask, SubtaskOccurrence, SubtaskReplacementId, TaskCommandError,
     TaskCreationDecision, decide_check_acceptance, decide_check_subtask_occurrence,
     decide_complete_task, decide_create_task, decide_repair_duplicate_subtask_id,
-    decide_start_task,
+    decide_start_task, decide_update_task_details, UpdateTaskDetails,
 };
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -32,7 +32,7 @@ const TASK_HISTORY_PAGE_SIZE: usize = 64;
     clippy::pub_with_shorthand,
     reason = "the parent command shell consumes the one canonical task grammar without widening it to the crate"
 )]
-pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
+pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done";
 
 /// The exact durable stream patterns that comprise native Tiber Tasks history.
 ///
@@ -68,6 +68,9 @@ pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, Tas
     match command {
         TaskCommand::Help => Ok(help_output()),
         TaskCommand::Create { id_prefix, title } => create_task(repository, id_prefix, title),
+        TaskCommand::Update { reference, title, summary, context } => {
+            update_task(repository, &reference, title, summary, context)
+        }
         TaskCommand::AcceptanceCheck { reference, index } => {
             check_acceptance(repository, &reference, index)
         }
@@ -115,6 +118,13 @@ pub(super) enum TaskCommand {
         id_prefix: Option<TaskId>,
         /// Parsed owner-facing task title.
         title: TaskTitle,
+    },
+    /// Replaces the title, summary, and context of one existing task.
+    Update {
+        reference: TaskReference,
+        title: TaskTitle,
+        summary: String,
+        context: String,
     },
     /// Activates one strict-next eligible backlog task through the signed native write boundary.
     Start {
@@ -216,6 +226,14 @@ pub(super) enum TaskCliError {
         /// Underlying typed publication outcome.
         source: TiberPublicationError,
     },
+    /// Task-details publication failed while retaining its exact retry intent.
+    UpdatePublication {
+        task: TaskId,
+        title: TaskTitle,
+        summary: String,
+        context: String,
+        source: TiberPublicationError,
+    },
     /// The CLI could not create its bounded local async runtime for `EventCore` append work.
     Runtime(io::Error),
     /// A static native task stream pattern was rejected by the `EventCore` boundary.
@@ -245,6 +263,7 @@ impl TaskCliError {
             Self::Command(error) => error.code(),
             Self::Publication(error) => error.code(),
             Self::CreationPublication { source, .. } => source.code(),
+            Self::UpdatePublication { source, .. } => source.code(),
             Self::Runtime(_) => "tiber_tasks_runtime_unavailable",
             Self::StreamPattern => "tiber_tasks_stream_pattern_invalid",
             Self::ProjectionTaskMissing => "tiber_tasks_projection_task_missing",
@@ -334,6 +353,7 @@ impl TaskCliError {
             | Self::Projection(_)
             | Self::Publication(_)
             | Self::CreationPublication { .. }
+            | Self::UpdatePublication { .. }
             | Self::Runtime(_)
             | Self::StreamPattern
             | Self::ProjectionTaskMissing => None,
@@ -441,6 +461,25 @@ impl fmt::Display for TaskCliError {
             Self::CreationPublication { .. } => {
                 "the authoritative Tiber task creation could not be published"
             }
+            Self::UpdatePublication {
+                task,
+                title,
+                summary,
+                context,
+                source: TiberPublicationError::Ambiguous,
+            } => {
+                return write!(
+                    f,
+                    "task update may already be durable; retry exactly: `tiber tasks update {} --title {} --summary {} --context {}`",
+                    quote_shell_argument(task.as_str()),
+                    quote_shell_argument(title.as_str()),
+                    quote_shell_argument(summary),
+                    quote_shell_argument(context)
+                );
+            }
+            Self::UpdatePublication { .. } => {
+                "the authoritative Tiber task update could not be published"
+            }
             Self::Runtime(_) => "the local task runtime could not be started",
             Self::StreamPattern => "the native task stream selection is invalid",
             Self::Projection(TaskProjectionError::TaskReferenceMissing { reference }) => {
@@ -480,6 +519,7 @@ impl Error for TaskCliError {
             Self::Command(error) => Some(error),
             Self::Publication(error) => Some(error),
             Self::CreationPublication { source, .. } => Some(source),
+            Self::UpdatePublication { source, .. } => Some(source),
             Self::Runtime(error) => Some(error),
             Self::Core(error) => Some(error),
             Self::MissingSubcommand
@@ -527,6 +567,19 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
             [reference] => Ok(TaskCommand::Start {
                 reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
             }),
+            _ => Err(TaskCliError::InvalidArguments),
+        },
+        "update" => match arguments {
+            [reference, title_flag, title, summary_flag, summary, context_flag, context]
+                if title_flag == "--title" && summary_flag == "--summary" && context_flag == "--context" =>
+            {
+                Ok(TaskCommand::Update {
+                    reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+                    title: TaskTitle::parse(title).map_err(TaskCliError::Core)?,
+                    summary: summary.clone(),
+                    context: context.clone(),
+                })
+            }
             _ => Err(TaskCliError::InvalidArguments),
         },
         "acceptance" => match arguments {
@@ -649,6 +702,45 @@ fn creation_metadata() -> Result<(TaskId, String), TaskCliError> {
             )
         })
         .map_err(TaskCliError::Core)
+}
+
+/// Decides and publishes one exact replacement of editable task details.
+fn update_task(
+    repository: &Path,
+    reference: &TaskReference,
+    title: TaskTitle,
+    summary: String,
+    context: String,
+) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let request = UpdateTaskDetails::new(task.clone(), title, summary, context);
+    let Some(publication) = decide_update_task_details(history.events(), &request)
+        .map_err(TaskCliError::Command)? else {
+        return Ok(format!("{} already updated\n", task.as_str()));
+    };
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_task_details(publication))
+        .map_err(|source| TaskCliError::UpdatePublication {
+            task: task.clone(),
+            title: request.title().clone(),
+            summary: request.summary().to_owned(),
+            context: request.context().to_owned(),
+            source,
+        })?;
+    Ok(format!(
+        "updated {} at {}\n",
+        task.as_str(),
+        outcome.revision().as_str()
+    ))
 }
 
 /// Decides and publishes one bounded task activation through the native signed boundary.

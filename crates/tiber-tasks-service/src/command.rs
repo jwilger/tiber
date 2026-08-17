@@ -6,6 +6,8 @@
 
 #[path = "task_administration.rs"]
 mod task_administration;
+#[path = "task_details.rs"]
+mod task_details;
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::{error::Error, fmt};
@@ -36,6 +38,12 @@ pub type CreateTask = task_administration::CreateTask;
 
 /// Closed result of one task-creation decision.
 pub type TaskCreationDecision = task_administration::TaskCreationDecision;
+
+/// Request to replace the owner-editable details of one task.
+pub type UpdateTaskDetails = task_details::UpdateTaskDetails;
+
+/// Decides one exact replacement of a task's editable details.
+pub use task_details::decide_update_task_details;
 
 /// A zero-based durable acceptance-item position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -892,6 +900,10 @@ pub enum TaskCommandError {
     InvalidModeledTaskCreationPublication,
     /// The checked `EventCore` command could not produce its creation batch.
     ModeledTaskCreationDecisionFailed,
+    /// The checked `EventCore` command could not produce its task-details fact.
+    ModeledTaskDetailsDecisionFailed,
+    /// The checked `EventCore` command did not produce one valid task-details fact.
+    InvalidModeledTaskDetailsPublication,
 }
 
 impl TaskCommandError {
@@ -987,6 +999,12 @@ impl TaskCommandError {
             }
             Self::ModeledTaskCreationDecisionFailed => {
                 "tasks_command_modeled_task_creation_decision_failed"
+            }
+            Self::ModeledTaskDetailsDecisionFailed => {
+                "tasks_command_modeled_task_details_decision_failed"
+            }
+            Self::InvalidModeledTaskDetailsPublication => {
+                "tasks_command_invalid_modeled_task_details_publication"
             }
         }
     }
