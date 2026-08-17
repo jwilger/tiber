@@ -3076,8 +3076,8 @@ exec "$TIBER_REAL_GIT" "$@"
     )]
     fn explicit_help_flags_succeed_without_an_error_diagnostic() {
         let directory = TempDir::new().expect("fixture directory should be created");
-        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
-        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
+        let root_usage = "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>]\n";
+        let tasks_usage = "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n";
         let usage_exit_code: i32 = 2;
         let cases: &[(&[&str], &str)] = &[
             (&["--help"], root_usage),
@@ -3163,7 +3163,7 @@ exec "$TIBER_REAL_GIT" "$@"
         assert!(String::from_utf8_lossy(&output.stderr).is_empty());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "usage: tiber tasks <create [--id <stable-prefix>] <title> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
+            "usage: tiber tasks <create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> done>\n"
         );
     }
 
