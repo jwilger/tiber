@@ -1649,13 +1649,7 @@ fn next_effect_fact(
     clippy::implicit_return,
     reason = "the public factory directly builds the checked command from its parsed request"
 )]
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::single_call_fn,
-        reason = "the shipping workflow boundary has one initialization construction site"
-    )
-)]
+#[cfg(test)]
 fn initialize_workflow(
     stream: WorkflowStream,
     state: HarnessState,
@@ -1710,13 +1704,7 @@ fn initialize_successor_workflow(
     clippy::implicit_return,
     reason = "the public factory directly builds the checked command from its parsed request"
 )]
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::single_call_fn,
-        reason = "the shipping workflow boundary has one observation construction site"
-    )
-)]
+#[cfg(test)]
 fn record_observation(
     stream: WorkflowStream,
     observation: EffectObservation,
@@ -1763,7 +1751,14 @@ pub fn decide_initialize_workflow(
     state: HarnessState,
 ) -> Result<WorkflowInitializationPublication, WorkflowServiceError> {
     let consistency = stream.id.clone();
-    let command = initialize_workflow(stream, state);
+    let request = InitializeWorkflowRequest::model_builder()
+        .stream(stream)
+        .state(state)
+        .build();
+    let command = InitializeWorkflow::model_builder()
+        .stream(InitializeWorkflowRequestToStream::apply(request.as_ref()))
+        .state(InitializeWorkflowRequestToState::apply(request.as_ref()))
+        .build();
     let events: Vec<WorkflowEvent> = CommandLogic::handle(&command, Modeled::default())
         .map_err(|_source| WorkflowServiceError::ModeledCommandFailed)?
         .into();
@@ -1852,7 +1847,16 @@ pub fn decide_record_observation(
     observation: EffectObservation,
 ) -> Result<WorkflowObservationPublication, WorkflowServiceError> {
     let consistency = stream.id.clone();
-    let command = record_observation(stream, observation);
+    let request = RecordObservationRequest::model_builder()
+        .stream(stream)
+        .observation(observation)
+        .build();
+    let command = RecordObservation::model_builder()
+        .stream(RecordObservationRequestToStream::apply(request.as_ref()))
+        .observation(RecordObservationRequestToObservation::apply(
+            request.as_ref(),
+        ))
+        .build();
     let mut state: Modeled<RecordObservationState> = Modeled::default();
     for event in history {
         state = ModelCommandLogic::evolve(command.as_ref(), state, event);
