@@ -547,6 +547,7 @@ mod tests {
         );
         fs::write(&fixture.completion_release, b"continue\n").expect("release completion");
         wait_for_file(&fixture.turn_completed);
+        wait_for_session_text(&fixture, "workflow-state: completed");
         fs::remove_file(&fixture.turn_completed).expect("reset completion sentinel");
         child
             .stdin
@@ -1167,8 +1168,13 @@ mod tests {
         assert_success(&first.wait_with_output().expect("first Tiber exits"));
 
         fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
-        let mut recovered = fixture.start_pty_mode("repository-edit");
-        wait_for_file(&fixture.initialized);
+        let mut recovered =
+            fixture.start_pty_mode_with_capture("repository-edit", &fixture.terminal_capture);
+        wait_for_file_or_exit(
+            &mut recovered,
+            &fixture.initialized,
+            &fixture.terminal_capture,
+        );
         wait_for_session_text(&fixture, "repository change cancelled: README.md");
         let cancelled = fixture.tiber(&["session", "active"]);
         recovered
@@ -1468,10 +1474,7 @@ mod tests {
             .stdin
             .as_mut()
             .expect("PTY should accept owner input")
-            .write_all(
-                b"approve atomically before a forced crash
-",
-            )
+            .write_all(b"approve atomically before a forced crash\r")
             .expect("owner prompt should reach Tiber");
         wait_for_session_text(
             &fixture,
@@ -1481,10 +1484,7 @@ mod tests {
             .stdin
             .as_mut()
             .expect("PTY should accept approval")
-            .write_all(
-                b"approve
-",
-            )
+            .write_all(b"approve\r")
             .expect("approval should reach Tiber");
         wait_for_file(&fixture.approved_crash);
         let crashed = child
@@ -1752,7 +1752,11 @@ mod tests {
         fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
         let mut recovered =
             fixture.start_pty_mode_with_capture("repository-edit", &fixture.terminal_capture);
-        wait_for_file(&fixture.initialized);
+        wait_for_file_or_exit(
+            &mut recovered,
+            &fixture.initialized,
+            &fixture.terminal_capture,
+        );
         wait_for_session_text(&fixture, "repository change reconciled: README.md");
         let reconciliation = fixture.tiber(&["session", "active"]);
         recovered
@@ -2971,8 +2975,7 @@ mod tests {
     #[expect(
         clippy::arithmetic_side_effects,
         clippy::panic,
-        clippy::single_call_fn,
-        reason = "one bounded crash fixture polls a child and fails fast with captured diagnostics"
+        reason = "bounded crash fixtures poll a child and fail fast with captured diagnostics"
     )]
     fn wait_for_file_or_exit(child: &mut Child, path: &Path, capture: &Path) {
         let deadline = Instant::now() + Duration::from_secs(5);

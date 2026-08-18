@@ -2669,16 +2669,7 @@ pub fn decide_cancel_open_proposal_on_restart(
         return decide_cancel_mutation(history, stream, proposal, provenance).map(Some);
     };
 
-    match decide_cancel_mutation(
-        &history[..=owner_decision],
-        stream.clone(),
-        proposal,
-        provenance,
-    ) {
-        Err(RepositoryMutationServiceError::OwnerDecisionAlreadyRecorded) => {}
-        Err(error) => return Err(error),
-        Ok(_publication) => return Err(RepositoryMutationServiceError::InvalidHistory),
-    }
+    validate_closed_owner_decision(history, owner_decision, &proposal, &stream)?;
 
     let approved = matches!(
         history[owner_decision].fact(),
@@ -2707,6 +2698,65 @@ pub fn decide_cancel_open_proposal_on_restart(
 
     recover_prepared_from_history(history, &stream)?;
     Ok(None)
+}
+
+/// Validates the exact proposal prefix and retained owner decision at restart.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::single_call_fn,
+    clippy::wildcard_enum_match_arm,
+    reason = "the restart-only validator matches borrowed non-exhaustive lifecycle facts at one semantic boundary"
+)]
+fn validate_closed_owner_decision(
+    history: &[RepositoryMutationEvent],
+    owner_decision: usize,
+    proposal: &RepositoryMutationProposalIdentity,
+    stream: &RepositoryMutationStream,
+) -> Result<(), RepositoryMutationServiceError> {
+    let Some((proposal_history, decision_history)) = history.split_at_checked(owner_decision)
+    else {
+        return Err(RepositoryMutationServiceError::InvalidHistory);
+    };
+    let mut retained_proposal = None;
+    for event in proposal_history {
+        if event.stream != *stream.as_stream_id() {
+            return Err(RepositoryMutationServiceError::InvalidHistory);
+        }
+        match event.fact() {
+            RepositoryMutationFact::Proposed(candidate) => {
+                if retained_proposal.is_some() {
+                    return Err(RepositoryMutationServiceError::InvalidHistory);
+                }
+                retained_proposal = Some(candidate);
+            }
+            RepositoryMutationFact::Reproposed(candidate) => {
+                if retained_proposal.is_none() {
+                    return Err(RepositoryMutationServiceError::InvalidHistory);
+                }
+                retained_proposal = Some(candidate);
+            }
+            _ => return Err(RepositoryMutationServiceError::InvalidHistory),
+        }
+    }
+    if retained_proposal != Some(proposal) {
+        return Err(RepositoryMutationServiceError::InvalidHistory);
+    }
+    let Some((decision, _dispatch_history)) = decision_history.split_first() else {
+        return Err(RepositoryMutationServiceError::InvalidHistory);
+    };
+    if decision.stream != *stream.as_stream_id() {
+        return Err(RepositoryMutationServiceError::InvalidHistory);
+    }
+    let decided_proposal = match decision.fact() {
+        RepositoryMutationFact::Approved(approval) => approval.proposal(),
+        RepositoryMutationFact::Denied(candidate)
+        | RepositoryMutationFact::Cancelled(candidate) => candidate,
+        _ => return Err(RepositoryMutationServiceError::InvalidHistory),
+    };
+    if decided_proposal != proposal {
+        return Err(RepositoryMutationServiceError::InvalidHistory);
+    }
+    Ok(())
 }
 
 /// Decides durable preparation and returns the one-shot adapter authority that

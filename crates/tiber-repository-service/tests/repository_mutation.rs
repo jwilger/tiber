@@ -502,6 +502,130 @@ fn restart_cancellation_rejects_closed_history_from_another_effect_stream() {
     clippy::tests_outside_test_module,
     reason = "this public-boundary integration test keeps its scenario and explicit fail-fast assertions at crate scope"
 )]
+fn restart_cancellation_emits_once_for_an_open_proposal() {
+    let bytes = b"open proposal at restart";
+    let proposal = fixture::write_proposal(bytes);
+    let identity = proposal.identity();
+    let stream = RepositoryMutationStream::new(&identity).expect("valid stream");
+    let proposed = publication_event(
+        decide_propose_mutation(&[], stream.clone(), proposal)
+            .expect("proposal should be recorded"),
+    );
+
+    let cancellation = decide_cancel_open_proposal_on_restart(from_ref(&proposed), stream)
+        .expect("open proposal should be cancellable")
+        .expect("open proposal should emit one cancellation");
+
+    assert!(matches!(
+        publication_event(cancellation).fact(),
+        RepositoryMutationFact::Cancelled(_)
+    ));
+}
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "this public-boundary integration test keeps its scenario and explicit fail-fast assertions at crate scope"
+)]
+fn restart_cancellation_is_a_no_op_for_prepared_history() {
+    let bytes = b"prepared proposal at restart";
+    let (proposal, assignment, policy, approval_id) = fixture::write_request(bytes);
+    let identity = proposal.identity();
+    let stream = RepositoryMutationStream::new(&identity).expect("valid stream");
+    let proposed = publication_event(
+        decide_propose_mutation(&[], stream.clone(), fixture::write_proposal(bytes))
+            .expect("proposal should be recorded"),
+    );
+    let approved = publication_event(
+        decide_approve_mutation(
+            from_ref(&proposed),
+            stream.clone(),
+            identity,
+            proposal.identity().provenance().clone(),
+            approval_id.clone(),
+        )
+        .expect("proposal should be approved"),
+    );
+    let mut history = vec![proposed, approved];
+    history.push(publication_event(
+        decide_prepare_mutation(
+            &history,
+            stream.clone(),
+            &proposal,
+            &assignment,
+            &policy,
+            approval_id,
+        )
+        .expect("approved proposal should be prepared"),
+    ));
+
+    assert!(
+        decide_cancel_open_proposal_on_restart(&history, stream)
+            .expect("prepared history should be left for reconciliation")
+            .is_none()
+    );
+}
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    clippy::panic,
+    reason = "this public-boundary integration test keeps its scenario and explicit fail-fast assertions at crate scope"
+)]
+fn restart_cancellation_is_a_no_op_for_unknown_history() {
+    let bytes = b"unknown proposal at restart";
+    let (proposal, assignment, policy, approval_id) = fixture::write_request(bytes);
+    let identity = proposal.identity();
+    let stream = RepositoryMutationStream::new(&identity).expect("valid stream");
+    let proposed = publication_event(
+        decide_propose_mutation(&[], stream.clone(), fixture::write_proposal(bytes))
+            .expect("proposal should be recorded"),
+    );
+    let approved = publication_event(
+        decide_approve_mutation(
+            from_ref(&proposed),
+            stream.clone(),
+            identity,
+            proposal.identity().provenance().clone(),
+            approval_id.clone(),
+        )
+        .expect("proposal should be approved"),
+    );
+    let mut history = vec![proposed, approved];
+    history.push(publication_event(
+        decide_prepare_mutation(
+            &history,
+            stream.clone(),
+            &proposal,
+            &assignment,
+            &policy,
+            approval_id,
+        )
+        .expect("approved proposal should be prepared"),
+    ));
+    let authority = authorize_prepared_mutation(&history, proposal, &assignment, &policy)
+        .expect("prepared history should authorize one dispatch");
+    let RepositoryDispatchOutcome::OutcomeUnknown(reconciliation) = authority.into_ambiguity()
+    else {
+        panic!("ambiguous dispatch must expose reconciliation authority");
+    };
+    history.push(publication_event(
+        decide_record_unknown(&history, stream.clone(), reconciliation)
+            .expect("unknown outcome should become durable"),
+    ));
+
+    assert!(
+        decide_cancel_open_proposal_on_restart(&history, stream)
+            .expect("unknown history should be left for reconciliation")
+            .is_none()
+    );
+}
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "this public-boundary integration test keeps its scenario and explicit fail-fast assertions at crate scope"
+)]
 fn repository_mutation_failures_expose_distinct_stable_codes() {
     let invalid_history = RepositoryMutationServiceError::InvalidHistory;
     let stream_mismatch = RepositoryMutationServiceError::StreamProposalMismatch;
