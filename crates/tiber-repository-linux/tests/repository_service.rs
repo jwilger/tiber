@@ -641,6 +641,219 @@ mod tests {
     }
 
     #[test]
+    fn identical_retry_adopts_valid_staging_left_by_interrupted_worker() {
+        let repository = repository_with_src();
+        let original = b"original before interrupted staging\n";
+        let replacement = b"approved replacement after restart\n";
+        let target = repository.path().join("src/interrupted-write.txt");
+        std::fs::write(&target, original).expect("preimage should be written");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))
+            .expect("read-only preimage mode should be established");
+        let before = tiber_repository_core::Sha256Digest::of(original);
+        let after = tiber_repository_core::Sha256Digest::of(replacement);
+        let operation_key = format!(
+            "interrupted-write.txt\0{}\0{}",
+            before.as_hex(),
+            after.as_hex()
+        );
+        let artifact = repository.path().join("src").join(format!(
+            ".tiber-write-{}",
+            tiber_repository_core::Sha256Digest::of(operation_key.as_bytes()).as_hex()
+        ));
+        std::fs::write(&artifact, replacement)
+            .expect("interrupted worker staging should remain durable");
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o444))
+            .expect("interrupted artifact should retain the approved read-only mode");
+        let mutation = authorized_write(
+            "src/interrupted-write.txt",
+            replacement,
+            WritePrecondition::ExactDigest(before),
+            15_000,
+        );
+
+        let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
+
+        assert!(
+            matches!(outcome, Ok(RepositoryDispatchOutcome::Applied(_))),
+            "an identical restart must adopt its exact durable staging: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("retried target should remain readable"),
+            replacement
+        );
+        assert_no_worker_artifacts(repository.path().join("src"));
+    }
+
+    #[test]
+    fn exact_write_does_not_overwrite_content_changed_after_precheck() {
+        let repository = repository_with_src();
+        let target = repository.path().join("src/raced-write.txt");
+        let original = b"original before exact precheck
+";
+        std::fs::write(&target, original).expect("test file should be written");
+        let parent = repository.path().join("src");
+        let cooperative_replacement = repository.path().join("cooperative-raced-write");
+        std::fs::write(
+            &cooperative_replacement,
+            b"cooperative change after precheck\n",
+        )
+        .expect("cooperative replacement should be staged");
+        let replacement = vec![b'r'; tiber_repository_core::MAX_REPOSITORY_CONTENT_BYTES];
+        let before_digest = tiber_repository_core::Sha256Digest::of(original);
+        let after_digest = tiber_repository_core::Sha256Digest::of(&replacement);
+        let operation_key = format!(
+            "raced-write.txt\0{}\0{}",
+            before_digest.as_hex(),
+            after_digest.as_hex()
+        );
+        let operation_digest = tiber_repository_core::Sha256Digest::of(operation_key.as_bytes());
+        let pause = parent.join(format!(".tiber-test-pause-{}", operation_digest.as_hex()));
+        std::fs::write(&pause, b"pause").expect("deterministic race gate should be created");
+        let changed_target = target.clone();
+        let ready = Arc::new(Barrier::new(2));
+        let watcher_ready = Arc::clone(&ready);
+        let (artifact_sender, artifact_receiver) = std::sync::mpsc::channel();
+        let watcher = std::thread::spawn(move || {
+            let notifications =
+                inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)
+                    .expect("inotify fixture should initialize");
+            inotify::add_watch(&notifications, &parent, inotify::WatchFlags::CREATE)
+                .expect("worker directory should be watchable");
+            watcher_ready.wait();
+            let staging = wait_for_worker_artifact(notifications, &parent, ".tiber-write-");
+            artifact_sender
+                .send(
+                    staging
+                        .file_name()
+                        .expect("staging artifact should have a file name")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+                .expect("artifact identity should reach the fixture");
+            std::fs::rename(&cooperative_replacement, &changed_target)
+                .expect("cooperative content change should be installed");
+            std::fs::remove_file(pause).expect("worker race gate should be released");
+        });
+        ready.wait();
+        let mutation = authorized_write(
+            "src/raced-write.txt",
+            &replacement,
+            WritePrecondition::ExactDigest(before_digest),
+            15_000,
+        );
+
+        let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
+
+        watcher.join().expect("watcher should finish");
+        let artifact_name = artifact_receiver
+            .recv()
+            .expect("observed artifact identity should remain available");
+        assert_eq!(
+            artifact_name,
+            format!(".tiber-write-{}", operation_digest.as_hex()),
+            "staging must use collision-resistant operation identity, never a reusable PID"
+        );
+        assert!(
+            !matches!(outcome, Ok(RepositoryDispatchOutcome::Applied(_))),
+            "a changed preimage must never be classified applied: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("cooperative target must remain canonical"),
+            b"cooperative change after precheck\n",
+            "a failed exact write must not leave approved bytes over newer cooperative content"
+        );
+        assert_no_worker_artifacts(repository.path().join("src"));
+    }
+
+    #[test]
+    fn exact_write_restores_preimage_when_staged_install_fails() {
+        let repository = repository_with_src();
+        let parent = repository.path().join("src");
+        let target = parent.join("failed-install.txt");
+        let original = b"original survives failed install\n";
+        let replacement = b"replacement cannot install\n";
+        std::fs::write(&target, original).expect("preimage should be written");
+        let before = tiber_repository_core::Sha256Digest::of(original);
+        let after = tiber_repository_core::Sha256Digest::of(replacement);
+        let key = format!(
+            "failed-install.txt\0{}\0{}",
+            before.as_hex(),
+            after.as_hex()
+        );
+        let operation = tiber_repository_core::Sha256Digest::of(key.as_bytes());
+        let staging = parent.join(format!(".tiber-write-{}", operation.as_hex()));
+        let displaced = parent.join(format!(".tiber-write-before-{}", operation.as_hex()));
+        let pause = parent.join(format!(".tiber-test-pause-install-{}", operation.as_hex()));
+        std::fs::write(&pause, b"pause").expect("install failure gate should be created");
+        let watcher = std::thread::spawn(move || {
+            wait_for_path(&displaced);
+            std::fs::remove_file(staging).expect("staged install should be interrupted");
+            std::fs::remove_file(pause).expect("install failure gate should be released");
+        });
+        let mutation = authorized_write(
+            "src/failed-install.txt",
+            replacement,
+            WritePrecondition::ExactDigest(before),
+            15_000,
+        );
+
+        let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
+
+        watcher.join().expect("failure watcher should finish");
+        assert!(outcome.is_err(), "failed installation must not be applied");
+        assert_eq!(
+            std::fs::read(&target).expect("preimage should be restored"),
+            original
+        );
+        assert_no_worker_artifacts(parent);
+    }
+
+    #[test]
+    fn exact_write_cleans_artifacts_when_competing_create_wins_install() {
+        let repository = repository_with_src();
+        let parent = repository.path().join("src");
+        let target = parent.join("competing-install.txt");
+        let original = b"original before competing create\n";
+        let replacement = b"approved but never installed\n";
+        let competing = b"competing canonical bytes\n";
+        std::fs::write(&target, original).expect("preimage should be written");
+        let before = tiber_repository_core::Sha256Digest::of(original);
+        let after = tiber_repository_core::Sha256Digest::of(replacement);
+        let key = format!(
+            "competing-install.txt\0{}\0{}",
+            before.as_hex(),
+            after.as_hex()
+        );
+        let operation = tiber_repository_core::Sha256Digest::of(key.as_bytes());
+        let displaced = parent.join(format!(".tiber-write-before-{}", operation.as_hex()));
+        let pause = parent.join(format!(".tiber-test-pause-install-{}", operation.as_hex()));
+        std::fs::write(&pause, b"pause").expect("competing-create gate should be created");
+        let competing_target = target.clone();
+        let watcher = std::thread::spawn(move || {
+            wait_for_path(&displaced);
+            std::fs::write(&competing_target, competing)
+                .expect("competing writer should win the absent canonical path");
+            std::fs::remove_file(pause).expect("competing-create gate should be released");
+        });
+        let mutation = authorized_write(
+            "src/competing-install.txt",
+            replacement,
+            WritePrecondition::ExactDigest(before),
+            15_000,
+        );
+
+        let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
+
+        watcher.join().expect("competing writer should finish");
+        assert_failure(outcome, RepositoryMutationFailureCode::DefinitelyNotApplied);
+        assert_eq!(
+            std::fs::read(&target).expect("competing target should remain canonical"),
+            competing
+        );
+        assert_no_worker_artifacts(parent);
+    }
+
+    #[test]
     fn exact_write_preserves_existing_executable_mode() {
         let repository = repository_with_src();
         let target = repository.path().join("src/tool");
@@ -706,6 +919,7 @@ mod tests {
         let interloper_target = target.clone();
         let ready = Arc::new(Barrier::new(2));
         let interloper_ready = Arc::clone(&ready);
+        let (artifact_sender, artifact_receiver) = std::sync::mpsc::channel();
         let interloper = std::thread::spawn(move || {
             let notifications =
                 inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)
@@ -718,6 +932,15 @@ mod tests {
             .expect("worker directory should be watchable");
             interloper_ready.wait();
             let quarantine = wait_for_worker_artifact(notifications, &parent, ".tiber-delete-");
+            artifact_sender
+                .send(
+                    quarantine
+                        .file_name()
+                        .expect("quarantine should have a file name")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+                .expect("artifact identity should reach the fixture");
             std::fs::write(&interloper_target, b"newly appeared\n")
                 .expect("interloper target should be created");
             std::fs::write(quarantine, b"changed while quarantined\n")
@@ -733,6 +956,18 @@ mod tests {
         let outcome = block_on_ready(service(repository.path()).dispatch(mutation));
 
         interloper.join().expect("interloper should finish");
+        let before_digest = tiber_repository_core::Sha256Digest::of(&original);
+        let operation_key = format!("raced-delete.bin\0{}", before_digest.as_hex());
+        assert_eq!(
+            artifact_receiver
+                .recv()
+                .expect("observed quarantine identity should remain available"),
+            format!(
+                ".tiber-delete-{}",
+                tiber_repository_core::Sha256Digest::of(operation_key.as_bytes()).as_hex()
+            ),
+            "delete quarantine must use collision-resistant operation identity, never a reusable PID"
+        );
         assert!(
             matches!(outcome, Ok(RepositoryDispatchOutcome::OutcomeUnknown(_))),
             "post-mutation conflict must preserve ambiguity: {outcome:?}"
@@ -1474,7 +1709,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_repository_reconciliation_is_read_only_and_still_unknown() {
+    fn matching_repository_reconciliation_proves_absent_write_was_not_applied_read_only() {
         let repository = repository_with_src();
         let reconciliation = ambiguity_for_repository("repo-1");
         let before = std::fs::read_dir(repository.path().join("src"))
@@ -1485,9 +1720,82 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            Ok(RepositoryReconciliationOutcome::StillUnknown(receipt))
-                if receipt.state() == RepositoryReconciliationState::StillUnknown
+            Ok(RepositoryReconciliationOutcome::NotApplied(receipt))
+                if receipt.state() == RepositoryReconciliationState::NotApplied
         ));
+        let after = std::fs::read_dir(repository.path().join("src"))
+            .expect("repository should remain readable")
+            .count();
+        assert_eq!(before, after, "read-only reconciliation must not mutate");
+    }
+
+    #[test]
+    fn reconciliation_never_infers_exact_write_applied_from_replacement_alone() {
+        let repository = repository_with_src();
+        let target = repository.path().join("src/reconcile-exact-write.txt");
+        let original = b"original before crash
+";
+        let replacement = b"replacement visible after crash
+";
+        std::fs::write(&target, original).expect("original target should be written");
+        let reconciliation = match authorized_write(
+            "src/reconcile-exact-write.txt",
+            replacement,
+            WritePrecondition::ExactDigest(tiber_repository_core::Sha256Digest::of(original)),
+            15_000,
+        )
+        .into_ambiguity()
+        {
+            RepositoryDispatchOutcome::OutcomeUnknown(reconciliation) => reconciliation,
+            RepositoryDispatchOutcome::Applied(_) => {
+                panic!("direct ambiguity conversion cannot produce applied")
+            }
+        };
+        std::fs::write(&target, replacement).expect("crash-window replacement should be visible");
+        let before = std::fs::read(&target).expect("replacement should be readable");
+
+        let outcome = block_on_ready(service(repository.path()).reconcile(reconciliation));
+
+        assert!(
+            !matches!(outcome, Ok(RepositoryReconciliationOutcome::Applied(_))),
+            "replacement bytes alone cannot prove finalized application: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read-only reconciliation must preserve target"),
+            before
+        );
+    }
+
+    #[test]
+    fn reconciliation_never_infers_exact_delete_applied_from_absence_alone() {
+        let repository = repository_with_src();
+        let target = repository.path().join("src/reconcile-exact-delete.txt");
+        let original = b"original before delete crash
+";
+        std::fs::write(&target, original).expect("original target should be written");
+        let reconciliation = match authorized_delete(
+            "src/reconcile-exact-delete.txt",
+            tiber_repository_core::Sha256Digest::of(original),
+            15_000,
+        )
+        .into_ambiguity()
+        {
+            RepositoryDispatchOutcome::OutcomeUnknown(reconciliation) => reconciliation,
+            RepositoryDispatchOutcome::Applied(_) => {
+                panic!("direct ambiguity conversion cannot produce applied")
+            }
+        };
+        std::fs::remove_file(&target).expect("crash-window target should be absent");
+        let before = std::fs::read_dir(repository.path().join("src"))
+            .expect("repository should be readable")
+            .count();
+
+        let outcome = block_on_ready(service(repository.path()).reconcile(reconciliation));
+
+        assert!(
+            !matches!(outcome, Ok(RepositoryReconciliationOutcome::Applied(_))),
+            "target absence alone cannot prove finalized deletion: {outcome:?}"
+        );
         let after = std::fs::read_dir(repository.path().join("src"))
             .expect("repository should remain readable")
             .count();
@@ -1912,10 +2220,6 @@ mod tests {
         }
     }
 
-    #[expect(
-        clippy::single_call_fn,
-        reason = "the rollback regression observes the private quarantine namespace boundary once"
-    )]
     fn wait_for_worker_artifact(
         notifications: std::os::fd::OwnedFd,
         directory: &std::path::Path,

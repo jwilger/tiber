@@ -1,11 +1,11 @@
 use crate::protocol::{WorkerRequest, WorkerResponse, WorkerWritePrecondition};
+use core::ops::Range;
 use rustix::{
     fs::{
         self, AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, flock,
         openat2, renameat_with, unlinkat,
     },
     io::{Errno, Result as RustixResult},
-    process::getpid,
 };
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -13,9 +13,11 @@ use std::{
     fs::{File, read_link},
     io::{Read as _, Write as _, stdin, stdout},
     os::fd::OwnedFd,
+    thread,
 };
 use tiber_repository_core::{
-    MAX_REPOSITORY_CONTENT_BYTES, RepositoryMutationFailureCode, Sha256Digest,
+    MAX_REPOSITORY_CONTENT_BYTES, RepositoryMutationFailureCode, RepositoryMutationKind,
+    RepositoryMutationPrecondition, Sha256Digest, WritePrecondition,
 };
 
 /// Fixed repository mount visible to the private worker.
@@ -58,7 +60,7 @@ pub(crate) fn run() -> Result<(), ()> {
                 &path,
                 content_length,
                 &content_digest,
-                precondition,
+                &precondition,
                 &content,
             )
         }
@@ -68,9 +70,15 @@ pub(crate) fn run() -> Result<(), ()> {
             let root = lock_repository_root()?;
             apply_delete(&root, &path, &precondition)
         }
-        WorkerRequest::Reconcile { path, .. } => {
+        WorkerRequest::Reconcile {
+            content_digest,
+            kind,
+            path,
+            precondition,
+            ..
+        } => {
             let root = open_repository_root().map_err(|_error| ())?;
-            reconcile(&root, &path)
+            reconcile(&root, &path, kind, content_digest.as_deref(), precondition)
         }
     };
     serde_json::to_writer(stdout().lock(), &response).map_err(|_error| ())
@@ -156,7 +164,7 @@ fn apply_write(
     path: &str,
     content_length: usize,
     content_digest: &str,
-    precondition: WorkerWritePrecondition,
+    precondition: &WorkerWritePrecondition,
     content: &[u8],
 ) -> WorkerResponse {
     if content_length > MAX_REPOSITORY_CONTENT_BYTES {
@@ -171,7 +179,7 @@ fn apply_write(
     if content.len() != content_length || Sha256Digest::of(content) != expected_content {
         return rejected(RepositoryMutationFailureCode::PreDispatchRejected);
     }
-    let existing_mode = match &precondition {
+    let existing_mode = match precondition {
         WorkerWritePrecondition::Absent => None,
         WorkerWritePrecondition::ExactDigest(expected_hex) => {
             let Ok(expected_digest) = Sha256Digest::parse(expected_hex) else {
@@ -199,74 +207,209 @@ fn apply_write(
 fn install_staged_write(
     parent: &OwnedFd,
     name: &str,
-    precondition: WorkerWritePrecondition,
+    precondition: &WorkerWritePrecondition,
     existing_mode: Option<Mode>,
     content: &[u8],
 ) -> WorkerResponse {
-    let temporary = format!(".tiber-write-{}", getpid().as_raw_pid());
-    let staged_result = openat2(
-        parent,
-        temporary.as_str(),
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
-        Mode::RUSR | Mode::WUSR,
-        RESOLVE,
-    );
-    let Ok(staged_fd) = staged_result else {
-        return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
-    };
-    let mut staged_file = File::from(staged_fd);
-    if staged_file.write_all(content).is_err()
-        || existing_mode.is_some_and(|mode| fs::fchmod(&staged_file, mode).is_err())
-        || staged_file.sync_all().is_err()
+    let temporary = write_artifact_name(name, precondition, content);
+    let replacement_digest = Sha256Digest::of(content);
+    let mut staged_file = None;
+    let attempts: Range<u8> = 0..2;
+    for _attempt in attempts {
+        match openat2(
+            parent,
+            temporary.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+            RESOLVE,
+        ) {
+            Ok(staged_fd) => {
+                staged_file = Some(File::from(staged_fd));
+                break;
+            }
+            Err(Errno::EXIST)
+                if target_digest(parent, temporary.as_str()) == Some(replacement_digest) =>
+            {
+                let Ok(staged_fd) = open_target(parent, temporary.as_str()) else {
+                    return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
+                };
+                let staged = File::from(staged_fd);
+                if existing_mode.is_some_and(|mode| fs::fchmod(&staged, mode).is_err())
+                    || staged.sync_all().is_err()
+                {
+                    return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
+                }
+                break;
+            }
+            Err(Errno::EXIST) => {
+                if unlinkat(parent, temporary.as_str(), AtFlags::empty()).is_err() {
+                    return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
+                }
+            }
+            Err(_) => return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied),
+        }
+    }
+    if let Some(mut ready_file) = staged_file
+        && (ready_file.write_all(content).is_err()
+            || existing_mode.is_some_and(|mode| fs::fchmod(&ready_file, mode).is_err())
+            || ready_file.sync_all().is_err())
     {
         let _cleanup_result = unlinkat(parent, temporary.as_str(), AtFlags::empty());
         return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
     }
-    drop(staged_file);
-    let renamed = match &precondition {
-        WorkerWritePrecondition::Absent => renameat_with(
-            parent,
-            temporary.as_str(),
-            parent,
-            name,
-            RenameFlags::NOREPLACE,
-        ),
-        WorkerWritePrecondition::ExactDigest(_) => renameat_with(
-            parent,
-            temporary.as_str(),
-            parent,
-            name,
-            RenameFlags::EXCHANGE,
-        ),
-    };
+    if let WorkerWritePrecondition::ExactDigest(expected) = precondition {
+        wait_for_test_exact_write_race(parent, &temporary);
+        return install_exact_staged_write(parent, name, &temporary, expected);
+    }
+    let renamed = renameat_with(
+        parent,
+        temporary.as_str(),
+        parent,
+        name,
+        RenameFlags::NOREPLACE,
+    );
     if let Err(error) = renamed {
         let _cleanup_result = unlinkat(parent, temporary.as_str(), AtFlags::empty());
-        let precondition_failed = matches!(
-            (&precondition, error),
-            (WorkerWritePrecondition::Absent, Errno::EXIST)
-                | (WorkerWritePrecondition::ExactDigest(_), Errno::NOENT)
-        );
+        let precondition_failed = error == Errno::EXIST;
         return rejected(if precondition_failed {
             RepositoryMutationFailureCode::PreconditionNotMet
         } else {
             RepositoryMutationFailureCode::DefinitelyNotApplied
         });
     }
-    if let WorkerWritePrecondition::ExactDigest(expected) = precondition {
-        let exchanged_matches = Sha256Digest::parse(&expected)
-            .ok()
-            .is_some_and(|digest| target_digest(parent, &temporary) == Some(digest));
-        if !exchanged_matches {
-            return WorkerResponse::StillUnknown;
-        }
-        if unlinkat(parent, temporary.as_str(), AtFlags::empty()).is_err() {
-            return WorkerResponse::StillUnknown;
-        }
-    }
     if fs::fsync(parent).is_err() {
         return WorkerResponse::StillUnknown;
     }
     WorkerResponse::Applied
+}
+
+/// Holds the debug worker at the deterministic post-stage race boundary.
+#[expect(
+    clippy::single_call_fn,
+    reason = "this debug race boundary is owned by the exact-write path"
+)]
+fn wait_for_test_exact_write_race(parent: &OwnedFd, temporary: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let pause = temporary.replacen(".tiber-write-", ".tiber-test-pause-", 1);
+    while open_target(parent, pause.as_str()).is_ok() {
+        thread::yield_now();
+    }
+}
+
+/// Moves the observed preimage aside before exposing replacement bytes.
+#[expect(
+    clippy::single_call_fn,
+    reason = "the staged exact-write transition has one owning dispatch path"
+)]
+fn install_exact_staged_write(
+    parent: &OwnedFd,
+    name: &str,
+    temporary: &str,
+    expected: &str,
+) -> WorkerResponse {
+    let displaced = temporary.replacen(".tiber-write-", ".tiber-write-before-", 1);
+    if let Err(error) = renameat_with(
+        parent,
+        name,
+        parent,
+        displaced.as_str(),
+        RenameFlags::NOREPLACE,
+    ) {
+        let _cleanup_result = unlinkat(parent, temporary, AtFlags::empty());
+        return rejected(if error == Errno::NOENT {
+            RepositoryMutationFailureCode::PreconditionNotMet
+        } else {
+            RepositoryMutationFailureCode::DefinitelyNotApplied
+        });
+    }
+    let displaced_matches = Sha256Digest::parse(expected)
+        .ok()
+        .is_some_and(|digest| target_digest(parent, displaced.as_str()) == Some(digest));
+    if !displaced_matches {
+        let restored = renameat_with(
+            parent,
+            displaced.as_str(),
+            parent,
+            name,
+            RenameFlags::NOREPLACE,
+        );
+        let _cleanup_result = unlinkat(parent, temporary, AtFlags::empty());
+        if restored.is_err() || fs::fsync(parent).is_err() {
+            return WorkerResponse::StillUnknown;
+        }
+        return rejected(RepositoryMutationFailureCode::PreconditionNotMet);
+    }
+    wait_for_test_exact_install_race(parent, temporary);
+    if let Err(error) = renameat_with(parent, temporary, parent, name, RenameFlags::NOREPLACE) {
+        if error == Errno::EXIST {
+            let staged_cleanup = unlinkat(parent, temporary, AtFlags::empty());
+            let displaced_cleanup = unlinkat(parent, displaced.as_str(), AtFlags::empty());
+            let staged_clean = matches!(staged_cleanup, Ok(()) | Err(Errno::NOENT));
+            let displaced_clean = matches!(displaced_cleanup, Ok(()) | Err(Errno::NOENT));
+            if staged_clean && displaced_clean && fs::fsync(parent).is_ok() {
+                return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
+            }
+        } else {
+            let restored = renameat_with(
+                parent,
+                displaced.as_str(),
+                parent,
+                name,
+                RenameFlags::NOREPLACE,
+            );
+            let cleanup = unlinkat(parent, temporary, AtFlags::empty());
+            let cleanup_confirmed = matches!(cleanup, Ok(()) | Err(Errno::NOENT));
+            if restored.is_ok() && cleanup_confirmed && fs::fsync(parent).is_ok() {
+                return rejected(RepositoryMutationFailureCode::DefinitelyNotApplied);
+            }
+        }
+        return WorkerResponse::StillUnknown;
+    }
+    if unlinkat(parent, displaced.as_str(), AtFlags::empty()).is_err() || fs::fsync(parent).is_err()
+    {
+        return WorkerResponse::StillUnknown;
+    }
+    WorkerResponse::Applied
+}
+
+/// Holds the debug worker after exact preimage validation and before installation.
+#[expect(
+    clippy::single_call_fn,
+    reason = "this debug installation race boundary is owned by the exact-write path"
+)]
+fn wait_for_test_exact_install_race(parent: &OwnedFd, temporary: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let pause = temporary.replacen(".tiber-write-", ".tiber-test-pause-install-", 1);
+    while open_target(parent, pause.as_str()).is_ok() {
+        thread::yield_now();
+    }
+}
+
+/// Derives the deterministic private staging name for one exact write.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::single_call_fn,
+    reason = "the artifact projection matches a borrowed closed precondition for its sole staging caller"
+)]
+fn write_artifact_name(
+    name: &str,
+    precondition: &WorkerWritePrecondition,
+    content: &[u8],
+) -> String {
+    let before = match precondition {
+        WorkerWritePrecondition::Absent => "absent",
+        WorkerWritePrecondition::ExactDigest(digest) => digest,
+    };
+    let after = Sha256Digest::of(content);
+    let operation_key = format!("{name}\0{before}\0{}", after.as_hex());
+    format!(
+        ".tiber-write-{}",
+        Sha256Digest::of(operation_key.as_bytes()).as_hex()
+    )
 }
 
 /// Checks and removes one exact-digest regular file.
@@ -288,7 +431,7 @@ fn apply_delete(root: &OwnedFd, path: &str, expected_hex: &str) -> WorkerRespons
     if state.digest != expected_digest {
         return rejected(RepositoryMutationFailureCode::PreconditionNotMet);
     }
-    let quarantine = format!(".tiber-delete-{}", getpid().as_raw_pid());
+    let quarantine = delete_artifact_name(&name, &expected_digest);
     if let Err(error) = renameat_with(
         &parent,
         name.as_str(),
@@ -328,23 +471,81 @@ fn apply_delete(root: &OwnedFd, path: &str, expected_hex: &str) -> WorkerRespons
     WorkerResponse::Applied
 }
 
-/// Performs a read-only safe lookup and conservatively preserves ambiguity.
+/// Derives the deterministic private quarantine name for one exact deletion.
+#[expect(
+    clippy::single_call_fn,
+    reason = "the quarantine name projection has one owning delete transition"
+)]
+fn delete_artifact_name(name: &str, expected_digest: &Sha256Digest) -> String {
+    let operation_key = format!("{name}\0{}", expected_digest.as_hex());
+    format!(
+        ".tiber-delete-{}",
+        Sha256Digest::of(operation_key.as_bytes()).as_hex()
+    )
+}
+
+/// Performs a read-only identity comparison without recreating mutation authority.
 #[expect(
     clippy::implicit_return,
     clippy::single_call_fn,
-    reason = "the one reconciliation projection deliberately discards lookup detail and stays unknown"
+    reason = "the closed reconciliation projection compares only safe pre/post digests"
 )]
-fn reconcile(root: &OwnedFd, path: &str) -> WorkerResponse {
-    let _lookup_result = open_parent(root, path).and_then(|(parent, name)| {
-        openat2(
-            parent,
-            name,
-            OFlags::RDONLY | OFlags::CLOEXEC,
-            Mode::empty(),
-            RESOLVE,
-        )
-    });
-    WorkerResponse::StillUnknown
+#[expect(
+    clippy::match_same_arms,
+    clippy::shadow_reuse,
+    reason = "the sole read-only reconciliation projection mirrors typed tuple inputs and preserves explicit conservative outcomes"
+)]
+fn reconcile(
+    root: &OwnedFd,
+    path: &str,
+    kind: RepositoryMutationKind,
+    content_digest: Option<&str>,
+    precondition: RepositoryMutationPrecondition,
+) -> WorkerResponse {
+    let Ok((parent, name)) = open_parent(root, path) else {
+        return WorkerResponse::StillUnknown;
+    };
+    let current = target_digest(&parent, &name);
+    match (kind, content_digest, precondition, current) {
+        (
+            RepositoryMutationKind::Write,
+            Some(content),
+            RepositoryMutationPrecondition::Write(WritePrecondition::ExactDigest(before)),
+            Some(current),
+        ) => {
+            let after = Sha256Digest::parse(content).ok();
+            if after == Some(current) {
+                WorkerResponse::StillUnknown
+            } else if current == before {
+                rejected(RepositoryMutationFailureCode::DefinitelyNotApplied)
+            } else {
+                WorkerResponse::StillUnknown
+            }
+        }
+        (
+            RepositoryMutationKind::Write,
+            Some(content),
+            RepositoryMutationPrecondition::Write(WritePrecondition::Absent),
+            current,
+        ) => match (Sha256Digest::parse(content).ok(), current) {
+            (Some(after), Some(current)) if after == current => WorkerResponse::StillUnknown,
+            (_, None) => rejected(RepositoryMutationFailureCode::DefinitelyNotApplied),
+            _ => WorkerResponse::StillUnknown,
+        },
+        (
+            RepositoryMutationKind::Delete,
+            None,
+            RepositoryMutationPrecondition::Delete(before),
+            current,
+        ) => match current {
+            None => WorkerResponse::StillUnknown,
+            Some(current) if current == before => {
+                rejected(RepositoryMutationFailureCode::DefinitelyNotApplied)
+            }
+            Some(_) => WorkerResponse::StillUnknown,
+        },
+        _ => WorkerResponse::StillUnknown,
+    }
 }
 
 /// Streams the SHA-256 of one safely opened regular file.
@@ -388,7 +589,6 @@ fn target_regular_state(parent: &OwnedFd, name: &str) -> Option<RegularFileState
 /// Opens one nonblocking target without following any link.
 #[expect(
     clippy::implicit_return,
-    clippy::single_call_fn,
     reason = "the safe target helper is the sole closed openat2 policy projection"
 )]
 fn open_target(parent: &OwnedFd, name: &str) -> RustixResult<OwnedFd> {

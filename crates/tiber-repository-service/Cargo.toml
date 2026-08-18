@@ -1,0 +1,25 @@
+[package]
+name = "tiber-repository-service"
+description = "Durable EventCore authority for repository mutations"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+eventcore.workspace = true
+eventcore-types.workspace = true
+futures.workspace = true
+serde.workspace = true
+tiber-repository-core = { path = "../tiber-repository-core" }
+tiber-workflow-core = { path = "../tiber-workflow-core" }
+
+[dev-dependencies]
+eventcore = { version = "=2.0.1", features = ["experimental-model-check"] }
+eventcore-memory = "=2.0.1"
+eventcore-types.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

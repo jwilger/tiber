@@ -114,6 +114,17 @@ Durable receipts cover mutations, processes, tests, memory, external tools,
 approvals, retries, cancellation, reconciliation, commits, pushes, pull
 requests, CI observations, and delivery completion.
 
+Repository mutation is the first connected non-inference vertical slice. A
+structured app-server request is parsed once, then Tiber rereads the selected
+root-relative file and publishes only a content-free safe proposal identity.
+Command-specific `tiber-repository-service` models own proposal/reproposal,
+owner decision, preparation, terminal outcome, and reconciliation facts on the
+signed authority branch. Verified `Proposed -> Approved -> Prepared` history is
+required before the core can mint opaque adapter authority. The shell executes
+that authority only through the fixed Bubblewrap repository worker. Stale
+preimages require a new signed proposal and approval; signed `Prepared` without
+a terminal fact permits one read-only reconciliation and never redispatch.
+
 ## Agent and context lifecycle
 
 Tiber creates agents within a session and assignments within a workflow task.

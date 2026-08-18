@@ -12,7 +12,7 @@ mod tests {
     use std::{
         env, fs,
         io::Write as _,
-        os::unix::fs::PermissionsExt as _,
+        os::unix::fs::{PermissionsExt as _, symlink},
         path::{Path, PathBuf},
         process::{Child, Command, Output, Stdio},
         thread,
@@ -22,6 +22,8 @@ mod tests {
     use eventcore_fs::FileEventStore;
     use eventcore_types::{BatchSize, EventStore as _, StreamPattern, StreamVersion, StreamWrites};
     use tempfile::TempDir;
+    use tiber_repository_core::Sha256Digest;
+    use tiber_repository_service::{RepositoryMutationEvent, RepositoryMutationFact};
     use tiber_session_service::{
         AssistantText, PromptText, SessionBinding, decide_observe_inference,
         decide_request_inference, decide_start_session, task_assignment_scope,
@@ -50,9 +52,14 @@ mod tests {
         oversized: PathBuf,
         terminal_capture: PathBuf,
         invocations: PathBuf,
+        approved_crash: PathBuf,
+        prepared_crash: PathBuf,
+        repository_worker_invocations: PathBuf,
+        session_history_reads: PathBuf,
         state_home: PathBuf,
         task_id: String,
         turn_completed: PathBuf,
+        completion_release: PathBuf,
     }
 
     #[expect(
@@ -92,10 +99,16 @@ mod tests {
             let signing_key = directory.path().join("fixture-signing-key");
             let allowed_signers = directory.path().join("allowed-signers");
             let turn_completed = directory.path().join("turn-completed");
+            let completion_release = directory.path().join("completion-release");
             let initialized = directory.path().join("initialized");
             let oversized = directory.path().join("oversized");
             let terminal_capture = directory.path().join("terminal-capture");
             let invocations = directory.path().join("invocations");
+            let approved_crash = directory.path().join("approved-crash");
+            let prepared_crash = directory.path().join("prepared-crash");
+            let repository_worker_invocations =
+                directory.path().join("repository-worker-invocations");
+            let session_history_reads = directory.path().join("session-history-reads");
 
             git(directory.path(), ["init", utf8(&repository)]);
             git(
@@ -178,9 +191,14 @@ mod tests {
                 oversized,
                 terminal_capture,
                 invocations,
+                approved_crash,
+                prepared_crash,
                 state_home,
+                repository_worker_invocations,
+                session_history_reads,
                 task_id: String::new(),
                 turn_completed,
+                completion_release,
             };
             let created = fixture.tiber(&[
                 "tasks",
@@ -224,7 +242,44 @@ mod tests {
         }
 
         fn start_pty_mode_with_capture(&self, mode: &str, capture: &Path) -> Child {
-            Command::new("script")
+            self.start_pty_mode_with_options(mode, capture, false, false, false, None)
+        }
+
+        fn start_pty_mode_crash_after_approved(&self, mode: &str) -> Child {
+            self.start_pty_mode_with_options(mode, Path::new("/dev/null"), true, false, false, None)
+        }
+
+        fn start_pty_mode_crash_after_prepared(&self, mode: &str) -> Child {
+            self.start_pty_mode_with_options(mode, Path::new("/dev/null"), false, true, false, None)
+        }
+
+        fn start_pty_mode_forced_unknown(&self, mode: &str) -> Child {
+            let worker = forced_unknown_repository_worker();
+            self.start_pty_mode_with_options(
+                mode,
+                Path::new("/dev/null"),
+                false,
+                false,
+                false,
+                Some(&worker),
+            )
+        }
+
+        fn start_pty_mode_forced_failure(&self, mode: &str) -> Child {
+            self.start_pty_mode_with_options(mode, Path::new("/dev/null"), false, false, true, None)
+        }
+
+        fn start_pty_mode_with_options(
+            &self,
+            mode: &str,
+            capture: &Path,
+            crash_after_approved: bool,
+            crash_after_prepared: bool,
+            force_repository_failure: bool,
+            repository_worker_override: Option<&Path>,
+        ) -> Child {
+            let mut command = Command::new("script");
+            command
                 .args([
                     "--quiet",
                     "--return",
@@ -240,9 +295,40 @@ mod tests {
                     "TIBER_FIXTURE_TURN_COMPLETED_SENTINEL",
                     &self.turn_completed,
                 )
+                .env("TIBER_FIXTURE_COMPLETION_RELEASE", &self.completion_release)
                 .env("TIBER_FIXTURE_OVERSIZED_SENTINEL", &self.oversized)
                 .env("TIBER_FIXTURE_INVOCATIONS", &self.invocations)
-                .env("XDG_STATE_HOME", &self.state_home)
+                .env(
+                    "TIBER_TEST_SESSION_HISTORY_READS",
+                    &self.session_history_reads,
+                )
+                .env("XDG_STATE_HOME", &self.state_home);
+            if mode.starts_with("repository-edit") {
+                let repository_worker =
+                    repository_worker_override.map_or_else(repository_worker, Path::to_path_buf);
+                command
+                    .env("TIBER_TEST_REPOSITORY_WORKER", repository_worker)
+                    .env(
+                        "TIBER_TEST_REPOSITORY_WORKER_INVOCATIONS",
+                        &self.repository_worker_invocations,
+                    );
+            }
+            if crash_after_prepared {
+                command.env(
+                    "TIBER_TEST_CRASH_AFTER_PREPARED_SENTINEL",
+                    &self.prepared_crash,
+                );
+            }
+            if crash_after_approved {
+                command.env(
+                    "TIBER_TEST_CRASH_AFTER_APPROVED_SENTINEL",
+                    &self.approved_crash,
+                );
+            }
+            if force_repository_failure {
+                command.env("TIBER_TEST_REPOSITORY_FAILURE_CODE", "precondition_not_met");
+            }
+            command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -316,6 +402,26 @@ mod tests {
     }
 
     #[test]
+    fn stable_startup_reads_one_immutable_verified_session_history() {
+        let fixture = HarnessFixture::new();
+        let mut child = fixture.start_pty();
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        let output = child
+            .wait_with_output()
+            .expect("packaged Tiber should stop cleanly");
+        assert_success(&output);
+        let reads = fs::read(&fixture.session_history_reads)
+            .expect("startup session-history reads should be observable");
+        assert_eq!(reads, b"read\n", "startup must share one verified snapshot");
+    }
+
+    #[test]
     fn interactive_session_streams_with_active_task_and_displays_durable_bindings() {
         let fixture = HarnessFixture::new();
         let mut child = fixture.start_pty();
@@ -354,6 +460,1352 @@ mod tests {
         assert!(durable.contains("next-action: prompt"));
         assert!(durable.contains("user: keep this conversation durable"));
         assert!(durable.contains("assistant: hello from Tiber"));
+    }
+
+    #[test]
+    fn owner_approves_an_exact_scoped_repository_change_from_the_conversation() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"improve the fixture file\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept the approval")
+            .write_all(b"approve\r")
+            .expect("owner approval should reach Tiber");
+        wait_for_session_text(&fixture, "repository change applied: README.md");
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+        assert_eq!(
+            fs::read_to_string(&target).expect("changed file should remain readable"),
+            "after\n"
+        );
+        let diff = git_output(
+            &fixture.repository,
+            ["diff", "--no-ext-diff", "--no-textconv", "--", "README.md"],
+        );
+        assert!(diff.contains("-before"), "missing removed line in: {diff}");
+        assert!(diff.contains("+after"), "missing added line in: {diff}");
+    }
+
+    #[test]
+    fn repository_decision_blocks_next_prompt_until_turn_completion() {
+        let fixture = HarnessFixture::new();
+        fs::write(fixture.repository.join("README.md"), "before\n").expect("baseline");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit-delayed-completion");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("input")
+            .write_all(b"first proposal\r")
+            .expect("first prompt");
+        wait_for_session_text(&fixture, "repository change proposed: README.md");
+        child
+            .stdin
+            .as_mut()
+            .expect("input")
+            .write_all(b"deny\rtoo early\r")
+            .expect("decision and early prompt");
+        wait_for_session_text(&fixture, "repository change denied: README.md");
+        assert!(
+            child.try_wait().expect("status").is_none(),
+            "shell must remain alive"
+        );
+        assert_eq!(
+            invocation_count(&fixture),
+            1,
+            "early prompt must remain gated"
+        );
+        fs::write(&fixture.completion_release, b"continue\n").expect("release completion");
+        wait_for_file(&fixture.turn_completed);
+        fs::remove_file(&fixture.turn_completed).expect("reset completion sentinel");
+        child
+            .stdin
+            .as_mut()
+            .expect("input")
+            .write_all(b"after completion\r")
+            .expect("second prompt");
+        wait_for_session_text(&fixture, "user: after completion");
+        wait_for_file(&fixture.turn_completed);
+        assert_eq!(
+            invocation_count(&fixture),
+            2,
+            "post-completion prompt accepted once"
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("input")
+            .write_all(&[3])
+            .expect("quit");
+        let _output = child.wait_with_output().expect("exit");
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn first_repository_proposal_remains_the_only_pending_owner_decision() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit-duplicate");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"offer two repository proposals\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        let pending = fixture.tiber(&["session", "active"]);
+        assert_success(&pending);
+        let pending = String::from_utf8_lossy(&pending.stdout);
+        assert_eq!(
+            pending
+                .matches("repository change proposed: README.md")
+                .count(),
+            1,
+            "only the first proposal may become a durable owner decision: {pending}"
+        );
+        assert!(!pending.contains("repository change approved:"));
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept the approval")
+            .write_all(b"approve\r")
+            .expect("owner approval should reach Tiber");
+        wait_for_session_text(&fixture, "repository change applied: README.md");
+        assert_eq!(
+            fs::read_to_string(&target).expect("approved file should remain readable"),
+            "after\n",
+            "approval must apply the first exact proposal, never the duplicate"
+        );
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 1);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 0);
+        let decided = fixture.tiber(&["session", "active"]);
+        assert_success(&decided);
+        let decided = String::from_utf8_lossy(&decided.stdout);
+        assert_eq!(
+            decided
+                .matches("repository change proposed: README.md")
+                .count(),
+            1
+        );
+        assert_eq!(
+            decided
+                .matches("repository change approved: README.md")
+                .count(),
+            1
+        );
+        assert_eq!(
+            decided
+                .matches("repository change prepared: README.md")
+                .count(),
+            1
+        );
+        assert_eq!(
+            decided
+                .matches("repository change applied: README.md")
+                .count(),
+            1
+        );
+
+        child
+            .stdin
+            .as_mut()
+            .expect("composer should remain usable after approval")
+            .write_all(b"prompt after duplicate proposal\r")
+            .expect("new prompt should reach Tiber");
+        wait_for_session_occurrences(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+            2,
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 1);
+    }
+
+    #[test]
+    fn owner_denies_an_exact_repository_change_without_dispatch_and_can_prompt_again() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose a change to deny\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept explicit denial")
+            .write_all(b"deny\r")
+            .expect("owner denial should reach Tiber");
+        wait_for_session_text(&fixture, "repository change denied: README.md");
+        assert!(
+            !fixture
+                .state_home
+                .join("tiber/repository-mutations")
+                .exists(),
+            "denial must not create the repository adapter dispatch journal"
+        );
+
+        child
+            .stdin
+            .as_mut()
+            .expect("composer should accept a new prompt after denial")
+            .write_all(b"prompt after denial\r")
+            .expect("new prompt should reach Tiber");
+        wait_for_session_occurrences(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+            2,
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+        assert_eq!(
+            fs::read_to_string(&target).expect("denied file should remain readable"),
+            "before\n"
+        );
+        assert_eq!(invocation_count(&fixture), 2);
+        let diff = git_output(
+            &fixture.repository,
+            ["diff", "--no-ext-diff", "--no-textconv", "--", "README.md"],
+        );
+        assert!(
+            diff.is_empty(),
+            "denied change must leave no Git diff: {diff}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn non_write_repository_tool_request_remains_inert() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit-non-write");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"inspect without proposing a write\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+
+        let active = fixture.tiber(&["session", "active"]);
+        assert_success(&active);
+        let active = String::from_utf8_lossy(&active.stdout);
+        assert!(
+            !active.contains("repository change proposed:"),
+            "a non-write tool action must remain inert: {active}"
+        );
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 0);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 0);
+        assert_eq!(
+            fs::read_to_string(&target).expect("fixture target should remain readable"),
+            "before\n"
+        );
+
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+    }
+
+    #[test]
+    fn oversized_repository_preimage_is_rejected_before_proposal() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        let sparse = fs::File::create(&target).expect("sparse fixture file should be created");
+        sparse
+            .set_len(64 * 1024 + 1)
+            .expect("sparse fixture should exceed the repository content bound");
+        drop(sparse);
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "oversized sparse repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose against an oversized preimage\r")
+            .expect("owner prompt should reach Tiber");
+
+        let output = child
+            .wait_with_output()
+            .expect("oversized preimage rejection should terminate Tiber");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("repository_mutation_preimage_too_large:"),
+            "the public boundary should report the bounded preimage failure: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let active = fixture.tiber(&["session", "active"]);
+        assert_success(&active);
+        assert!(
+            !String::from_utf8_lossy(&active.stdout).contains("repository change proposed:"),
+            "oversized preimage must never become durable proposal authority"
+        );
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 0);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 0);
+    }
+
+    #[test]
+    fn non_utf8_repository_preimage_is_rejected_before_proposal() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, [0xff, 0xfe, b'\n']).expect("binary fixture should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "non utf8 repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose against a non utf8 preimage\r")
+            .expect("owner prompt should reach Tiber");
+
+        let output = child
+            .wait_with_output()
+            .expect("encoding refusal should terminate Tiber");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("repository_mutation_preimage_unsupported_encoding:"),
+            "public boundary must report the UTF-8-only contract: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let active = fixture.tiber(&["session", "active"]);
+        assert_success(&active);
+        assert!(!String::from_utf8_lossy(&active.stdout).contains("repository change proposed:"));
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 0);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 0);
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn symlink_repository_preimage_is_rejected_before_proposal() {
+        let fixture = HarnessFixture::new();
+        let outside = fixture
+            .repository
+            .parent()
+            .expect("fixture parent")
+            .join("outside.txt");
+        fs::write(&outside, "before\n").expect("outside fixture should be written");
+        let target = fixture.repository.join("README.md");
+        symlink(&outside, &target).expect("repository symlink should be created");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "symlink repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose against a symlink preimage\r")
+            .expect("owner prompt should reach Tiber");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let exited = loop {
+            if child
+                .try_wait()
+                .expect("process status should be observable")
+                .is_some()
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let active = fixture.tiber(&["session", "active"]);
+        assert_success(&active);
+        let active = String::from_utf8_lossy(&active.stdout);
+        if !exited {
+            child
+                .stdin
+                .as_mut()
+                .expect("cleanup PTY")
+                .write_all(&[3])
+                .expect("cleanup quit");
+        }
+        let output = child
+            .wait_with_output()
+            .expect("process should be collected");
+        assert!(
+            exited,
+            "symlink preimage remained active instead of failing closed: {active}"
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("repository_mutation_preimage_unsafe:"),
+            "symlink rejection should retain a stable code: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!active.contains("repository change proposed:"));
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+    }
+
+    #[test]
+    fn fifo_repository_preimage_is_rejected_without_blocking() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("baseline target should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "regular repository baseline"],
+        );
+        fs::remove_file(&target).expect("baseline target should be replaced");
+        let status = Command::new("mkfifo")
+            .arg(&target)
+            .status()
+            .expect("mkfifo fixture should execute");
+        assert!(status.success());
+        let mut child = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose against a fifo preimage\r")
+            .expect("owner prompt should reach Tiber");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let exited = loop {
+            if child
+                .try_wait()
+                .expect("process status should be observable")
+                .is_some()
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        if !exited {
+            child
+                .kill()
+                .expect("blocked FIFO fixture should be killable");
+        }
+        let output = child
+            .wait_with_output()
+            .expect("process should be collected");
+        assert!(
+            exited,
+            "FIFO preimage must fail within the bounded command deadline"
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("repository_mutation_preimage_unsafe:"),
+            "FIFO rejection should retain a stable code: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let active = fixture.tiber(&["session", "active"]);
+        assert_success(&active);
+        assert!(!String::from_utf8_lossy(&active.stdout).contains("repository change proposed:"));
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+    }
+
+    #[test]
+    fn owner_cancels_an_exact_repository_change_without_dispatch_and_can_prompt_again() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose a change to cancel\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept explicit cancellation")
+            .write_all(b"cancel\r")
+            .expect("owner cancellation should reach Tiber");
+        wait_for_session_text(&fixture, "repository change cancelled: README.md");
+        assert!(
+            !fixture
+                .state_home
+                .join("tiber/repository-mutations")
+                .exists(),
+            "cancellation must not create the repository adapter dispatch journal"
+        );
+
+        child
+            .stdin
+            .as_mut()
+            .expect("composer should accept a new prompt after cancellation")
+            .write_all(b"prompt after cancellation\r")
+            .expect("new prompt should reach Tiber");
+        wait_for_session_occurrences(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+            2,
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+        assert_eq!(
+            fs::read_to_string(&target).expect("cancelled file should remain readable"),
+            "before\n"
+        );
+        assert_eq!(invocation_count(&fixture), 2);
+        let diff = git_output(
+            &fixture.repository,
+            ["diff", "--no-ext-diff", "--no-textconv", "--", "README.md"],
+        );
+        assert!(
+            diff.is_empty(),
+            "cancelled change must leave no Git diff: {diff}"
+        );
+    }
+
+    #[test]
+    fn repository_approval_footer_lists_every_owner_decision() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child =
+            fixture.start_pty_mode_with_capture("repository-edit", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"display every owner decision\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept cleanup quit")
+            .write_all(&[3])
+            .expect("cleanup quit should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+        let terminal = fs::read_to_string(&fixture.terminal_capture)
+            .expect("captured approval frame should remain readable");
+        assert!(
+            terminal.contains("approve, deny, or cancel"),
+            "approval footer must visibly list every valid decision: {terminal}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        clippy::too_many_lines,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn restart_cancels_lost_ephemeral_repository_proposal_once() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+
+        let mut first = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose a change before restart\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        let open = fixture.tiber(&["session", "active"]);
+        assert_success(&open);
+        let open = String::from_utf8_lossy(&open.stdout);
+        assert_eq!(
+            open.matches("repository change proposed: README.md")
+                .count(),
+            1
+        );
+        assert!(!open.contains("repository change cancelled:"));
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept quit before owner decision")
+            .write_all(&[3])
+            .expect("quit should reach Tiber");
+        assert_success(&first.wait_with_output().expect("first Tiber exits"));
+
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut recovered = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(&fixture, "repository change cancelled: README.md");
+        let cancelled = fixture.tiber(&["session", "active"]);
+        recovered
+            .stdin
+            .as_mut()
+            .expect("restarted PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach restarted Tiber");
+        assert_success(&recovered.wait_with_output().expect("restarted Tiber exits"));
+        assert_success(&cancelled);
+        let cancelled = String::from_utf8_lossy(&cancelled.stdout);
+        assert_eq!(
+            cancelled
+                .matches("repository change proposed: README.md")
+                .count(),
+            1
+        );
+        assert_eq!(
+            cancelled
+                .matches("repository change cancelled: README.md")
+                .count(),
+            1,
+            "restart must terminate the exact open proposal: {cancelled}"
+        );
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+        assert_eq!(
+            fs::read_to_string(&target).expect("undispatched file should remain readable"),
+            "before\n"
+        );
+
+        fs::remove_file(&fixture.initialized).expect("second restart should reset sentinel");
+        let mut again = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        let still_cancelled = fixture.tiber(&["session", "active"]);
+        assert_success(&still_cancelled);
+        assert_eq!(
+            String::from_utf8_lossy(&still_cancelled.stdout)
+                .matches("repository change cancelled: README.md")
+                .count(),
+            1,
+            "another restart must not duplicate cancellation"
+        );
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+
+        again
+            .stdin
+            .as_mut()
+            .expect("composer should accept a fresh prompt")
+            .write_all(b"fresh proposal after restart cancellation\r")
+            .expect("fresh prompt should reach Tiber");
+        wait_for_session_occurrences(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+            2,
+        );
+        let fresh = fixture.tiber(&["session", "active"]);
+        assert_success(&fresh);
+        let fresh = String::from_utf8_lossy(&fresh.stdout);
+        assert_eq!(
+            fresh
+                .matches("repository change proposed: README.md")
+                .count(),
+            1
+        );
+        assert!(!fresh.contains("repository change cancelled:"));
+        again
+            .stdin
+            .as_mut()
+            .expect("fresh proposal should accept explicit cancellation")
+            .write_all(b"cancel\r")
+            .expect("fresh cancellation should reach Tiber");
+        wait_for_session_text(&fixture, "repository change cancelled: README.md");
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+        again
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&again.wait_with_output().expect("final Tiber exits"));
+    }
+
+    #[test]
+    fn stale_approval_reproposes_current_bytes_and_requires_a_second_approval() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child =
+            fixture.start_pty_mode_with_capture("repository-edit", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose a change that can become stale\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+
+        fs::write(&target, "external\n").expect("external edit should change the proposal digest");
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept the stale approval attempt")
+            .write_all(b"approve\r")
+            .expect("stale approval attempt should reach Tiber");
+        wait_for_session_text(&fixture, "repository change reproposed: README.md");
+        let active = fixture.tiber(&["session", "active"]);
+        assert_success(&active);
+        let durable = String::from_utf8_lossy(&active.stdout);
+        assert_eq!(
+            durable
+                .matches("repository change proposed: README.md")
+                .count(),
+            1
+        );
+        assert_eq!(
+            durable
+                .matches("repository change reproposed: README.md")
+                .count(),
+            1
+        );
+        assert!(durable.contains(&format!(
+            "precondition: {}",
+            Sha256Digest::of(b"external\n").as_hex()
+        )));
+        assert!(!durable.contains("repository change approved:"));
+        assert!(!durable.contains("repository change prepared:"));
+        assert_eq!(
+            fs::read_to_string(&target).expect("externally edited file should remain readable"),
+            "external\n"
+        );
+        assert!(
+            !fixture
+                .state_home
+                .join("tiber/repository-mutations")
+                .exists(),
+            "stale approval must not dispatch the repository adapter"
+        );
+
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept approval of the replacement")
+            .write_all(b"approve\r")
+            .expect("replacement approval should reach Tiber");
+        wait_for_session_text(&fixture, "repository change applied: README.md");
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+        assert_eq!(
+            fs::read_to_string(&target).expect("approved replacement should remain readable"),
+            "after\n"
+        );
+        let terminal = fs::read_to_string(&fixture.terminal_capture)
+            .expect("captured terminal should remain readable");
+        assert!(
+            terminal.contains("external"),
+            "replacement diff should display the reread bytes"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn oversized_repository_preimage_is_rejected_during_approval_reread() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"propose before the preimage grows\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+
+        let sparse = fs::File::create(&target).expect("sparse replacement should be created");
+        sparse
+            .set_len(64 * 1024 + 1)
+            .expect("approval preimage should exceed the content bound");
+        drop(sparse);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept approval")
+            .write_all(b"approve\r")
+            .expect("approval should reach Tiber");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let exited = loop {
+            if child
+                .try_wait()
+                .expect("approval process status should remain observable")
+                .is_some()
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let active = fixture.tiber(&["session", "active"]);
+        assert_success(&active);
+        let active = String::from_utf8_lossy(&active.stdout);
+        if !exited {
+            child
+                .stdin
+                .as_mut()
+                .expect("PTY should accept cleanup quit")
+                .write_all(&[3])
+                .expect("cleanup quit should reach Tiber");
+        }
+        let output = child
+            .wait_with_output()
+            .expect("oversized approval reread process should be collected");
+        assert!(
+            exited,
+            "approval reread remained active instead of rejecting the oversized preimage: {active}"
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("repository_mutation_preimage_too_large:"),
+            "approval reread should report the bounded preimage failure: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            active
+                .matches("repository change proposed: README.md")
+                .count(),
+            1
+        );
+        assert_eq!(
+            active
+                .matches("repository change reproposed: README.md")
+                .count(),
+            0
+        );
+        assert_eq!(
+            active
+                .matches("repository change approved: README.md")
+                .count(),
+            0
+        );
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 0);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 0);
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn approval_and_preparation_are_one_crash_atomic_signed_publication() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(
+            &target, "before
+",
+        )
+        .expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+
+        let mut child = fixture.start_pty_mode_crash_after_approved("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(
+                b"approve atomically before a forced crash
+",
+            )
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept approval")
+            .write_all(
+                b"approve
+",
+            )
+            .expect("approval should reach Tiber");
+        wait_for_file(&fixture.approved_crash);
+        let crashed = child
+            .wait_with_output()
+            .expect("forced post-approval process should terminate");
+        assert!(!crashed.status.success());
+
+        let durable = fixture.tiber(&["session", "active"]);
+        assert_success(&durable);
+        let durable = String::from_utf8_lossy(&durable.stdout);
+        assert_eq!(
+            durable
+                .matches("repository change approved: README.md")
+                .count(),
+            1
+        );
+        assert_eq!(
+            durable
+                .matches("repository change prepared: README.md")
+                .count(),
+            1,
+            "approval must never become durable without its prepared dispatch boundary: {durable}"
+        );
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+        assert_eq!(
+            fs::read_to_string(target).expect("pre-dispatch target should remain readable"),
+            "before
+"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        clippy::too_many_lines,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn restart_reconciles_signed_prepared_once_without_redispatch() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+
+        let mut first = fixture.start_pty_mode_crash_after_prepared("repository-edit");
+        wait_for_file(&fixture.initialized);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"prepare a change before crashing\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept approval")
+            .write_all(b"approve\r")
+            .expect("approval should reach Tiber");
+        wait_for_file(&fixture.prepared_crash);
+        let crashed = first
+            .wait_with_output()
+            .expect("prepared crash process should terminate");
+        assert!(!crashed.status.success());
+        assert_eq!(
+            fs::read_to_string(&target).expect("undispatched file should remain readable"),
+            "before\n"
+        );
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+        let prepared = fixture.tiber(&["session", "active"]);
+        assert_success(&prepared);
+        let prepared = String::from_utf8_lossy(&prepared.stdout);
+        assert!(prepared.contains("repository change prepared: README.md"));
+        assert!(!prepared.contains("repository change applied:"));
+        assert!(!prepared.contains("repository change reconciled:"));
+
+        let predecessor_task = fixture.task_id.clone();
+        assert_success(&fixture.tiber(&["tasks", "transition", &predecessor_task, "done"]));
+        let created = fixture.tiber(&[
+            "tasks",
+            "create",
+            "--id",
+            "prepared-successor",
+            "Continue after predecessor mutation recovery",
+        ]);
+        assert_success(&created);
+        let successor = created_task_id(&created);
+        assert_success(&fixture.tiber(&["tasks", "start", &successor]));
+
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut recovered =
+            fixture.start_pty_mode_with_capture("repository-edit", &fixture.terminal_capture);
+        wait_for_file_or_exit(
+            &mut recovered,
+            &fixture.initialized,
+            &fixture.terminal_capture,
+        );
+        wait_for_session_text(&fixture, "repository change reconciled: README.md");
+        let first_reconciliation = fixture.tiber(&["session", "active"]);
+        assert_success(&first_reconciliation);
+        assert!(
+            String::from_utf8_lossy(&first_reconciliation.stdout)
+                .contains("repository change reconciled: README.md not-applied"),
+            "pre-dispatch crash must reconcile as not applied: {}",
+            String::from_utf8_lossy(&first_reconciliation.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&first_reconciliation.stdout)
+                .contains(&format!("task: {predecessor_task}")),
+            "predecessor authority must remain active through recovery"
+        );
+        assert_eq!(repository_worker_invocation_count(&fixture), 1);
+        assert_eq!(
+            fs::read_to_string(&target).expect("reconciled file should remain readable"),
+            "before\n"
+        );
+        recovered
+            .stdin
+            .as_mut()
+            .expect("recovered PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach recovered Tiber");
+        assert_success(&recovered.wait_with_output().expect("recovered Tiber exits"));
+
+        fs::remove_file(&fixture.initialized).expect("second restart should reset sentinel");
+        let mut again = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        assert_eq!(repository_worker_invocation_count(&fixture), 1);
+        let reconciled = fixture.tiber(&["session", "active"]);
+        assert_success(&reconciled);
+        assert!(
+            String::from_utf8_lossy(&reconciled.stdout).contains(&format!("task: {successor}"))
+        );
+        again
+            .stdin
+            .as_mut()
+            .expect("second restart PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach second restart");
+        assert_success(&again.wait_with_output().expect("second restart exits"));
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn adapter_failure_preserves_typed_code_retry_guidance_and_durable_query() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut child = fixture.start_pty_mode_forced_failure("repository-edit");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"force a typed adapter failure\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept approval")
+            .write_all(b"approve\r")
+            .expect("approval should reach Tiber");
+        let failed = child
+            .wait_with_output()
+            .expect("definitive adapter failure should terminate");
+        assert!(!failed.status.success());
+        let output = String::from_utf8_lossy(&failed.stdout);
+        assert!(
+            output.contains("repository_precondition_not_met:"),
+            "CLI must preserve the adapter's stable typed code: {output}"
+        );
+        assert!(
+            output.contains("fresh authorization required"),
+            "CLI must render the safe retry directive: {output}"
+        );
+
+        let durable = fixture.tiber(&["session", "active"]);
+        assert_success(&durable);
+        let durable = String::from_utf8_lossy(&durable.stdout);
+        assert!(
+            durable.contains(
+                "repository change failed: README.md repository_precondition_not_met retry: fresh-authorization-required"
+            ),
+            "durable query must render the content-free failure receipt: {durable}"
+        );
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 1);
+        assert_eq!(
+            fs::read_to_string(target).expect("failed target should remain readable"),
+            "before\n"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        clippy::too_many_lines,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn restart_reconciles_forced_unknown_once_without_mutation_redispatch() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+
+        let mut first = fixture.start_pty_mode_forced_unknown("repository-edit");
+        wait_for_file(&fixture.initialized);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"force an ambiguous adapter outcome\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept approval")
+            .write_all(b"approve\r")
+            .expect("approval should reach Tiber");
+        let unknown = first
+            .wait_with_output()
+            .expect("forced unknown process should terminate");
+        assert!(!unknown.status.success());
+        assert_eq!(repository_worker_invocation_count(&fixture), 1);
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 1);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 0);
+        assert_eq!(
+            fs::read_to_string(&target).expect("ambiguous file should remain readable"),
+            "before\n"
+        );
+        let durable_unknown = fixture.tiber(&["session", "active"]);
+        assert_success(&durable_unknown);
+        let durable_unknown = String::from_utf8_lossy(&durable_unknown.stdout);
+        assert!(durable_unknown.contains("repository change prepared: README.md"));
+        assert!(durable_unknown.contains(
+            "repository change unknown: README.md retry: read-only-reconciliation-required"
+        ));
+        assert!(!durable_unknown.contains("repository change reconciled:"));
+
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut recovered =
+            fixture.start_pty_mode_with_capture("repository-edit", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(&fixture, "repository change reconciled: README.md");
+        let reconciliation = fixture.tiber(&["session", "active"]);
+        recovered
+            .stdin
+            .as_mut()
+            .expect("recovered PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach recovered Tiber");
+        assert_success(&recovered.wait_with_output().expect("recovered Tiber exits"));
+        assert_success(&reconciliation);
+        let recovered_terminal = fs::read_to_string(&fixture.terminal_capture)
+            .expect("recovered terminal transcript should remain readable");
+        assert!(
+            recovered_terminal.contains("reconciled:")
+                && recovered_terminal.contains("README.md")
+                && recovered_terminal.contains("not-applied"),
+            "restart reconciliation must be visible in the interactive transcript before input: {recovered_terminal}"
+        );
+        assert!(
+            String::from_utf8_lossy(&reconciliation.stdout)
+                .contains("repository change reconciled: README.md not-applied"),
+            "restart must read-only reconcile the durable unknown: {}",
+            String::from_utf8_lossy(&reconciliation.stdout)
+        );
+        assert_eq!(repository_worker_invocation_count(&fixture), 2);
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 1);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 1);
+        assert_eq!(
+            fs::read_to_string(&target).expect("reconciled file should remain readable"),
+            "before\n"
+        );
+
+        fs::remove_file(&fixture.initialized).expect("second restart should reset sentinel");
+        let mut again = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        assert_eq!(repository_worker_invocation_count(&fixture), 2);
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 1);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 1);
+        let reconciled = fixture.tiber(&["session", "active"]);
+        assert_success(&reconciled);
+        assert_eq!(
+            String::from_utf8_lossy(&reconciled.stdout)
+                .matches("repository change reconciled: README.md not-applied")
+                .count(),
+            1
+        );
+        again
+            .stdin
+            .as_mut()
+            .expect("second restart PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach second restart");
+        assert_success(&again.wait_with_output().expect("second restart exits"));
     }
 
     #[test]
@@ -462,6 +1914,99 @@ mod tests {
         assert!(rendered.contains(&format!("task: {successor}")));
         assert!(!rendered.contains(&format!("task: {first_task}\n")));
         assert!(rendered.contains("user: successor owns this turn"));
+    }
+
+    #[test]
+    #[expect(
+        clippy::shadow_reuse,
+        reason = "the black-box restart scenario preserves successive durable-state names to show each lifecycle transition"
+    )]
+    fn successor_session_restart_does_not_cancel_predecessor_proposal() {
+        let fixture = HarnessFixture::new();
+        let target = fixture.repository.join("README.md");
+        fs::write(&target, "before\n").expect("fixture repository file should be written");
+        git(&fixture.repository, ["add", "README.md"]);
+        git(
+            &fixture.repository,
+            ["commit", "-m", "fixture repository baseline"],
+        );
+        let mut predecessor = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        predecessor
+            .stdin
+            .as_mut()
+            .expect("predecessor PTY should accept input")
+            .write_all(b"leave a proposal for the predecessor\r")
+            .expect("predecessor prompt should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "I inspected README.md and propose changing before to after.",
+        );
+        let predecessor_active = fixture.tiber(&["session", "active"]);
+        assert_success(&predecessor_active);
+        let predecessor_active = String::from_utf8_lossy(&predecessor_active.stdout);
+        let predecessor_effect = predecessor_active
+            .lines()
+            .find_map(|line| line.strip_prefix("effect: "))
+            .expect("predecessor effect should be projected")
+            .to_owned();
+        assert_eq!(
+            repository_cancellation_count(&fixture, &predecessor_effect),
+            0
+        );
+        predecessor
+            .stdin
+            .as_mut()
+            .expect("predecessor PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach predecessor");
+        assert_success(
+            &predecessor
+                .wait_with_output()
+                .expect("predecessor Tiber exits"),
+        );
+
+        let predecessor_task = fixture.task_id.clone();
+        assert_success(&fixture.tiber(&["tasks", "transition", &predecessor_task, "done"]));
+        let created = fixture.tiber(&[
+            "tasks",
+            "create",
+            "--id",
+            "proposal-successor",
+            "Continue without predecessor proposal recovery",
+        ]);
+        assert_success(&created);
+        let successor = created_task_id(&created);
+        assert_success(&fixture.tiber(&["tasks", "start", &successor]));
+
+        fs::remove_file(&fixture.initialized).expect("successor restart resets sentinel");
+        let mut restarted = fixture.start_pty_mode("repository-edit");
+        wait_for_file(&fixture.initialized);
+        let successor_active = fixture.tiber(&["session", "active"]);
+        let predecessor_cancellations =
+            repository_cancellation_count(&fixture, &predecessor_effect);
+        restarted
+            .stdin
+            .as_mut()
+            .expect("successor PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach successor");
+        assert_success(&restarted.wait_with_output().expect("successor Tiber exits"));
+
+        assert_success(&successor_active);
+        assert!(
+            String::from_utf8_lossy(&successor_active.stdout)
+                .contains(&format!("task: {successor}"))
+        );
+        assert_eq!(
+            predecessor_cancellations, 0,
+            "successor restart must not publish into predecessor proposal history"
+        );
+        assert_eq!(repository_worker_invocation_count(&fixture), 0);
+        assert_eq!(
+            fs::read_to_string(&target).expect("predecessor file remains readable"),
+            "before\n"
+        );
     }
 
     #[test]
@@ -1052,6 +2597,28 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_ignores_completed_turns_when_bounding_unresolved_candidates() {
+        let fixture = HarnessFixture::new();
+        fixture.seed_long_session_history();
+
+        let mut child = fixture.start_pty();
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("healthy long session should accept owner input")
+            .write_all(&[3])
+            .expect("owner quit should reach the healthy long session");
+        let output = child
+            .wait_with_output()
+            .expect("healthy long session exits");
+
+        assert_success(&output);
+        assert_eq!(repository_worker_operation_count(&fixture, "dispatch"), 0);
+        assert_eq!(repository_worker_operation_count(&fixture, "reconcile"), 0);
+    }
+
+    #[test]
     #[expect(
         clippy::default_numeric_fallback,
         reason = "the local fixture port is used only to prove the missing-session projection"
@@ -1262,6 +2829,42 @@ mod tests {
     }
 
     #[expect(
+        clippy::single_call_fn,
+        reason = "the forced-ambiguity scenario alone resolves the pinned sandbox worker"
+    )]
+    fn forced_unknown_repository_worker() -> PathBuf {
+        let path = env::var_os("PATH").expect("test PATH should be available");
+        env::split_paths(&path)
+            .map(|directory| directory.join("bwrap"))
+            .find(|candidate| candidate.is_file())
+            .expect("bwrap should be available inside the pinned test shell")
+    }
+
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the repository helper build is owned by one packaged-binary fixture boundary"
+    )]
+    fn repository_worker() -> PathBuf {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let status = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args([
+                "build",
+                "-p",
+                "tiber-repository-linux",
+                "--bin",
+                "tiber-repository-worker",
+            ])
+            .current_dir(workspace)
+            .status()
+            .expect("fixture repository worker build should start");
+        assert!(status.success(), "fixture repository worker should build");
+        PathBuf::from(env!("CARGO_BIN_EXE_tiber"))
+            .parent()
+            .expect("packaged binary should have a target directory")
+            .join("tiber-repository-worker")
+    }
+
+    #[expect(
         clippy::arithmetic_side_effects,
         reason = "the bounded polling fixture increments a capped local attempt counter"
     )]
@@ -1283,7 +2886,6 @@ mod tests {
 
     #[expect(
         clippy::arithmetic_side_effects,
-        clippy::single_call_fn,
         reason = "one bounded polling fixture increments a capped local attempt counter"
     )]
     fn wait_for_session_occurrences(fixture: &HarnessFixture, expected: &str, count: usize) {
@@ -1310,6 +2912,32 @@ mod tests {
         fs::read_to_string(&fixture.invocations).map_or(0, |text| text.lines().count())
     }
 
+    fn repository_worker_invocation_count(fixture: &HarnessFixture) -> usize {
+        fs::read_to_string(&fixture.repository_worker_invocations)
+            .map_or(0, |text| text.lines().count())
+    }
+
+    fn repository_worker_operation_count(fixture: &HarnessFixture, operation: &str) -> usize {
+        fs::read_to_string(&fixture.repository_worker_invocations).map_or(0, |text| {
+            text.lines().filter(|line| *line == operation).count()
+        })
+    }
+
+    fn repository_cancellation_count(fixture: &HarnessFixture, effect_id: &str) -> usize {
+        let store = TiberEventStore::open(&fixture.repository).expect("signed authority opens");
+        let pattern = StreamPattern::try_new(format!("tiber:repository-mutation:{effect_id}"))
+            .expect("effect identifies a valid repository mutation stream");
+        let reader = store
+            .verified_transaction_reader::<RepositoryMutationEvent>(&[pattern])
+            .expect("repository mutation history is verified");
+        reader
+            .read_page(TransactionEventPage::first(BatchSize::new(128)))
+            .expect("repository mutation history reads")
+            .iter()
+            .filter(|event| matches!(event.fact(), RepositoryMutationFact::Cancelled(_)))
+            .count()
+    }
+
     fn workflow_completed(fixture: &HarnessFixture, effect_id: &str) -> bool {
         let store = TiberEventStore::open(&fixture.repository).expect("signed authority opens");
         let pattern = StreamPattern::try_new(format!("tiber:workflow:{effect_id}"))
@@ -1331,7 +2959,40 @@ mod tests {
     fn wait_for_file(path: &Path) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !path.is_file() {
-            assert!(Instant::now() < deadline, "fixture turn should complete");
+            assert!(
+                Instant::now() < deadline,
+                "fixture file should appear: {}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[expect(
+        clippy::arithmetic_side_effects,
+        clippy::panic,
+        clippy::single_call_fn,
+        reason = "one bounded crash fixture polls a child and fails fast with captured diagnostics"
+    )]
+    fn wait_for_file_or_exit(child: &mut Child, path: &Path, capture: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.is_file() {
+            if child
+                .try_wait()
+                .expect("fixture process status should remain readable")
+                .is_some()
+            {
+                panic!(
+                    "fixture exited before {} appeared: {}",
+                    path.display(),
+                    fs::read_to_string(capture).unwrap_or_default()
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture file should appear: {}",
+                path.display()
+            );
             thread::sleep(Duration::from_millis(10));
         }
     }

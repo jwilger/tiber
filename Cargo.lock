@@ -2023,15 +2023,20 @@ name = "tiber"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "eventcore",
  "eventcore-fs",
  "eventcore-types",
  "ratatui",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
  "tiber-app-server",
+ "tiber-repository-core",
+ "tiber-repository-linux",
+ "tiber-repository-service",
  "tiber-session-service",
  "tiber-store-git",
  "tiber-tasks-core",
@@ -2122,6 +2127,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiber-repository-service"
+version = "0.1.0"
+dependencies = [
+ "eventcore",
+ "eventcore-memory",
+ "eventcore-types",
+ "futures",
+ "serde",
+ "serde_json",
+ "tiber-repository-core",
+ "tiber-workflow-core",
+]
+
+[[package]]
 name = "tiber-review"
 version = "0.1.0"
 dependencies = [
@@ -2167,12 +2186,14 @@ dependencies = [
 name = "tiber-store-git"
 version = "0.1.0"
 dependencies = [
+ "eventcore",
  "eventcore-fs",
  "eventcore-types",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "tiber-repository-service",
  "tiber-session-service",
  "tiber-tasks-core",
  "tiber-tasks-service",

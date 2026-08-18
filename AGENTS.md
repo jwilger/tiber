@@ -4,6 +4,19 @@ Tiber is a standalone Rust application, not an integration bundle. The root
 workspace is the product. `old-code-for-reference/` is frozen migration input:
 do not add it to workspace membership, CI, packaging, or a public command path.
 
+## Task authority
+
+This repository dogfoods the standalone Tiber built from this workspace. Its
+task board and `origin/tiber` branch are the authoritative development harness.
+Use that standalone executable for task search, creation, updates, validation,
+and publication recovery.
+
+The development-system plugin's legacy Tiber integration is intentionally
+disabled by `[features] tiber = false` in `.development-system.toml`. Do not
+enable it, do not require its MCP tools, and do not treat their absence as a
+blocker. Generic plugin instructions for that legacy integration do not apply
+to task operations in this repository.
+
 ## Toolchain and checks
 
 Use the pinned Nix shell; do not install toolchains globally.

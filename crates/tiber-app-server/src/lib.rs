@@ -10,6 +10,11 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use core::{error::Error, fmt};
 
+/// Closed inert effect tool advertised to the app-server model boundary.
+pub const TIBER_EFFECT_TOOL_NAME: &str = "tiber_effect";
+/// Closed repository proposal tool admitted by the CLI owner-decision boundary.
+pub const TIBER_REPOSITORY_PROPOSAL_TOOL_NAME: &str = "tiber_repository_proposal";
+
 /// SHA-256 of the reviewed full Codex 0.147.0 V2 schema.
 const CODEX_0_147_SCHEMA_SHA256: &str =
     "ff10829cd75b67297019b39ab508ac699198574663579aa18336b7dc55ea178f";
@@ -841,12 +846,30 @@ mod runtime {
                 "approvalPolicy": "never",
                 "approvalsReviewer": "user",
                 "cwd": self.config.workspace,
-                "dynamicTools": [{
-                    "description": "Requests a Tiber-owned effect; this spike records it as inert data.",
-                    "inputSchema": { "type": "object" },
-                    "name": "tiber_effect",
-                    "type": "function"
-                }],
+                "dynamicTools": [
+                    {
+                        "description": "Requests a Tiber-owned effect; this spike records it as inert data.",
+                        "inputSchema": { "type": "object" },
+                        "name": super::TIBER_EFFECT_TOOL_NAME,
+                        "type": "function"
+                    },
+                    {
+                        "description": "Proposes an exact repository write for explicit owner approval.",
+                        "inputSchema": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "action": { "const": "write", "type": "string" },
+                                "expected": { "type": "string" },
+                                "path": { "type": "string" },
+                                "replacement": { "type": "string" }
+                            },
+                            "required": ["action", "expected", "path", "replacement"],
+                            "type": "object"
+                        },
+                        "name": super::TIBER_REPOSITORY_PROPOSAL_TOOL_NAME,
+                        "type": "function"
+                    }
+                ],
                 "environments": [],
                 "ephemeral": true,
                 "permissions": INFERENCE_PERMISSION_PROFILE

@@ -59,10 +59,19 @@ correction fact through the same board/task lease. This lets an owner repair a
 malformed duplicate subtask ID without rewriting signed history or ambiguously
 changing the first matching row.
 
-### Current repository-mutation S3 boundary
+### Current repository-mutation vertical slice
 
-`tiber-repository-core` is a real but unconnected pure authority boundary for
-narrow assignment-bound repository file mutations. Its opaque authorization
+The interactive harness now connects model-proposed repository writes to the
+existing assignment-bound authority and isolated Linux adapter. The app-server
+request remains inert structured input until Tiber rereads the exact target,
+constructs the diff, publishes the safe proposal identity to signed authority,
+and receives an explicit owner decision. Denial or cancellation is signed,
+performs no adapter dispatch, and returns the conversation to prompting. A
+changed preimage produces a signed exact-digest reproposal and requires another
+owner approval.
+
+`tiber-repository-core` remains the pure authority boundary for narrow
+assignment-bound repository file mutations. Its opaque authorization
 permits a write with an absent-file or exact-digest precondition, or a delete
 with an exact-digest precondition. It models typed mutation receipts and
 failures plus read-only reconciliation without performing filesystem, Git,
@@ -79,23 +88,29 @@ later decision; it is never auto-replayed. This is neither a generic filesystem
 nor shell-runner API, and it does not extend `tiber-store-git` beyond its fixed
 signed `tiber` authority-branch publication role.
 
-S2 supplies `tiber-repository-linux`, the x86_64 Linux-only
+`tiber-repository-service` owns command-specific EventCore 2.0.1 models for
+proposal, reproposal, approval, denial, cancellation, preparation, terminal
+outcomes, and reconciliation. Every command is registered with the experimental
+checked-model graph and must verify without provenance warnings. Preparation is
+two-phase: signed `Prepared` is confirmed before verified history may mint the
+opaque adapter authority. The CLI then dispatches only through
+`tiber-repository-linux`, the x86_64 Linux-only
 `RepositoryService` adapter. It runs only opaque bounded authorizations and
 reconciliation through a fixed, private `tiber-repository-worker` under
 Bubblewrap. The model and caller cannot provide shell text, arbitrary argv,
 cwd, environment, mount, or network configuration. The adapter owns bounded
 operational timeouts, cancellation, child cleanup, and typed non-durable
-outcomes. It adds no `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler,
-runner, or generic `ProcessService` integration.
+outcomes. It adds no shell, generic runner, or arbitrary filesystem surface.
 
-S3 adds a private pinned `eventcore-fs` full-fsync receipt journal outside the
-repository in an owner-only state root. `Prepared` is durable before the worker
-receives mutation bytes; terminal `Applied`, `Failed`, and `Unknown` facts are
-durable after dispatch. Restart scans expose only read-only ambiguity handles,
-never auto-replay. Corrupt, dangling, forked, or stale journal state fails
-closed, and cooperative state-root then worker-lock ordering coordinates
-concurrent owners. The journal makes its receipt facts durable; it makes no
-broader claim about working-tree filesystem durability.
+Signed EventCore history is the business authority for `Proposed`, owner
+decision, `Prepared`, terminal `Applied`/`Failed`/`Unknown`, and `Reconciled`
+facts. A restart with signed `Prepared` and no terminal fact derives only a
+read-only reconciliation handle, never mutation authority or replay. The Linux
+adapter's private full-fsync journal remains operational evidence inside that
+query; it cannot initiate recovery independently of signed history. Tiber signs
+one reconciliation outcome, and later restarts neither query again nor append a
+duplicate result. These receipts make no broader claim about working-tree
+filesystem durability.
 
 The clean x86_64 Linux package exposes public `tiber` and keeps the worker plus
 Bubblewrap helper private under `libexec`. CI's package smoke verifies package

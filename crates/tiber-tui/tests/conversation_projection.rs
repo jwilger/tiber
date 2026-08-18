@@ -85,6 +85,98 @@ mod tests {
     }
 
     #[test]
+    fn durable_repository_proposal_renders_its_diff_and_emits_only_approval() {
+        let mut projection = ConversationProjection::new();
+        projection.apply(ProjectionEvent::RepositoryChangeProposed {
+            diff: "--- a/README.md\n+++ b/README.md\n@@\n-before\n+after\n".to_owned(),
+            path: "README.md".to_owned(),
+        });
+        projection.apply(ProjectionEvent::TurnCompleted);
+
+        let proposed = rendered(&projection);
+        assert!(proposed.contains("repository change proposed · README.md"));
+        assert!(proposed.contains("-before"));
+        assert!(proposed.contains("+after"));
+        assert!(proposed.contains("type approve, deny, or cancel"));
+        for character in "approve".chars() {
+            assert_eq!(
+                projection.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                ComposerIntent::None
+            );
+        }
+        assert_eq!(
+            projection.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ComposerIntent::Approve
+        );
+    }
+
+    #[test]
+    fn repository_approval_never_hides_a_bounded_diff_suffix() {
+        let mut projection = ConversationProjection::new();
+        let visible_suffix = "+owner-visible-final-line";
+        projection.apply(ProjectionEvent::RepositoryChangeProposed {
+            diff: format!("{}\n{visible_suffix}", "x".repeat(17 * 1024)),
+            path: "README.md".to_owned(),
+        });
+
+        assert!(rendered(&projection).contains(visible_suffix));
+    }
+
+    #[test]
+    fn repository_approval_requires_the_exact_owner_token() {
+        let mut projection = ConversationProjection::new();
+        projection.apply(ProjectionEvent::RepositoryChangeProposed {
+            diff: "-before\n+after\n".to_owned(),
+            path: "README.md".to_owned(),
+        });
+        for character in " approve ".chars() {
+            let _intent =
+                projection.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert_eq!(
+            projection.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ComposerIntent::None
+        );
+    }
+
+    #[test]
+    fn repository_decision_waits_for_turn_completion_in_either_order() {
+        let mut decision_first = ConversationProjection::new();
+        decision_first.apply(ProjectionEvent::PromptSubmitted {
+            text: "first".to_owned(),
+        });
+        decision_first.apply(ProjectionEvent::RepositoryChangeProposed {
+            diff: "-before\n+after\n".to_owned(),
+            path: "README.md".to_owned(),
+        });
+        decision_first.apply(ProjectionEvent::RepositoryChangeDenied {
+            path: "README.md".to_owned(),
+        });
+        assert!(rendered(&decision_first).contains("waiting for turn completion"));
+        assert_eq!(
+            decision_first.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ComposerIntent::None
+        );
+        decision_first.apply(ProjectionEvent::TurnCompleted);
+        assert!(rendered(&decision_first).contains("ready"));
+
+        let mut completion_first = ConversationProjection::new();
+        completion_first.apply(ProjectionEvent::PromptSubmitted {
+            text: "first".to_owned(),
+        });
+        completion_first.apply(ProjectionEvent::RepositoryChangeProposed {
+            diff: "-before\n+after\n".to_owned(),
+            path: "README.md".to_owned(),
+        });
+        completion_first.apply(ProjectionEvent::TurnCompleted);
+        completion_first.apply(ProjectionEvent::RepositoryChangeCancelled {
+            path: "README.md".to_owned(),
+        });
+        assert!(rendered(&completion_first).contains("ready"));
+    }
+
+    #[test]
     fn typed_failure_preserves_partial_transcript_and_reenables_composer() {
         let mut projection = ConversationProjection::new();
         projection.apply(ProjectionEvent::PromptSubmitted {

@@ -9,7 +9,11 @@ version.workspace = true
 chrono = "=0.4.45"
 uuid = { version = "=1.24.0", features = ["v4"] }
 eventcore-types.workspace = true
+eventcore.workspace = true
 tiber-app-server = { path = "../tiber-app-server" }
+tiber-repository-core = { path = "../tiber-repository-core" }
+tiber-repository-linux = { path = "../tiber-repository-linux" }
+tiber-repository-service = { path = "../tiber-repository-service" }
 tiber-store-git = { path = "../tiber-store-git" }
 tiber-session-service = { path = "../tiber-session-service" }
 tiber-tasks-core = { path = "../tiber-tasks-core" }
@@ -20,6 +24,7 @@ tiber-workflow-service = { path = "../tiber-workflow-service" }
 tokio = { version = "=1.53.1", default-features = false, features = ["rt"] }
 thiserror = "=2.0.20"
 ratatui.workspace = true
+rustix.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

@@ -8,6 +8,7 @@ members = [
   "crates/tiber-memory-core",
   "crates/tiber-rmcp-client",
   "crates/tiber-repository-core",
+  "crates/tiber-repository-service",
   "crates/tiber-repository-linux",
   "crates/tiber-review",
   "crates/tiber-session-service",
@@ -31,6 +32,8 @@ version = "0.1.0"
 eventcore = { version = "=2.0.1", features = ["experimental-modeling"] }
 eventcore-fs = "=2.0.1"
 eventcore-types = "=2.0.1"
+eventcore-memory = "=2.0.1"
+futures = "=0.3.32"
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.143"

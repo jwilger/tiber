@@ -12,9 +12,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use eventcore::model::StreamIdentity as _;
 use eventcore_fs::{FileEventStore, FsConfig, FsyncPolicy};
 use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamWrites};
 use tempfile::TempDir;
+use tiber_repository_service::RepositoryMutationPublication;
 use tiber_session_service::{
     InferenceObservationPublication, InferenceRequestPublication, SessionFact,
     SessionStartPublication, SessionSuccessorPublication,
@@ -186,6 +188,43 @@ impl fmt::Debug for TiberEventPublisher {
     reason = "the publisher API follows stage opening, inspection, then one-shot append/publication flow"
 )]
 impl TiberEventPublisher {
+    /// Publishes one command-specific repository-mutation decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when `EventCore` staging, signing, or exact-base
+    /// publication cannot be confirmed.
+    #[inline]
+    pub async fn publish_repository_mutation(
+        &mut self,
+        publication: RepositoryMutationPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, publication_streams) = publication.into_event_and_consistency_streams();
+        let consistency_streams = publication_streams.map(|stream| stream.as_stream_id().clone());
+        self.append(&consistency_streams, vec![event]).await
+    }
+
+    /// Atomically publishes one approved repository mutation and its prepared boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when the closed publications target different
+    /// streams or exact-base signed publication cannot be confirmed.
+    #[inline]
+    pub async fn publish_approved_and_prepared_repository_mutation(
+        &mut self,
+        [approval, prepared]: [RepositoryMutationPublication; 2],
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (approval_event, approval_streams) = approval.into_event_and_consistency_streams();
+        let (prepared_event, prepared_streams) = prepared.into_event_and_consistency_streams();
+        if approval_streams != prepared_streams {
+            return Err(TiberPublicationError::UndeclaredStream);
+        }
+        let consistency_streams = approval_streams.map(|stream| stream.as_stream_id().clone());
+        self.append(&consistency_streams, vec![approval_event, prepared_event])
+            .await
+    }
+
     /// Atomically publishes a prompt and its workflow-owned effect request.
     ///
     /// # Errors

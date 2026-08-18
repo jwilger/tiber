@@ -49,6 +49,35 @@ pub enum ProjectionEvent {
         call_id: String,
         tool: String,
     },
+    /// A durably recorded, exact repository change awaits owner approval.
+    RepositoryChangeProposed { diff: String, path: String },
+    /// A durably prepared repository change was applied by the authorized adapter.
+    RepositoryChangeApplied { path: String },
+    /// The owner durably denied the exact repository proposal.
+    RepositoryChangeDenied { path: String },
+    /// The owner durably cancelled the exact repository proposal.
+    RepositoryChangeCancelled { path: String },
+    /// A repository mutation ended with one typed adapter failure.
+    RepositoryChangeFailed {
+        /// Stable repository adapter failure code.
+        code: String,
+        /// Root-relative repository path named by the receipt.
+        path: String,
+        /// Whether a safe retry may make progress.
+        retryable: bool,
+    },
+    /// A read-only restart reconciliation reached one durable outcome.
+    RepositoryChangeReconciled {
+        /// Stable content-free reconciliation outcome.
+        outcome: String,
+        /// Root-relative repository path named by the receipt.
+        path: String,
+    },
+    /// A repository mutation has an ambiguous durable outcome.
+    RepositoryChangeUnknown {
+        /// Root-relative repository path named by the receipt.
+        path: String,
+    },
     /// The active turn completed.
     TurnCompleted,
     /// The active turn ended with a typed failure.
@@ -69,6 +98,10 @@ enum PresentationPhase {
     Ready,
     /// One inference turn is producing observations.
     Streaming,
+    /// One durable repository proposal awaits an explicit owner decision.
+    Approval,
+    /// The owner decided, but the inference turn has not durably completed.
+    DecisionComplete,
     /// Durable workflow authority must be reconciled before another prompt.
     Reconcile,
 }
@@ -88,6 +121,13 @@ enum TranscriptEntry {
         call_id: String,
         /// Declared tool name.
         tool: String,
+    },
+    /// One exact durable repository proposal awaiting owner approval.
+    RepositoryProposal {
+        /// Exact bounded diff displayed for owner review.
+        diff: String,
+        /// Root-relative repository path named by the proposal.
+        path: String,
     },
     /// A typed inference failure retained with partial output.
     Failure {
@@ -109,6 +149,8 @@ pub struct ConversationProjection {
     entries: Vec<TranscriptEntry>,
     /// Current presentation-only phase.
     phase: PresentationPhase,
+    /// Whether the active inference turn has emitted its completion observation.
+    turn_completed: bool,
 }
 
 /// Owner intent emitted by the presentation for the application shell.
@@ -118,6 +160,12 @@ pub enum ComposerIntent {
     None,
     /// Submit one non-empty prompt.
     Submit(String),
+    /// Approve the exact durable repository proposal currently displayed.
+    Approve,
+    /// Deny the exact durable repository proposal currently displayed.
+    Deny,
+    /// Cancel the exact durable repository proposal currently displayed.
+    Cancel,
     /// Exit the terminal application.
     Quit,
 }
@@ -130,12 +178,17 @@ impl ConversationProjection {
     }
 
     /// Applies one application-owned observation without executing any effect.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the closed presentation event fold keeps every authority-neutral state transition together and explicit"
+    )]
     pub fn apply(&mut self, event: ProjectionEvent) {
         match event {
             ProjectionEvent::PromptSubmitted { text } => {
                 self.push_entry(TranscriptEntry::User(sanitize_terminal_text(&text)));
                 self.push_entry(TranscriptEntry::Assistant(String::new()));
                 self.phase = PresentationPhase::Streaming;
+                self.turn_completed = false;
                 self.composer.clear();
             }
             ProjectionEvent::AssistantDelta { text } => {
@@ -157,7 +210,87 @@ impl ConversationProjection {
                 call_id: sanitize_terminal_text(&call_id),
                 tool: sanitize_terminal_text(&tool),
             }),
-            ProjectionEvent::TurnCompleted => self.phase = PresentationPhase::Ready,
+            ProjectionEvent::RepositoryChangeProposed { diff, path } => {
+                self.push_entry(TranscriptEntry::RepositoryProposal {
+                    diff: sanitize_repository_diff(&diff),
+                    path: sanitize_terminal_text(&path),
+                });
+                self.phase = PresentationPhase::Approval;
+                self.composer.clear();
+            }
+            ProjectionEvent::RepositoryChangeApplied { path } => {
+                self.push_entry(TranscriptEntry::Assistant(format!(
+                    "repository change applied: {path}"
+                )));
+                self.phase = if self.turn_completed {
+                    PresentationPhase::Ready
+                } else {
+                    PresentationPhase::DecisionComplete
+                };
+                self.composer.clear();
+            }
+            ProjectionEvent::RepositoryChangeDenied { path } => {
+                self.push_entry(TranscriptEntry::Assistant(format!(
+                    "repository change denied: {path}"
+                )));
+                self.phase = if self.turn_completed {
+                    PresentationPhase::Ready
+                } else {
+                    PresentationPhase::DecisionComplete
+                };
+                self.composer.clear();
+            }
+            ProjectionEvent::RepositoryChangeCancelled { path } => {
+                self.push_entry(TranscriptEntry::Assistant(format!(
+                    "repository change cancelled: {path}"
+                )));
+                self.phase = if self.turn_completed {
+                    PresentationPhase::Ready
+                } else {
+                    PresentationPhase::DecisionComplete
+                };
+                self.composer.clear();
+            }
+            ProjectionEvent::RepositoryChangeFailed {
+                code,
+                path,
+                retryable,
+            } => {
+                self.push_entry(TranscriptEntry::Failure {
+                    code: sanitize_terminal_text(&code),
+                    message: format!(
+                        "repository change failed: {}",
+                        sanitize_terminal_text(&path)
+                    ),
+                    retryable,
+                });
+                self.phase = PresentationPhase::Ready;
+            }
+            ProjectionEvent::RepositoryChangeReconciled { outcome, path } => {
+                self.push_entry(TranscriptEntry::Assistant(format!(
+                    "repository change reconciled: {} {}",
+                    sanitize_terminal_text(&path),
+                    sanitize_terminal_text(&outcome)
+                )));
+                self.phase = PresentationPhase::Ready;
+            }
+            ProjectionEvent::RepositoryChangeUnknown { path } => {
+                self.push_entry(TranscriptEntry::Failure {
+                    code: "repository_mutation_outcome_unknown".to_owned(),
+                    message: format!(
+                        "repository change unknown: {}",
+                        sanitize_terminal_text(&path)
+                    ),
+                    retryable: true,
+                });
+                self.phase = PresentationPhase::Reconcile;
+            }
+            ProjectionEvent::TurnCompleted => {
+                self.turn_completed = true;
+                if self.phase != PresentationPhase::Approval {
+                    self.phase = PresentationPhase::Ready;
+                }
+            }
             ProjectionEvent::TurnFailed {
                 code,
                 message,
@@ -193,16 +326,29 @@ impl ConversationProjection {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return ComposerIntent::Quit;
         }
-        if self.phase != PresentationPhase::Ready {
+        if self.phase != PresentationPhase::Ready && self.phase != PresentationPhase::Approval {
             return ComposerIntent::None;
         }
         match key.code {
             KeyCode::Enter => {
-                let prompt = self.composer.trim().to_owned();
-                if prompt.is_empty() {
+                if self.phase == PresentationPhase::Approval && self.composer == "approve" {
+                    self.composer.clear();
+                    ComposerIntent::Approve
+                } else if self.phase == PresentationPhase::Approval && self.composer == "deny" {
+                    self.composer.clear();
+                    ComposerIntent::Deny
+                } else if self.phase == PresentationPhase::Approval && self.composer == "cancel" {
+                    self.composer.clear();
+                    ComposerIntent::Cancel
+                } else if self.phase == PresentationPhase::Approval {
                     ComposerIntent::None
                 } else {
-                    ComposerIntent::Submit(prompt)
+                    let prompt = self.composer.trim().to_owned();
+                    if prompt.is_empty() {
+                        ComposerIntent::None
+                    } else {
+                        ComposerIntent::Submit(prompt)
+                    }
                 }
             }
             KeyCode::Backspace => {
@@ -270,6 +416,11 @@ pub fn render(frame: &mut Frame<'_>, projection: &ConversationProjection) {
             "streaming \u{b7} model effects remain inert",
             Style::default().fg(Color::Cyan),
         ),
+        PresentationPhase::Approval => ("approval required", Style::default().fg(Color::Yellow)),
+        PresentationPhase::DecisionComplete => (
+            "waiting for turn completion",
+            Style::default().fg(Color::Cyan),
+        ),
         PresentationPhase::Reconcile => ("reconcile required", Style::default().fg(Color::Yellow)),
     };
     frame.render_widget(Paragraph::new(status).style(status_style), status_area);
@@ -280,6 +431,8 @@ pub fn render(frame: &mut Frame<'_>, projection: &ConversationProjection) {
     let footer = match projection.phase {
         PresentationPhase::Ready => "enter send \u{b7} ctrl+c quit",
         PresentationPhase::Streaming => "streaming \u{b7} ctrl+c quit \u{b7} tools are inert",
+        PresentationPhase::Approval => "type approve, deny, or cancel \u{b7} ctrl+c quit",
+        PresentationPhase::DecisionComplete => "waiting for turn completion \u{b7} ctrl+c quit",
         PresentationPhase::Reconcile => "reconcile required \u{b7} ctrl+c quit",
     };
     frame.render_widget(
@@ -335,6 +488,15 @@ fn transcript_text(projection: &ConversationProjection) -> Text<'static> {
                 ]));
                 lines.push(Line::from(format!("  {arguments}")));
             }
+            TranscriptEntry::RepositoryProposal { diff, path } => {
+                lines.push(Line::styled(
+                    format!("repository change proposed \u{b7} {path}"),
+                    Style::default().fg(Color::Yellow),
+                ));
+                for line in diff.lines() {
+                    lines.push(Line::from(format!("  {line}")));
+                }
+            }
             TranscriptEntry::Failure {
                 code,
                 message,
@@ -355,8 +517,17 @@ fn transcript_text(projection: &ConversationProjection) -> Text<'static> {
 
 /// Escapes terminal control characters while preserving ordinary layout whitespace.
 fn sanitize_terminal_text(text: &str) -> String {
-    let sanitized = text
-        .chars()
+    truncate_utf8(&sanitize_terminal_controls(text), MAX_FIELD_BYTES)
+}
+
+/// Escapes controls in a bounded repository diff without hiding an approvable suffix.
+fn sanitize_repository_diff(text: &str) -> String {
+    sanitize_terminal_controls(text)
+}
+
+/// Escapes terminal controls while preserving ordinary layout whitespace.
+fn sanitize_terminal_controls(text: &str) -> String {
+    text.chars()
         .flat_map(|character| match character {
             '\n' | '\t' => character.to_string().chars().collect::<Vec<_>>(),
             _ if character.is_control() => format!("\\u{{{:04X}}}", u32::from(character))
@@ -364,8 +535,7 @@ fn sanitize_terminal_text(text: &str) -> String {
                 .collect(),
             _ => vec![character],
         })
-        .collect::<String>();
-    truncate_utf8(&sanitized, MAX_FIELD_BYTES)
+        .collect::<String>()
 }
 
 /// Returns a UTF-8-safe prefix within one byte budget.

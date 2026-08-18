@@ -117,6 +117,19 @@ mod tests {
     }
 
     #[test]
+    fn outbound_turn_declares_every_closed_tiber_tool_the_cli_recognizes() {
+        let mut client = AppServerClient::start(
+            fixture_config(Some("repository-tool-contract")),
+            ISOLATED_CONFIG,
+        )
+        .expect("fixture app-server should initialize");
+
+        client
+            .start_turn("inspect the outbound closed tool contract")
+            .expect("thread/start must advertise the repository proposal tool");
+    }
+
+    #[test]
     fn turn_polling_is_nonterminal_until_an_observation_arrives() {
         let mut client =
             AppServerClient::start(fixture_config(Some("delayed-stream")), ISOLATED_CONFIG)

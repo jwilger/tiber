@@ -193,6 +193,21 @@ pub enum RepositoryRetryability {
     ReadOnlyRetryable,
 }
 
+impl fmt::Display for RepositoryRetryability {
+    #[inline]
+    #[expect(
+        clippy::pattern_type_mismatch,
+        clippy::renamed_function_params,
+        reason = "the Display boundary borrows the closed retryability value and names its formatter descriptively"
+    )]
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::FreshAuthorizationRequired => "fresh authorization required",
+            Self::ReadOnlyRetryable => "read-only reconciliation required",
+        })
+    }
+}
+
 /// Stable definitive failure codes for a consumed repository mutation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[expect(
@@ -1009,7 +1024,7 @@ impl RepositoryMutationProposal {
 }
 
 /// Safe proposal identity that an owner approval binds without retaining raw write content.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RepositoryMutationProposalIdentity {
     /// Digest of write bytes, omitted for delete proposals.
     content_digest: Option<Sha256Digest>,
@@ -1023,6 +1038,29 @@ pub struct RepositoryMutationProposalIdentity {
     provenance: RepositoryMutationProvenance,
     /// Exact repository selected by the proposal.
     repository_id: RepositoryId,
+}
+
+impl RepositoryMutationProposalIdentity {
+    /// Returns the exact root-relative target selected by the proposal.
+    #[must_use]
+    #[inline]
+    pub const fn path(&self) -> &RepositoryPath {
+        &self.path
+    }
+
+    /// Returns the exact typed precondition selected by the proposal.
+    #[must_use]
+    #[inline]
+    pub const fn precondition(&self) -> RepositoryMutationPrecondition {
+        self.precondition
+    }
+
+    /// Returns the complete workflow provenance carried by this safe proposal identity.
+    #[must_use]
+    #[inline]
+    pub const fn provenance(&self) -> &RepositoryMutationProvenance {
+        &self.provenance
+    }
 }
 
 /// Opaque explicit owner approval bound to one safe proposal and policy context.
@@ -1097,6 +1135,18 @@ impl RepositoryMutationIdentity {
     #[inline]
     pub const fn kind(&self) -> RepositoryMutationKind {
         self.kind
+    }
+
+    /// Returns whether this authorized identity retains the exact safe proposal identity.
+    #[must_use]
+    #[inline]
+    pub fn matches_proposal(&self, proposal: &RepositoryMutationProposalIdentity) -> bool {
+        self.content_digest == proposal.content_digest
+            && self.kind == proposal.kind
+            && self.path == proposal.path
+            && self.precondition == proposal.precondition
+            && self.provenance == proposal.provenance
+            && self.repository_id == proposal.repository_id
     }
 
     /// Returns the explicit owner approval identity bound to the mutation.
@@ -1698,6 +1748,95 @@ pub fn authorize_mutation(
         owner_approval: approval.approval_id,
         proposal,
     })
+}
+
+/// Derives the safe identity that may be durably prepared without minting adapter authority.
+///
+/// # Errors
+///
+/// Returns the same stable policy denial as [`authorize_mutation`] before any
+/// raw proposal can become adapter-visible.
+#[inline]
+pub fn prepare_mutation_identity(
+    proposal: &RepositoryMutationProposal,
+    assignment: &RepositoryAssignmentContext,
+    policy: &RepositoryMutationPolicy,
+    approval_id: OwnerApprovalId,
+) -> Result<RepositoryMutationIdentity, RepositoryError> {
+    validate_mutation_policy(proposal, assignment, policy)?;
+    Ok(RepositoryMutationIdentity {
+        content_digest: proposal.operation.content_digest(),
+        kind: proposal.operation.kind(),
+        owner_approval: approval_id,
+        path: proposal.path.clone(),
+        precondition: proposal.operation.precondition(),
+        provenance: proposal.provenance.clone(),
+        repository_id: proposal.repository_id.clone(),
+    })
+}
+
+/// Consumes a raw proposal into adapter authority only after an exact prepared
+/// identity has been reloaded from durable signed history.
+///
+/// # Errors
+///
+/// Returns a stable denial when current policy no longer authorizes the proposal
+/// or the durable prepared identity differs from the exact proposed operation.
+#[inline]
+pub fn authorize_prepared_mutation(
+    proposal: RepositoryMutationProposal,
+    assignment: &RepositoryAssignmentContext,
+    policy: &RepositoryMutationPolicy,
+    prepared: &RepositoryMutationIdentity,
+) -> Result<AuthorizedRepositoryMutation, RepositoryError> {
+    let expected = prepare_mutation_identity(
+        &proposal,
+        assignment,
+        policy,
+        prepared.owner_approval().clone(),
+    )?;
+    if expected != *prepared {
+        return Err(RepositoryError::OwnerApprovalMismatch);
+    }
+    Ok(AuthorizedRepositoryMutation {
+        owner_approval: prepared.owner_approval().clone(),
+        proposal,
+    })
+}
+
+/// Validates proposal provenance, scope, and capability before authorization.
+#[expect(
+    clippy::single_call_fn,
+    reason = "the named policy-validation boundary keeps authorization checks closed and auditable"
+)]
+#[inline]
+fn validate_mutation_policy(
+    proposal: &RepositoryMutationProposal,
+    assignment: &RepositoryAssignmentContext,
+    policy: &RepositoryMutationPolicy,
+) -> Result<(), RepositoryError> {
+    if proposal.provenance != assignment.provenance {
+        return Err(RepositoryError::ProposalProvenanceMismatch);
+    }
+    if proposal.repository_id != assignment.repository_id {
+        return Err(RepositoryError::RepositoryMismatch);
+    }
+    if policy.assignment.provenance != assignment.provenance {
+        return Err(RepositoryError::PolicyAssignmentMismatch);
+    }
+    if policy.assignment.repository_id != assignment.repository_id {
+        return Err(RepositoryError::PolicyRepositoryMismatch);
+    }
+    if policy.assignment.component_scope != assignment.component_scope {
+        return Err(RepositoryError::PolicyScopeMismatch);
+    }
+    if !assignment.component_scope.contains(&proposal.path) {
+        return Err(RepositoryError::AssignmentScopeMismatch);
+    }
+    if !policy.permits(RepositoryCapability::MutateRepository) {
+        return Err(RepositoryError::CapabilityDenied);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

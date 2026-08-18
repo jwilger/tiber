@@ -361,6 +361,13 @@ pub struct SessionSuccessorPublication {
 }
 
 impl SessionSuccessorPublication {
+    /// Borrows the checked fact for a post-publication immutable projection.
+    #[must_use]
+    #[inline]
+    pub const fn event(&self) -> &SessionEvent {
+        &self.event
+    }
+
     #[must_use]
     #[inline]
     pub fn into_event_and_consistency_streams(self) -> (SessionEvent, [StreamId; 1]) {
@@ -402,6 +409,13 @@ impl InferenceRequestPublication {
 }
 
 impl SessionStartPublication {
+    /// Borrows the checked fact for a post-publication immutable projection.
+    #[must_use]
+    #[inline]
+    pub const fn event(&self) -> &SessionEvent {
+        &self.event
+    }
+
     /// Transfers the checked event and its exact consistency boundary.
     #[must_use]
     #[inline]

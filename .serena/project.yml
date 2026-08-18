@@ -74,7 +74,13 @@ ignore_all_files_in_gitignore: true
 # Maps the language key to the options.
 # The settings are considered only if the project is trusted (see global configuration to define trusted projects).
 # See https://oraios.github.io/serena/02-usage/050_configuration.html#language-server-specific-settings
-ls_specific_settings: {}
+ls_specific_settings:
+  rust:
+    ls_base_cmd:
+    - nix
+    - develop
+    - -c
+    - rust-analyzer
 
 # list of workspace folder paths (LSP backend only).
 # These folders will be used to build up Serena's symbol index.

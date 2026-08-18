@@ -125,6 +125,7 @@ function runApiKeyLogin() {
 function runAppServer() {
   let threadId = "thread-fixture";
   let nextTurn = 0;
+  const completedToolRequests = new Set();
   let account =
     fixtureAuthValue("account_type") === "apiKey" ? { type: "apiKey" } : null;
   const input = readline.createInterface({ input: process.stdin });
@@ -232,6 +233,22 @@ function runAppServer() {
       account = null;
       send({ id: message.id, result: {} });
     } else if (message.method === "thread/start") {
+      if (fixtureMode === "repository-tool-contract") {
+        const names = (message.params.dynamicTools ?? []).map((tool) => tool.name);
+        if (
+          !names.includes("tiber_effect") ||
+          !names.includes("tiber_repository_proposal")
+        ) {
+          send({
+            error: {
+              code: -32602,
+              message: `missing closed Tiber tool declaration: ${names.join(",")}`,
+            },
+            id: message.id,
+          });
+          return;
+        }
+      }
       if (fixtureMode === "oversized-line") {
         process.stdout.write("x".repeat(40 * 1024));
         return;
@@ -325,6 +342,8 @@ function runAppServer() {
           ? ["PROVIDER_BEFORE\u001b[31mPROVIDER_AFTER"]
           : fixtureMode === "split-stream"
           ? ["hello ", "from Tiber"]
+          : fixtureMode.startsWith("repository-edit")
+          ? ["I inspected README.md and propose changing before to after."]
           : ["hello from Tiber"];
       if (fixtureMode === "delayed-stream") {
         await new Promise((resolve) => setTimeout(resolve, 75));
@@ -359,23 +378,67 @@ function runAppServer() {
           id: "dynamic-fixture",
           method: "item/tool/call",
           params: {
-            arguments: { action: "sentinel" },
+            arguments:
+              fixtureMode.startsWith("repository-edit")
+                ? {
+                    action:
+                      fixtureMode === "repository-edit-non-write" ? "read" : "write",
+                    expected: "before\n",
+                    path: "README.md",
+                    replacement: "after\n",
+                  }
+                : { action: "sentinel" },
             callId: "call-fixture",
             namespace: null,
             threadId,
-            tool: "tiber_authority_probe",
+            tool:
+              fixtureMode.startsWith("repository-edit")
+                ? "tiber_repository_proposal"
+                : "tiber_authority_probe",
             turnId,
           },
         });
+        if (fixtureMode === "repository-edit-duplicate") {
+          send({
+            id: "dynamic-fixture-duplicate",
+            method: "item/tool/call",
+            params: {
+              arguments: {
+                action: "write",
+                expected: "before\n",
+                path: "README.md",
+                replacement: "second\n",
+              },
+              callId: "call-fixture-duplicate",
+              namespace: null,
+              threadId,
+              tool: "tiber_repository_proposal",
+              turnId,
+            },
+          });
+        }
         if (fixtureMode === "close-after-request") {
           setImmediate(() => process.exit(4));
         }
       } else {
         completeTurn(turnId);
       }
-    } else if (message.id === "dynamic-fixture") {
+    } else if (
+      message.id === "dynamic-fixture" ||
+      message.id === "dynamic-fixture-duplicate"
+    ) {
       if (message.result?.success !== false) process.exitCode = 1;
-      completeTurn("turn-1");
+      completedToolRequests.add(message.id);
+      const expectedResponses =
+        fixtureMode === "repository-edit-duplicate" ? 2 : 1;
+      if (completedToolRequests.size === expectedResponses) {
+        if (fixtureMode === "repository-edit-delayed-completion") {
+          while (!fs.existsSync(process.env.TIBER_FIXTURE_COMPLETION_RELEASE)) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+        completeTurn("turn-1");
+      }
     } else if (
       fixtureMode === "id-collision" &&
       message.result?.decision === "decline"

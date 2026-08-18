@@ -24,6 +24,7 @@ use recovery::{JournalDispatchReplay, JournalFact, JournalReconciliationReplay};
 use rustix::fs::{FlockOperation, OFlags, fcntl_getfl, fcntl_setfl, flock};
 use rustix::process::{Pid, Signal, kill_process_group};
 use std::{
+    env,
     fs::{DirBuilder, File, OpenOptions, canonicalize, read_link},
     io::{Error as IoError, ErrorKind, Result as IoResult},
     io::{Read as _, Write as _},
@@ -408,6 +409,14 @@ impl LinuxRepositoryService {
                     mutation.into_failure(RepositoryMutationFailureCode::PreDispatchRejected)
                 );
             }
+            if cfg!(debug_assertions)
+                && env::var("TIBER_TEST_REPOSITORY_FAILURE_CODE").as_deref()
+                    == Ok("precondition_not_met")
+            {
+                return Err(
+                    mutation.into_failure(RepositoryMutationFailureCode::PreconditionNotMet)
+                );
+            }
             let spawned = self.spawn_worker(false, started, deadline);
             let Ok(SpawnedWorker {
                 mut child,
@@ -479,6 +488,7 @@ impl LinuxRepositoryService {
         clippy::needless_pass_by_value,
         clippy::question_mark_used,
         clippy::result_large_err,
+        clippy::too_many_lines,
         reason = "the core port consumes the ambiguity handle when binding either outcome or failure"
     )]
     fn reconcile_now(
@@ -565,12 +575,24 @@ impl LinuxRepositoryService {
                 reconciliation.bind_failure(RepositoryReconciliationError::ReadOnlyQueryFailed)
             );
         };
-        if !status.success() || read_response(&mut child) != Some(WorkerResponse::StillUnknown) {
+        if !status.success() {
             return Err(
                 reconciliation.bind_failure(RepositoryReconciliationError::ReadOnlyQueryFailed)
             );
         }
-        let outcome = reconciliation.bind_outcome(RepositoryReconciliationState::StillUnknown);
+        let state = match read_response(&mut child) {
+            Some(WorkerResponse::Applied) => RepositoryReconciliationState::Applied,
+            Some(WorkerResponse::Rejected {
+                code: RepositoryMutationFailureCode::DefinitelyNotApplied,
+            }) => RepositoryReconciliationState::NotApplied,
+            Some(WorkerResponse::StillUnknown) => RepositoryReconciliationState::StillUnknown,
+            Some(WorkerResponse::Rejected { .. }) | None => {
+                return Err(
+                    reconciliation.bind_failure(RepositoryReconciliationError::ReadOnlyQueryFailed)
+                );
+            }
+        };
+        let outcome = reconciliation.bind_outcome(state);
         if let Some((_lease, root, projection)) = journal
             && recovery::append(
                 &root,
