@@ -2339,11 +2339,12 @@ fn command_error(code: &'static str) -> CommandError {
 
 /// Maps a checked command rejection into the stable service error vocabulary.
 #[expect(
+    clippy::pattern_type_mismatch,
     clippy::shadow_unrelated,
-    reason = "the adapter keeps the conventional error binding at its error-mapping boundary"
+    reason = "the adapter matches EventCore's borrowed boxed business-rule error and keeps the conventional error binding at its mapping boundary"
 )]
 fn modeled_service_error(error: &CommandError) -> RepositoryMutationServiceError {
-    let Some(source) = Error::source(error) else {
+    let CommandError::BusinessRuleViolation(source) = error else {
         return RepositoryMutationServiceError::ModeledCommandFailed;
     };
     let Some(error) = source.downcast_ref::<RepositoryCommandError>() else {
