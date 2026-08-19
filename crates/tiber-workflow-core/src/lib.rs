@@ -738,15 +738,45 @@ pub fn step(state: &HarnessState, observation: Option<&EffectObservation>) -> Tr
 /// Returns [`HarnessError::TerminalState`] unless the supplied workflow completed.
 #[inline]
 #[expect(
-    clippy::format_collect,
     clippy::needless_return,
-    clippy::question_mark_used,
-    reason = "the bounded SHA-256 successor identifiers preserve typed parsing failures at the workflow authority boundary and conform to the workspace's explicit-return rule"
+    reason = "the explicit return conforms to the workspace return-style policy"
 )]
 pub fn continue_after_completion(state: &HarnessState) -> Result<HarnessState, HarnessError> {
     if state.phase != HarnessPhase::Completed {
         return Err(HarnessError::TerminalState);
     }
+    return successor_state(state);
+}
+
+/// Creates a new ready inference continuation after a terminal stopped turn.
+///
+/// This does not retry or reclassify the failed effect. It derives a distinct
+/// successor identity from the closed predecessor so a later owner prompt can
+/// begin under fresh effect authority.
+///
+/// # Errors
+///
+/// Returns [`HarnessError::TerminalState`] unless the supplied workflow stopped.
+#[inline]
+#[expect(
+    clippy::needless_return,
+    reason = "the explicit return conforms to the workspace return-style policy"
+)]
+pub fn continue_after_interruption(state: &HarnessState) -> Result<HarnessState, HarnessError> {
+    if state.phase != HarnessPhase::Stopped {
+        return Err(HarnessError::TerminalState);
+    }
+    return successor_state(state);
+}
+
+#[expect(
+    clippy::format_collect,
+    clippy::needless_return,
+    clippy::question_mark_used,
+    reason = "the bounded SHA-256 successor identifiers preserve typed parsing failures at the workflow authority boundary and conform to the workspace's explicit-return rule"
+)]
+/// Derives the next effect identity shared by successful and interrupted turns.
+fn successor_state(state: &HarnessState) -> Result<HarnessState, HarnessError> {
     let prior = state.initial_effect();
     let digest = Sha256::digest(prior.effect_id().as_str().as_bytes())
         .iter()

@@ -85,6 +85,70 @@ mod tests {
     }
 
     #[test]
+    fn active_configured_command_exposes_only_its_identity_and_explicit_cancel_intent() {
+        let mut projection = ConversationProjection::new();
+        projection.apply(ProjectionEvent::PromptSubmitted {
+            text: "run the bounded check".to_owned(),
+        });
+        projection.apply(ProjectionEvent::ConfiguredCommandActive {
+            command: "focused-test\u{1b}[31m".to_owned(),
+        });
+        projection.apply(ProjectionEvent::TurnCompleted);
+
+        let active = rendered(&projection);
+        assert!(active.contains("configured command active · focused-test\\u{001B}[31m"));
+        assert!(active.contains("type cancel · ctrl+c quit"));
+        assert!(!active.contains("program"));
+        assert!(!active.contains("arguments"));
+        for character in "cancel".chars() {
+            assert_eq!(
+                projection.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                ComposerIntent::None
+            );
+        }
+        assert_eq!(
+            projection.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ComposerIntent::CancelConfiguredCommand
+        );
+
+        projection.apply(ProjectionEvent::ConfiguredCommandFinished {
+            command: "focused-test".to_owned(),
+            status: "cancelled".to_owned(),
+        });
+        assert!(rendered(&projection).contains("configured command cancelled: focused-test"));
+        assert_eq!(
+            projection.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ComposerIntent::Quit
+        );
+    }
+
+    #[test]
+    fn configured_command_nonzero_exit_is_distinct_from_success() {
+        let mut projection = ConversationProjection::new();
+        projection.apply(ProjectionEvent::ConfiguredCommandActive {
+            command: "focused-test".to_owned(),
+        });
+        projection.apply(ProjectionEvent::ConfiguredCommandFinished {
+            command: "focused-test".to_owned(),
+            status: "failed (exit status 23)".to_owned(),
+        });
+
+        let failed = rendered(&projection);
+        assert!(failed.contains("configured command failed (exit status 23): focused-test"));
+        assert!(!failed.contains("configured command completed: focused-test"));
+
+        projection.apply(ProjectionEvent::ConfiguredCommandActive {
+            command: "focused-test".to_owned(),
+        });
+        projection.apply(ProjectionEvent::ConfiguredCommandFinished {
+            command: "focused-test".to_owned(),
+            status: "completed".to_owned(),
+        });
+
+        assert!(rendered(&projection).contains("configured command completed: focused-test"));
+    }
+
+    #[test]
     fn durable_repository_proposal_renders_its_diff_and_emits_only_approval() {
         let mut projection = ConversationProjection::new();
         projection.apply(ProjectionEvent::RepositoryChangeProposed {

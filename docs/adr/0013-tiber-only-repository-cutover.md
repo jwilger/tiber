@@ -53,9 +53,10 @@ one closed `Infer` effect, and a serializable total trampoline, while
 initialize, request, record, and advance it. Recording an `EffectObserved` fact
 is a distinct durable transaction before any later advance may request,
 complete, or stop; there is no generic workflow append or effect executor.
-Workflow scheduling, effect interpretation and reconciliation, durable
-interactive sessions, and app-server/CLI/TUI runner integration remain
-follow-on work, not compatibility surfaces.
+The CLI/TUI now uses that workflow for durable interactive inference and
+interprets declared tool calls only through Tiber-owned typed boundaries.
+Broader workflow scheduling and operator-directed uncertain-effect resolution
+remain follow-on work, not compatibility surfaces.
 
 One bounded exception corrects malformed retained task metadata: native Tasks
 may append a named, preconditioned duplicate-subtask identity correction. It

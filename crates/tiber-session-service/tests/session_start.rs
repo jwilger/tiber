@@ -4,15 +4,15 @@
 mod tests {
     use eventcore::model::{CheckStatus, check};
     use tiber_session_service::{
-        AssistantText, PromptText, SessionBinding, SessionFact, decide_observe_inference,
-        decide_request_inference, decide_start_session, decide_succeed_session,
-        project_started_session, task_assignment_scope,
+        AssistantText, PromptText, SessionBinding, SessionFact, decide_interrupt_inference,
+        decide_observe_inference, decide_request_inference, decide_start_session,
+        decide_succeed_session, project_started_session, task_assignment_scope,
     };
     use tiber_tasks_core::TaskId;
     use tiber_workflow_core::{
         AgentId, AssignmentEpoch, AssignmentId, AttemptNumber, ContextReceiptId,
-        DeadlineMilliseconds, EffectId, HarnessState, IdempotencyKey, InferEffect,
-        PolicyDecisionId, SessionId, WorkflowId,
+        DeadlineMilliseconds, EffectFailureCode, EffectId, EffectObservation, HarnessState,
+        IdempotencyKey, InferEffect, PolicyDecisionId, Retryability, SessionId, WorkflowId,
     };
 
     #[test]
@@ -455,6 +455,42 @@ mod tests {
                 effect_id: parsed(EffectId::parse, "effect-1"),
                 assistant,
             }
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::absolute_paths,
+        clippy::shadow_unrelated,
+        reason = "the public black-box scenario keeps the two successive publication boundaries explicit"
+    )]
+    fn interrupting_the_requested_inference_emits_a_sanitized_typed_observation() {
+        let start = decide_start_session(&[], binding())
+            .expect("valid start")
+            .expect("new session");
+        let (started, _streams) = start.into_event_and_consistency_streams();
+        let request = decide_request_inference(
+            core::slice::from_ref(&started),
+            PromptText::parse("durable").expect("valid prompt"),
+            effect(),
+        )
+        .expect("valid request");
+        let (requested, _streams) = request.into_event_and_consistency_streams();
+        let observation = EffectObservation::Failed {
+            code: EffectFailureCode::parse("process_recovery_interrupted")
+                .expect("stable failure code"),
+            effect_id: parsed(EffectId::parse, "effect-1"),
+            retryability: Retryability::NotRetryable,
+        };
+
+        let publication = decide_interrupt_inference(&[started, requested], observation.clone())
+            .expect("interruption should be modeled");
+        let (event, streams) = publication.into_event_and_consistency_streams();
+
+        assert_eq!(streams, [event.stream_id().clone()]);
+        assert_eq!(
+            event.fact(),
+            &SessionFact::InferenceInterrupted { observation }
         );
     }
 

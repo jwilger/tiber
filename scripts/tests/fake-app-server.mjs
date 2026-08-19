@@ -10,6 +10,7 @@ const fixtureMode =
   "success";
 const fixtureAuthState = process.env.TIBER_FIXTURE_AUTH_STATE;
 const fixtureStdinCanary = "fixture-stdin-token";
+const processPolicyResults = [];
 const apiKeyLogin =
   process.argv.includes("login") && process.argv.includes("--with-api-key");
 const effectiveProfileMismatch = [
@@ -233,16 +234,59 @@ function runAppServer() {
       account = null;
       send({ id: message.id, result: {} });
     } else if (message.method === "thread/start") {
-      if (fixtureMode === "repository-tool-contract") {
-        const names = (message.params.dynamicTools ?? []).map((tool) => tool.name);
+      if (
+        fixtureMode === "repository-tool-contract" ||
+        fixtureMode === "configured-command-tool-contract"
+      ) {
+        const tools = message.params.dynamicTools ?? [];
+        const names = tools.map((tool) => tool.name);
+        const effect = tools.find((tool) => tool.name === "tiber_effect");
+        const repositoryProposal = tools.find(
+          (tool) => tool.name === "tiber_repository_proposal",
+        );
+        const serializedTools = JSON.stringify(tools);
+        const baseCommandSchema = {
+          maxLength: 128,
+          minLength: 1,
+          type: "string",
+        };
+        const commandSchema =
+          fixtureMode === "configured-command-tool-contract"
+            ? { enum: ["focused-test", "format"], ...baseCommandSchema }
+            : baseCommandSchema;
+        const expectedEffectSchema = {
+          additionalProperties: false,
+          properties: {
+            command: commandSchema,
+            operation: { const: "run_configured_command", type: "string" },
+          },
+          required: ["operation", "command"],
+          type: "object",
+        };
+        const expectedRepositoryProposalSchema = {
+          additionalProperties: false,
+          properties: {
+            action: { const: "write", type: "string" },
+            expected: { type: "string" },
+            path: { type: "string" },
+            replacement: { type: "string" },
+          },
+          required: ["action", "expected", "path", "replacement"],
+          type: "object",
+        };
         if (
           !names.includes("tiber_effect") ||
-          !names.includes("tiber_repository_proposal")
+          !names.includes("tiber_repository_proposal") ||
+          JSON.stringify(effect?.inputSchema) !==
+            JSON.stringify(expectedEffectSchema) ||
+          JSON.stringify(repositoryProposal?.inputSchema) !==
+            JSON.stringify(expectedRepositoryProposalSchema) ||
+          serializedTools.includes("must-not-cross-tool-schema")
         ) {
           send({
             error: {
               code: -32602,
-              message: `missing closed Tiber tool declaration: ${names.join(",")}`,
+              message: `invalid closed Tiber tool declaration: ${JSON.stringify(tools)}`,
             },
             id: message.id,
           });
@@ -344,6 +388,8 @@ function runAppServer() {
           ? ["hello ", "from Tiber"]
           : fixtureMode.startsWith("repository-edit")
           ? ["I inspected README.md and propose changing before to after."]
+          : fixtureMode === "process-fix"
+          ? ["I will run the configured focused test before changing the repository."]
           : ["hello from Tiber"];
       if (fixtureMode === "delayed-stream") {
         await new Promise((resolve) => setTimeout(resolve, 75));
@@ -374,6 +420,41 @@ function runAppServer() {
         },
       });
       if (nextTurn === 1) {
+        const processPolicyArguments = {
+          "process-policy-shell": {
+            command: "known",
+            operation: "run_configured_command",
+            shell: "touch /host/ambient-shell-secret",
+          },
+          "process-policy-cwd": {
+            command: "known",
+            cwd: "/host/ambient-cwd-secret",
+            operation: "run_configured_command",
+          },
+          "process-policy-env": {
+            command: "known",
+            environment: { AMBIENT_PROCESS_SECRET: "ambient-env-secret" },
+            operation: "run_configured_command",
+          },
+          "process-policy-network": {
+            command: "known",
+            network: true,
+            operation: "run_configured_command",
+          },
+          "process-policy-executable": {
+            command: "known",
+            executable: "/host/ambient-executable-secret",
+            operation: "run_configured_command",
+          },
+          "process-policy-malformed": {
+            command: ["known"],
+            operation: "run_configured_command",
+          },
+          "process-policy-unknown": {
+            command: "ambient-unknown-command-secret",
+            operation: "run_configured_command",
+          },
+        };
         send({
           id: "dynamic-fixture",
           method: "item/tool/call",
@@ -387,13 +468,32 @@ function runAppServer() {
                     path: "README.md",
                     replacement: "after\n",
                   }
-                : { action: "sentinel" },
+                : processPolicyArguments[fixtureMode] ??
+                  (fixtureMode.startsWith("process-")
+                ? {
+                    command:
+                      fixtureMode === "process-timeout"
+                        ? "timeout"
+                        : fixtureMode === "process-cancel"
+                        ? "cancel"
+                        : fixtureMode.startsWith("process-recovery")
+                        ? "recovery"
+                        : fixtureMode === "process-output-limit"
+                        ? "output-limit"
+                        : fixtureMode === "process-adapter-config"
+                        ? "config-failure"
+                        : "focused-test",
+                    operation: "run_configured_command",
+                  }
+                : { action: "sentinel" }),
             callId: "call-fixture",
             namespace: null,
             threadId,
             tool:
               fixtureMode.startsWith("repository-edit")
                 ? "tiber_repository_proposal"
+                : fixtureMode.startsWith("process-")
+                ? "tiber_effect"
                 : "tiber_authority_probe",
             turnId,
           },
@@ -417,6 +517,12 @@ function runAppServer() {
             },
           });
         }
+        if (
+          fixtureMode.startsWith("repository-edit") &&
+          fixtureMode !== "repository-edit-delayed-completion"
+        ) {
+          completeTurn(turnId);
+        }
         if (fixtureMode === "close-after-request") {
           setImmediate(() => process.exit(4));
         }
@@ -425,13 +531,160 @@ function runAppServer() {
       }
     } else if (
       message.id === "dynamic-fixture" ||
-      message.id === "dynamic-fixture-duplicate"
+      message.id === "dynamic-fixture-duplicate" ||
+      message.id === "dynamic-fixture-second" ||
+      message.id === "dynamic-fixture-retry"
     ) {
-      if (message.result?.success !== false) process.exitCode = 1;
+      if (
+        (fixtureMode.startsWith("process-policy-") ||
+          fixtureMode === "process-timeout" ||
+          fixtureMode === "process-cancel" ||
+          fixtureMode === "process-success" ||
+          fixtureMode === "process-output-limit" ||
+          fixtureMode === "process-adapter-config" ||
+          fixtureMode.startsWith("process-recovery")) &&
+        message.id === "dynamic-fixture"
+      ) {
+        processPolicyResults.push(message.result);
+        if (fixtureMode === "process-policy-unknown" && processPolicyResults.length === 1) {
+          send({
+            id: "dynamic-fixture",
+            method: "item/tool/call",
+            params: {
+              arguments: {
+                command: "ambient-unknown-command-secret",
+                operation: "run_configured_command",
+              },
+              callId: "call-fixture-replay",
+              namespace: null,
+              threadId,
+              tool: "tiber_effect",
+              turnId: "turn-1",
+            },
+          });
+        } else if (process.env.TIBER_FIXTURE_PROCESS_RESULT) {
+          fs.writeFileSync(
+            process.env.TIBER_FIXTURE_PROCESS_RESULT,
+            JSON.stringify(processPolicyResults),
+          );
+          if (fixtureMode !== "process-recovery-hold") completeTurn("turn-1");
+        }
+      } else
+      if (fixtureMode === "process-fix" && message.id === "dynamic-fixture") {
+        const output = message.result?.contentItems?.[0]?.text;
+        let parsedOutput;
+        try {
+          parsedOutput = JSON.parse(output);
+        } catch {
+          parsedOutput = null;
+        }
+        if (
+          message.result?.success !== true ||
+          typeof output !== "string" ||
+          parsedOutput?.status?.exit_code !== 1 ||
+          !parsedOutput?.stderr?.includes("focused failure")
+        ) {
+          process.exitCode = 1;
+          return;
+        }
+        send({
+          id: "dynamic-fixture-second",
+          method: "item/tool/call",
+          params: {
+            arguments: {
+              action: "write",
+              expected: "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/focused-test-invocations\ni=0\nwhile [ \"$i\" -lt 20000 ]; do printf '\"'; i=$((i + 1)); done\nprintf 'focused failure\\n' >&2\nexit 1\n",
+              path: "focused-test",
+              replacement: "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/focused-test-invocations\nprintf 'focused success\\n'\n",
+            },
+            callId: "call-fixture-second",
+            namespace: null,
+            threadId,
+            tool: "tiber_repository_proposal",
+            turnId: "turn-1",
+          },
+        });
+      } else if (
+        fixtureMode === "process-fix" &&
+        message.id === "dynamic-fixture-second"
+      ) {
+        if (message.result?.success !== true) {
+          process.exitCode = 1;
+          return;
+        }
+        send({
+          method: "item/agentMessage/delta",
+          params: {
+            delta: "I observed the focused failure and propose repairing focused-test.",
+            itemId: "assistant-process-proposal",
+            threadId,
+            turnId: "turn-1",
+          },
+        });
+        send({
+          id: "dynamic-fixture-retry",
+          method: "item/tool/call",
+          params: {
+            arguments: {
+              command: "focused-test",
+              operation: "run_configured_command",
+            },
+            callId: "call-fixture-retry",
+            namespace: null,
+            threadId,
+            tool: "tiber_effect",
+            turnId: "turn-1",
+          },
+        });
+      } else if (
+        fixtureMode === "process-fix" &&
+        message.id === "dynamic-fixture-retry"
+      ) {
+        const output = message.result?.contentItems?.[0]?.text;
+        let parsedOutput;
+        try {
+          parsedOutput = JSON.parse(output);
+        } catch {
+          parsedOutput = null;
+        }
+        if (
+          message.result?.success !== true ||
+          parsedOutput?.status?.exit_code !== 0 ||
+          !parsedOutput?.stdout?.includes("focused success")
+        ) {
+          process.exitCode = 1;
+          return;
+        }
+        send({
+          method: "item/agentMessage/delta",
+          params: {
+            delta: "The approved repair passed the exact configured focused-test command.",
+            itemId: "assistant-process-final",
+            threadId,
+            turnId: "turn-1",
+          },
+        });
+      } else if (
+        fixtureMode.startsWith("repository-edit") &&
+        typeof message.result?.success === "boolean"
+      ) {
+        // Repository proposal completion reflects the durable owner decision.
+      } else if (message.result?.success !== false) {
+        process.exitCode = 1;
+      }
+      if (completedToolRequests.has(message.id)) process.exitCode = 1;
       completedToolRequests.add(message.id);
-      const expectedResponses =
-        fixtureMode === "repository-edit-duplicate" ? 2 : 1;
-      if (completedToolRequests.size === expectedResponses) {
+      const expectedResponses = fixtureMode === "process-fix"
+        ? 3
+        : fixtureMode === "repository-edit-duplicate"
+        ? 2
+        : 1;
+      if (
+        completedToolRequests.size === expectedResponses &&
+        fixtureMode !== "process-recovery-hold" &&
+        (!fixtureMode.startsWith("repository-edit") ||
+          fixtureMode === "repository-edit-delayed-completion")
+      ) {
         if (fixtureMode === "repository-edit-delayed-completion") {
           while (!fs.existsSync(process.env.TIBER_FIXTURE_COMPLETION_RELEASE)) {
             await new Promise((resolve) => setTimeout(resolve, 5));

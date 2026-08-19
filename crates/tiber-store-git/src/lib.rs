@@ -30,6 +30,7 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt as _;
 
+use eventcore::model::StreamIdentity as _;
 use eventcore_fs::{FileEventStore, FsConfig, FsyncPolicy};
 use eventcore_types::{
     BatchSize, Event, EventFilter, EventPage, EventReader as _, EventStoreError, Operation,
@@ -37,6 +38,7 @@ use eventcore_types::{
 };
 use serde::Deserialize;
 use tempfile::TempDir;
+use tiber_process_service::{ProcessEvent, ProcessStream};
 use wait_timeout::ChildExt as _;
 
 /// The sole local authority ref, used only if no `origin` remote exists.
@@ -468,6 +470,49 @@ pub struct TiberEventStore {
     stream_ids: Vec<StreamId>,
 }
 
+/// Signature-verified immutable history for one exact process stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedProcessHistory {
+    /// Ordered process facts from the pinned signed authority snapshot.
+    events: Vec<ProcessEvent>,
+    /// Exact signed revision from which the facts were decoded.
+    revision: TiberRevision,
+}
+
+impl VerifiedProcessHistory {
+    /// Returns the ordered immutable process facts.
+    #[must_use]
+    #[inline]
+    pub fn events(&self) -> &[ProcessEvent] {
+        &self.events
+    }
+
+    /// Returns the exact signed revision supplying this history.
+    #[must_use]
+    #[inline]
+    pub const fn revision(&self) -> &TiberRevision {
+        &self.revision
+    }
+}
+
+/// Stable failures from selecting one exact process stream.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ProcessHistoryError {
+    /// A selected process envelope could not be read from the verified snapshot.
+    #[error(transparent)]
+    EventStore(#[from] EventStoreError),
+    /// A selected process lifecycle exceeded its closed event budget.
+    #[error("tiber_store_process_history_too_large")]
+    HistoryTooLarge,
+    /// A process stream violated the semantic stream-pattern invariant.
+    #[error("tiber_store_process_stream_invalid")]
+    InvalidStream,
+    /// The selected signed history could not be decoded in causal order.
+    #[error(transparent)]
+    Transaction(#[from] TransactionHistoryError),
+}
+
 /// A typed reader whose fixed filter has been validated against its immutable snapshot.
 ///
 /// Construction verifies every selected envelope once. Subsequent page reads
@@ -663,6 +708,42 @@ impl<E> fmt::Debug for VerifiedEventReader<'_, E> {
     reason = "the read-only store API follows authority opening, snapshot inspection, generic projection reads, and specialized transaction reconstruction rather than alphabetic item names"
 )]
 impl TiberEventStore {
+    /// Reads one exact process stream from this immutable signed snapshot.
+    ///
+    /// This deliberately returns a closed process history rather than a
+    /// generic writable authority or unverified event-store handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error when the exact stream cannot form a valid fixed
+    /// pattern or its selected envelopes cannot be verified and replayed.
+    #[inline]
+    pub fn read_process_history(
+        &self,
+        stream: &ProcessStream,
+    ) -> Result<VerifiedProcessHistory, ProcessHistoryError> {
+        let pattern = StreamPattern::try_new(stream.as_stream_id().as_ref().to_owned())
+            .map_err(|_source| ProcessHistoryError::InvalidStream)?;
+        let reader = self.verified_transaction_reader::<ProcessEvent>(&[pattern])?;
+        let mut page = TransactionEventPage::first(BatchSize::new(5));
+        let mut events = Vec::new();
+        loop {
+            let results = reader.read_page(page)?;
+            let Some(next_page) = page.next_from_results(&results) else {
+                break;
+            };
+            events.extend(results);
+            if events.len() > 4 {
+                return Err(ProcessHistoryError::HistoryTooLarge);
+            }
+            page = next_page;
+        }
+        Ok(VerifiedProcessHistory {
+            events,
+            revision: self.revision.clone(),
+        })
+    }
+
     /// Finds the selected transaction ancestry and accepts it only as one chain.
     #[expect(
         clippy::implicit_return,

@@ -78,6 +78,14 @@ pub enum ProjectionEvent {
         /// Root-relative repository path named by the receipt.
         path: String,
     },
+    /// A process restart reconciliation restored a durable terminal receipt.
+    ProcessReconciled { outcome: String },
+    /// A process restart reconciliation remains uncertain and requires owner action.
+    ProcessUnknown { next_action: String },
+    /// One policy-admitted configured command is active under the application shell.
+    ConfiguredCommandActive { command: String },
+    /// One configured command reached a sanitized terminal status.
+    ConfiguredCommandFinished { command: String, status: String },
     /// The active turn completed.
     TurnCompleted,
     /// The active turn ended with a typed failure.
@@ -98,6 +106,8 @@ enum PresentationPhase {
     Ready,
     /// One inference turn is producing observations.
     Streaming,
+    /// One configured command is active and may be explicitly cancelled by the owner.
+    ConfiguredCommandActive,
     /// One durable repository proposal awaits an explicit owner decision.
     Approval,
     /// The owner decided, but the inference turn has not durably completed.
@@ -151,6 +161,8 @@ pub struct ConversationProjection {
     phase: PresentationPhase,
     /// Whether the active inference turn has emitted its completion observation.
     turn_completed: bool,
+    /// Sanitized semantic identity of the active configured command, if any.
+    active_command: Option<String>,
 }
 
 /// Owner intent emitted by the presentation for the application shell.
@@ -166,6 +178,8 @@ pub enum ComposerIntent {
     Deny,
     /// Cancel the exact durable repository proposal currently displayed.
     Cancel,
+    /// Cancel the exact configured command currently displayed as active.
+    CancelConfiguredCommand,
     /// Exit the terminal application.
     Quit,
 }
@@ -287,7 +301,9 @@ impl ConversationProjection {
             }
             ProjectionEvent::TurnCompleted => {
                 self.turn_completed = true;
-                if self.phase != PresentationPhase::Approval {
+                if self.phase != PresentationPhase::Approval
+                    && self.phase != PresentationPhase::ConfiguredCommandActive
+                {
                     self.phase = PresentationPhase::Ready;
                 }
             }
@@ -302,6 +318,43 @@ impl ConversationProjection {
                     retryable,
                 });
                 self.phase = PresentationPhase::Ready;
+            }
+            ProjectionEvent::ProcessReconciled { outcome } => {
+                self.push_entry(TranscriptEntry::Assistant(format!(
+                    "process reconciled: {}",
+                    sanitize_terminal_text(&outcome)
+                )));
+                self.phase = PresentationPhase::Ready;
+            }
+            ProjectionEvent::ProcessUnknown { next_action } => {
+                self.push_entry(TranscriptEntry::Failure {
+                    code: "process_outcome_unknown".to_owned(),
+                    message: format!(
+                        "process outcome unknown; next action: {}",
+                        sanitize_terminal_text(&next_action)
+                    ),
+                    retryable: false,
+                });
+                self.phase = PresentationPhase::Ready;
+            }
+            ProjectionEvent::ConfiguredCommandActive { command } => {
+                self.active_command = Some(sanitize_terminal_text(&command));
+                self.phase = PresentationPhase::ConfiguredCommandActive;
+                self.composer.clear();
+            }
+            ProjectionEvent::ConfiguredCommandFinished { command, status } => {
+                self.push_entry(TranscriptEntry::Assistant(format!(
+                    "configured command {}: {}",
+                    sanitize_terminal_text(&status),
+                    sanitize_terminal_text(&command)
+                )));
+                self.active_command = None;
+                self.phase = if self.turn_completed {
+                    PresentationPhase::Ready
+                } else {
+                    PresentationPhase::Streaming
+                };
+                self.composer.clear();
             }
             ProjectionEvent::ReconciliationRequired { code, message } => {
                 self.push_entry(TranscriptEntry::Failure {
@@ -326,12 +379,22 @@ impl ConversationProjection {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return ComposerIntent::Quit;
         }
-        if self.phase != PresentationPhase::Ready && self.phase != PresentationPhase::Approval {
+        if self.phase != PresentationPhase::Ready
+            && self.phase != PresentationPhase::Approval
+            && self.phase != PresentationPhase::ConfiguredCommandActive
+        {
             return ComposerIntent::None;
         }
         match key.code {
             KeyCode::Enter => {
-                if self.phase == PresentationPhase::Approval && self.composer == "approve" {
+                if self.phase == PresentationPhase::ConfiguredCommandActive
+                    && self.composer == "cancel"
+                {
+                    self.composer.clear();
+                    ComposerIntent::CancelConfiguredCommand
+                } else if self.phase == PresentationPhase::ConfiguredCommandActive {
+                    ComposerIntent::None
+                } else if self.phase == PresentationPhase::Approval && self.composer == "approve" {
                     self.composer.clear();
                     ComposerIntent::Approve
                 } else if self.phase == PresentationPhase::Approval && self.composer == "deny" {
@@ -416,6 +479,10 @@ pub fn render(frame: &mut Frame<'_>, projection: &ConversationProjection) {
             "streaming \u{b7} model effects remain inert",
             Style::default().fg(Color::Cyan),
         ),
+        PresentationPhase::ConfiguredCommandActive => (
+            "configured command active",
+            Style::default().fg(Color::Yellow),
+        ),
         PresentationPhase::Approval => ("approval required", Style::default().fg(Color::Yellow)),
         PresentationPhase::DecisionComplete => (
             "waiting for turn completion",
@@ -423,7 +490,11 @@ pub fn render(frame: &mut Frame<'_>, projection: &ConversationProjection) {
         ),
         PresentationPhase::Reconcile => ("reconcile required", Style::default().fg(Color::Yellow)),
     };
-    frame.render_widget(Paragraph::new(status).style(status_style), status_area);
+    let status_text = projection.active_command.as_ref().map_or_else(
+        || status.to_owned(),
+        |command| format!("{status} \u{b7} {command}"),
+    );
+    frame.render_widget(Paragraph::new(status_text).style(status_style), status_area);
     frame.render_widget(
         Paragraph::new(projection.composer.as_str()).block(Block::bordered().title(" Message ")),
         composer_area,
@@ -431,6 +502,7 @@ pub fn render(frame: &mut Frame<'_>, projection: &ConversationProjection) {
     let footer = match projection.phase {
         PresentationPhase::Ready => "enter send \u{b7} ctrl+c quit",
         PresentationPhase::Streaming => "streaming \u{b7} ctrl+c quit \u{b7} tools are inert",
+        PresentationPhase::ConfiguredCommandActive => "type cancel \u{b7} ctrl+c quit",
         PresentationPhase::Approval => "type approve, deny, or cancel \u{b7} ctrl+c quit",
         PresentationPhase::DecisionComplete => "waiting for turn completion \u{b7} ctrl+c quit",
         PresentationPhase::Reconcile => "reconcile required \u{b7} ctrl+c quit",

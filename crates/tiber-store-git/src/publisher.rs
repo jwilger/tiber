@@ -6,7 +6,7 @@
 //! to the fixed Tiber authority with an exact-base lease.
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
-use core::{fmt, str};
+use core::{fmt, slice, str};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -16,6 +16,7 @@ use eventcore::model::StreamIdentity as _;
 use eventcore_fs::{FileEventStore, FsConfig, FsyncPolicy};
 use eventcore_types::{Event, EventStore as _, EventStoreError, StreamId, StreamWrites};
 use tempfile::TempDir;
+use tiber_process_service::{ProcessPublication, ProcessStream};
 use tiber_repository_service::RepositoryMutationPublication;
 use tiber_session_service::{
     InferenceObservationPublication, InferenceRequestPublication, SessionFact,
@@ -35,7 +36,7 @@ use tiber_workflow_service::{
 
 use crate::{
     EVENT_STORE_DIRECTORY, EVENTS_DIRECTORY, GitOperation, GitStoreError, ResolvedAuthority,
-    Retryability, TiberRevision, caller_worktree_top_level, git_path_is_self_resolving,
+    Retryability, TIBER_REF, TiberRevision, caller_worktree_top_level, git_path_is_self_resolving,
     inspect_event_history, materialize_publishable_revision, require_git_success,
     require_safe_event_store_layout, resolve_authority_revision, run_git,
     stream_version_from_catalog, verify_history_integrity, verify_signed_revision,
@@ -188,6 +189,34 @@ impl fmt::Debug for TiberEventPublisher {
     reason = "the publisher API follows stage opening, inspection, then one-shot append/publication flow"
 )]
 impl TiberEventPublisher {
+    /// Publishes one closed process decision under its exact effect-owned stream fence.
+    ///
+    /// An idempotent modeled retry contains no events. It confirms and returns
+    /// the pinned base revision without creating a Git candidate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure before staging when the caller's exact stream
+    /// fence differs from the closed publication, or when signed exact-base
+    /// publication cannot be confirmed.
+    #[inline]
+    pub async fn publish_process(
+        &mut self,
+        expected_stream: &ProcessStream,
+        publication: ProcessPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (events, [publication_stream]) = publication.into_events_and_consistency_streams();
+        if &publication_stream != expected_stream {
+            return Err(TiberPublicationError::UndeclaredStream);
+        }
+        let consistency_stream = publication_stream.as_stream_id().clone();
+        if events.is_empty() {
+            return self.confirm_base();
+        }
+        self.append(slice::from_ref(&consistency_stream), events)
+            .await
+    }
+
     /// Publishes one command-specific repository-mutation decision.
     ///
     /// # Errors
@@ -284,6 +313,11 @@ impl TiberEventPublisher {
     /// Returns a typed failure when the closed publications disagree, `EventCore`
     /// staging fails, signing fails, or the candidate cannot be confirmed.
     #[inline]
+    #[expect(
+        clippy::pattern_type_mismatch,
+        clippy::wildcard_enum_match_arm,
+        reason = "the publication boundary borrows the closed session resolution and rejects unrelated or future session facts"
+    )]
     pub async fn publish_inference_observation_with_workflow(
         &mut self,
         session: InferenceObservationPublication,
@@ -291,8 +325,12 @@ impl TiberEventPublisher {
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (session_event, session_streams) = session.into_event_and_consistency_streams();
         let (workflow_event, workflow_streams) = observation.into_event_and_consistency_streams();
-        let SessionFact::InferenceObserved { effect_id, .. } = session_event.fact().clone() else {
-            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        let effect_id = match session_event.fact() {
+            SessionFact::InferenceObserved { effect_id, .. } => effect_id,
+            SessionFact::InferenceInterrupted {
+                observation: interruption,
+            } => interruption.effect_id(),
+            _ => return Err(TiberPublicationError::WorkflowEffectMismatch),
         };
         let WorkflowFact::EffectObserved {
             observation: workflow_observation,
@@ -300,7 +338,7 @@ impl TiberEventPublisher {
         else {
             return Err(TiberPublicationError::WorkflowEffectMismatch);
         };
-        if &effect_id != workflow_observation.effect_id() {
+        if effect_id != workflow_observation.effect_id() {
             return Err(TiberPublicationError::WorkflowEffectMismatch);
         }
         let session_writes = self.build_writes(&session_streams, vec![session_event])?;
@@ -520,6 +558,27 @@ impl TiberEventPublisher {
     )]
     pub const fn base_revision(&self) -> &TiberRevision {
         &self.base_revision
+    }
+
+    /// Confirms that an empty modeled retry still names the current authority.
+    fn confirm_base(&self) -> Result<PublishedRevision, TiberPublicationError> {
+        let current = if let Some(origin_url) = self.origin_url.as_ref() {
+            remote_authority_head(&self.caller_repository, origin_url)?
+        } else {
+            let output = run_git(
+                &self.caller_repository,
+                GitOperation::ResolveTiberRef,
+                &["rev-parse", TIBER_REF],
+                None,
+                None,
+            )?;
+            require_git_success(&output, GitOperation::ResolveTiberRef)?;
+            parse_publication_object_id(&output.stdout)?
+        };
+        if current != self.base_revision {
+            return Err(TiberPublicationError::AuthorityChanged);
+        }
+        Ok(PublishedRevision { revision: current })
     }
 
     /// Publishes the only modeled fact accepted by the first native task-write slice.
@@ -1104,7 +1163,6 @@ fn parse_publication_object_id(output: &[u8]) -> Result<TiberRevision, TiberPubl
 #[expect(
     clippy::implicit_return,
     clippy::question_mark_used,
-    clippy::single_call_fn,
     reason = "the successful-push confirmation keeps absent-ref failure distinct from the rejected-push conflict classifier"
 )]
 fn remote_authority_head(

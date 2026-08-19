@@ -20,7 +20,7 @@ use eventcore::{
 use serde::{Deserialize, Serialize, de::Error as _};
 use tiber_workflow_core::{
     EffectId, EffectObservation, EffectReceiptId, HarnessError, HarnessPhase, HarnessState,
-    TiberEffect, TrampolineStep, continue_after_completion, step,
+    TiberEffect, TrampolineStep, continue_after_completion, continue_after_interruption, step,
 };
 
 /// Defines opaque checked workflow publication tokens.
@@ -1116,7 +1116,8 @@ mapping! {
     clippy::pattern_type_mismatch,
     clippy::question_mark_used,
     clippy::shadow_unrelated,
-    reason = "EventCore fixes command-trait signatures while the fold validates one exact completed predecessor"
+    clippy::wildcard_enum_match_arm,
+    reason = "EventCore fixes command-trait signatures while the fold validates one exact completed or stopped predecessor and rejects future terminal variants"
 )]
 impl ModelCommandLogic for InitializeSuccessorWorkflow {
     type Event = WorkflowEvent;
@@ -1188,8 +1189,22 @@ impl ModelCommandLogic for InitializeSuccessorWorkflow {
                     );
                 folded.malformed_history |= !valid;
                 folded.terminal = true;
-                if valid && let WorkflowFact::WorkflowCompleted { successor, .. } = terminal {
-                    folded.successor_state = Some(successor.clone());
+                if valid {
+                    folded.successor_state = match terminal {
+                        WorkflowFact::WorkflowCompleted { successor, .. } => {
+                            Some(successor.clone())
+                        }
+                        WorkflowFact::WorkflowStopped { state, .. } => {
+                            match continue_after_interruption(state) {
+                                Ok(successor) => Some(successor),
+                                Err(_error) => {
+                                    folded.malformed_history = true;
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
                 }
             }
         }

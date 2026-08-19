@@ -39,7 +39,7 @@ does not re-emit a lifecycle transition. There is no general public EventCore
 append, legacy MCP task write, or generic task-mutation surface. Publication
 reconciliation and workflow scheduling remain later native slices.
 
-The first native workflow slice is deliberately internal.
+The native workflow now drives the durable interactive inference session.
 `tiber-workflow-core` defines serializable semantic identities, a total
 `step(state, observation)` trampoline, and one closed `Infer` effect with
 bounded deadline, provenance, and idempotency data.
@@ -47,10 +47,12 @@ bounded deadline, provenance, and idempotency data.
 initialize a workflow, request that effect, record its observation, and advance
 the trampoline. Recording an observation persists `EffectObserved` by itself;
 only a later advance decision may call `step` to request, complete, or stop.
-There is no generic workflow append or effect executor. The app-server, TUI,
-and CLI do not yet run this workflow—app-server tools remain inert—and
-scheduler, effect reconciliation, durable interactive sessions, and UI
-integration remain later slices.
+There is no generic workflow append or effect executor. The CLI interprets its
+closed `Infer` effect through app-server, durably records observations and the
+terminal advance, and restores the TUI projection on relaunch. App-server tool
+requests remain inert until a Tiber-owned typed boundary handles them; broader
+scheduling and operator-directed uncertain-effect resolution remain later
+slices.
 
 ## Repository-mutation boundary (S3)
 
@@ -92,6 +94,86 @@ The x86_64 Linux package exposes public `tiber` while keeping the worker and
 Bubblewrap helper private under `libexec`. CI's package smoke checks that
 artifact layout and entry behavior only; real adapter behavior is tested
 separately outside the package smoke.
+
+## Configured-process boundary
+
+The interactive harness can execute trusted repository commands declared in
+`.tiber/commands.toml`. Tiber parses that bounded document once at TUI startup;
+each semantic command ID fixes an absolute executable, literal direct argv,
+repository-relative working directory, cleared environment, timeout, and
+stdout/stderr bounds. Network is always denied. The model supplies only the
+`run_configured_command` operation and command ID, never the execution plan.
+
+A complete, safe catalog entry looks like this:
+
+```toml
+[commands.no-op]
+program = "/bin/true"
+arguments = []
+working-directory = "."
+environment = {}
+network = false
+timeout-milliseconds = 5000
+stdout-bytes = 4096
+stderr-bytes = 4096
+```
+
+The document is UTF-8 TOML, may be at most 65,536 bytes, and must contain
+between 1 and 128 entries under the required `commands` table. Unknown fields
+are rejected. Each table key is the command ID: after surrounding whitespace
+is trimmed, it must be 1–128 UTF-8 bytes and contain only ASCII letters,
+digits, `-`, `_`, or `.`. Entry fields use these exact names and constraints:
+
+- `program` (required string): an absolute path in the sandbox namespace, at
+  most 4,096 UTF-8 bytes, with a root followed only by normal path components
+  (no `.` or `..`). `/workspace` is the mounted repository; `/bin` and `/nix`
+  are the other executable trees exposed by the fixed Linux sandbox.
+- `arguments` (optional array of strings, default `[]`): at most 64 literal
+  direct-argv items; each may be empty but is limited to 4,096 UTF-8 bytes and
+  may not contain NUL. Arguments receive no shell expansion or interpretation.
+- `working-directory` (required string): a nonempty repository-relative path
+  of at most 4,096 UTF-8 bytes, resolved beneath sandbox `/workspace`; absolute
+  paths, `..`, and NUL are rejected. Use `.` for the repository root.
+- `environment` (optional string-to-string table, default `{}`): at most 64
+  entries. Keys are 1–128 bytes, start with `A`–`Z` or `_`, and otherwise use
+  only `A`–`Z`, `0`–`9`, or `_`; values are at most 4,096 UTF-8 bytes and may
+  not contain NUL. The child environment is cleared before these exact values
+  are added, so do not assume inherited variables or put secrets in this
+  repository-owned file.
+- `network` (required boolean): must be exactly `false`.
+- `timeout-milliseconds` (required integer): 1 through 3,600,000 inclusive.
+- `stdout-bytes` and `stderr-bytes` (required integers): each independently 1
+  through 16,777,216 inclusive.
+
+Configuration is owner authority: it fixes the entire execution plan at
+startup. The model can select only a configured ID and cannot supply or change
+the program, arguments, paths, environment, network policy, timeout, or output
+bounds.
+
+Each app-server request identity receives a distinct signed process stream
+under the active workflow effect. Checked EventCore models own atomic
+`Requested`/`Prepared` admission (or content-free `Refused`) followed by
+`Completed`, `SpawnFailed`, `TimedOut`, `Cancelled`, `Unknown`, or
+`Reconciled`. Verified preparation and unchanged trusted configuration are
+required before opaque authority reaches `tiber-process-linux`.
+
+The Linux adapter uses fixed network-denied Bubblewrap containment and a
+private direct-argv launcher. Raw bounded stdout and stderr are returned only
+in the immediate sanitized app-server result; signed facts and the private
+full-fsync journal retain content-free byte counts and digests. The package
+keeps `tiber-process-launcher` and Bubblewrap private under `libexec`.
+
+Prepared work is never redispatched after restart. At TUI startup, the CLI
+automatically turns bare `Requested`/`Prepared` history into `Unknown`, consumes
+the resulting one-shot read-only capability through the Linux adapter, and
+publishes `Reconciled`. The public session projection reports `completed`,
+`not-completed`, or `still-unknown`; there is no explicit owner recovery
+command. After every process stream for the active effect is closed or
+reconciled, startup records a sanitized interruption, advances the enclosing
+workflow, and makes a successor prompt available without replaying the
+interrupted inference. Recovery fails closed above 64 matching process streams
+for the active effect or four events in any selected process stream; unrelated
+historical streams do not consume that effect-scoped budget.
 
 ## External-tools boundary (S1)
 

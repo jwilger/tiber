@@ -1,17 +1,16 @@
 [package]
-name = "tiber-app-server"
+name = "tiber-process-core"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-serde_json.workspace = true
-tiber-process-core = { path = "../tiber-process-core" }
+serde.workspace = true
+tiber-workflow-core = { path = "../tiber-workflow-core" }
 
 [dev-dependencies]
-ratatui.workspace = true
-tiber-tui = { path = "../tiber-tui" }
+serde_json.workspace = true
 
 [lints]
 workspace = true

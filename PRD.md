@@ -116,6 +116,42 @@ The clean x86_64 Linux package exposes public `tiber` and keeps the worker plus
 Bubblewrap helper private under `libexec`. CI's package smoke verifies package
 layout and entry behavior only; real adapter tests remain outside that smoke.
 
+### Current configured-process vertical slice
+
+The interactive harness executes only repository-owner-configured commands
+from the trusted `.tiber/commands.toml` loaded at TUI startup. Each semantic ID
+selects a fixed absolute executable, literal argv, repository-relative working
+directory, cleared fixed environment, deadline, and stdout/stderr bounds;
+network access cannot be enabled. The model's `tiber_effect` request contains
+only `run_configured_command` and that semantic ID, never executable or
+containment details.
+
+The exact app-server request identity correlates each invocation to its own
+signed process stream under the active workflow effect. Checked
+`tiber-process-service` models own atomic `Requested`/`Prepared` admission (or
+content-free `Refused`) and terminal `Completed`, `SpawnFailed`, `TimedOut`,
+`Cancelled`, `Unknown`, and `Reconciled` facts. Only verified preparation and
+unchanged trusted configuration mint opaque dispatch authority.
+
+`tiber-process-linux` interprets that authority through fixed network-denied
+Bubblewrap containment and a private direct-argv launcher. The package keeps
+the launcher and pinned Bubblewrap helper under `libexec`. Bounded stdout and
+stderr are sanitized into the immediate app-server result, while signed facts
+and the private full-fsync journal retain only content-free byte counts,
+digests, exit status, and stable terminal categories.
+
+A retained preparation is never redispatched. At TUI startup the CLI
+automatically records `Unknown`, consumes the one-shot read-only reconciliation
+capability through the Linux adapter, publishes `Reconciled`, and projects
+`completed`, `not-completed`, or `still-unknown` into the public session. There
+is no explicit owner recovery command. After every process stream for the
+active effect is closed or reconciled, startup durably interrupts and advances
+the enclosing inference workflow so its successor can accept a new prompt
+without replaying the interrupted inference. Recovery fails closed above 64
+matching process streams for the active effect or four events in any selected
+process stream; unrelated historical streams do not consume that effect-scoped
+budget.
+
 ### Current external-tools S1 boundary
 
 The external-tools boundary is now implemented but is not connected to a
@@ -250,8 +286,9 @@ it never grants authority.
   retain/status/cancel/forget/recall/reconciliation operations, strict
   owner/repository provenance and tags, and advisory untrusted recall.
 - Isolate bounded repository mutations behind the x86_64 Linux
-  `tiber-repository-linux` platform adapter; generic process effects remain
-  future product scope.
+  `tiber-repository-linux` platform adapter, and execute only trusted
+  configured commands through the fixed `tiber-process-linux` adapter; a
+  generic model-controlled shell or process surface is not product scope.
 - Record durable facts and receipts for decisions, mutations, tests, memory,
   retries, cancellation, reconciliation, verification, and delivery.
 - Resume safely after cancellation, interruption, crash, stale state, corrupt

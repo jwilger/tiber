@@ -20,7 +20,7 @@ use eventcore::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tiber_tasks_core::TaskId;
-use tiber_workflow_core::HarnessState;
+use tiber_workflow_core::{EffectObservation, HarnessState};
 
 /// The single active task-bound conversation stream in one repository authority.
 const ACTIVE_SESSION_STREAM: &str = "tiber:session:active";
@@ -235,6 +235,11 @@ impl SessionBinding {
     reason = "the complete durable successor binding must remain directly inspectable as one typed fact"
 )]
 pub enum SessionFact {
+    /// A requested inference was durably closed without fabricating assistant output.
+    InferenceInterrupted {
+        /// Sanitized typed shell observation for the exact pending effect.
+        observation: EffectObservation,
+    },
     /// A requested inference completed with observable assistant text.
     InferenceObserved {
         /// Stable effect identity paired with the request.
@@ -383,11 +388,11 @@ pub struct InferenceRequestPublication {
     event: SessionEvent,
 }
 
-/// Opaque checked inference-observation fact accepted by the publication adapter.
+/// Opaque checked inference-resolution fact accepted by the publication adapter.
 pub struct InferenceObservationPublication {
     /// Exact repository-local consistency stream.
     consistency_streams: [StreamId; 1],
-    /// Checked durable assistant observation.
+    /// Checked durable assistant or interruption observation.
     event: SessionEvent,
 }
 
@@ -562,6 +567,13 @@ impl ModelCommandLogic for SucceedSession {
             }
             SessionFact::InferenceObserved { effect_id, .. } => {
                 if next.pending_effect.as_ref() == Some(effect_id) {
+                    next.pending_effect = None;
+                } else {
+                    next.malformed = true;
+                }
+            }
+            SessionFact::InferenceInterrupted { observation } => {
+                if next.pending_effect.as_ref() == Some(observation.effect_id()) {
                     next.pending_effect = None;
                 } else {
                     next.malformed = true;
@@ -859,6 +871,14 @@ impl ModelCommandLogic for RequestInference {
                 next.pending_effect = None;
             }
         }
+        if let SessionFact::InferenceInterrupted { observation } = event.fact() {
+            if !next.pending || next.pending_effect.as_ref() != Some(observation.effect_id()) {
+                next.malformed = true;
+            } else {
+                next.pending = false;
+                next.pending_effect = None;
+            }
+        }
         Modeled::from_built(next)
     }
 
@@ -892,28 +912,37 @@ impl ModelCommandLogic for RequestInference {
     }
 }
 
+#[derive(Clone)]
+/// Closed representation of one completed or interrupted inference turn.
+enum InferenceResolution {
+    /// Genuine assistant output returned by the inference provider.
+    Completed(AssistantText),
+    /// Sanitized typed failure recorded without assistant output.
+    Interrupted(EffectObservation),
+}
+
 #[derive(ModelInput)]
-/// Modeled origins for recording one completed inference observation.
+/// Modeled origins for recording one terminal inference resolution.
 struct ObserveInferenceIntent {
-    /// Validated assistant response for the pending effect.
+    /// Validated terminal response for the pending effect.
     #[model(origin)]
-    assistant: AssistantText,
+    resolution: InferenceResolution,
     /// Singleton durable session stream.
     #[model(origin)]
     stream: StreamId,
 }
 
 #[derive(ModelCommand)]
-/// Checked command that records one assistant observation.
+/// Checked command that records one terminal inference resolution.
 struct ObserveInference {
-    /// Validated assistant response for the pending effect.
-    assistant: AssistantText,
+    /// Validated terminal response for the pending effect.
+    resolution: InferenceResolution,
     /// Singleton durable session stream.
     #[stream]
     stream: StreamId,
 }
 
-mapping! { ObserveIntentToAssistant: ObserveInferenceIntent.assistant => ObserveInference.assistant using clone; }
+mapping! { ObserveIntentToResolution: ObserveInferenceIntent.resolution => ObserveInference.resolution using clone; }
 mapping! { ObserveIntentToStream: ObserveInferenceIntent.stream => ObserveInference.stream using clone; }
 
 #[derive(ModelState)]
@@ -942,7 +971,7 @@ struct ObserveInferenceDecision {
 
 mapping! { ObserveStateToDecision: (ObserveInferenceState.effect_id, ObserveInferenceState.observed, ObserveInferenceState.malformed, ObserveInferenceState.current_binding) => ObserveInferenceDecision.effect_id using try require_unobserved_effect_id, error = CommandError; }
 mapping! { ObserveToEventStream: ObserveInference.stream => SessionEvent.stream using clone; }
-mapping! { ObserveToEventFact: (ObserveInference.assistant, ObserveInferenceDecision.effect_id) => SessionEvent.fact using inference_observed; }
+mapping! { ObserveToEventFact: (ObserveInference.resolution, ObserveInferenceDecision.effect_id) => SessionEvent.fact using try inference_resolved, error = CommandError; }
 
 #[expect(
     clippy::arbitrary_source_item_ordering,
@@ -1006,6 +1035,13 @@ impl ModelCommandLogic for ObserveInference {
                 next.observed = true;
             }
         }
+        if let SessionFact::InferenceInterrupted { observation } = event.fact() {
+            if next.effect_id.as_ref() != Some(observation.effect_id()) || next.observed {
+                next.malformed = true;
+            } else {
+                next.observed = true;
+            }
+        }
         Modeled::from_built(next)
     }
 
@@ -1024,7 +1060,7 @@ impl ModelCommandLogic for ObserveInference {
         Ok(ModeledEvents::one(
             SessionEvent::model_builder()
                 .stream(ObserveToEventStream::apply(self))
-                .fact(ObserveToEventFact::apply((self, decision.as_ref())))
+                .fact(ObserveToEventFact::apply((self, decision.as_ref()))?)
                 .build(),
         ))
     }
@@ -1118,7 +1154,9 @@ impl ModelCommandLogic for StartSession {
                     next.conflicting = true;
                 }
             }
-            SessionFact::InferenceRequested { .. } | SessionFact::InferenceObserved { .. } => {}
+            SessionFact::InferenceRequested { .. }
+            | SessionFact::InferenceObserved { .. }
+            | SessionFact::InferenceInterrupted { .. } => {}
         }
         Modeled::from_built(next)
     }
@@ -1286,11 +1324,48 @@ pub fn decide_observe_inference(
     let stream = StreamId::try_new(ACTIVE_SESSION_STREAM.to_owned())
         .map_err(|_source| SessionServiceError::InvalidSessionStream)?;
     let intent = ObserveInferenceIntent::model_builder()
-        .assistant(assistant)
+        .resolution(InferenceResolution::Completed(assistant))
         .stream(stream.clone())
         .build();
     let command = ObserveInference::model_builder()
-        .assistant(ObserveIntentToAssistant::apply(intent.as_ref()))
+        .resolution(ObserveIntentToResolution::apply(intent.as_ref()))
+        .stream(ObserveIntentToStream::apply(intent.as_ref()))
+        .build();
+    let mut state = Modeled::default();
+    for event in history {
+        state = ModelCommandLogic::evolve(command.as_ref(), state, event);
+    }
+    let events: Vec<SessionEvent> = CommandLogic::handle(&command, state)
+        .map_err(|_source| SessionServiceError::ModeledInferenceObservationFailed)?
+        .into();
+    let [event]: [SessionEvent; 1] = events
+        .try_into()
+        .map_err(|_events| SessionServiceError::InvalidModeledInferenceObservation)?;
+    Ok(InferenceObservationPublication {
+        event,
+        consistency_streams: [stream],
+    })
+}
+
+/// Models one sanitized terminal interruption against its durable request.
+///
+/// # Errors
+///
+/// Returns a stable failure when the observation is successful, belongs to a
+/// different effect, or does not match one pending request.
+#[inline]
+pub fn decide_interrupt_inference(
+    history: &[SessionEvent],
+    observation: EffectObservation,
+) -> Result<InferenceObservationPublication, SessionServiceError> {
+    let stream = StreamId::try_new(ACTIVE_SESSION_STREAM.to_owned())
+        .map_err(|_source| SessionServiceError::InvalidSessionStream)?;
+    let intent = ObserveInferenceIntent::model_builder()
+        .resolution(InferenceResolution::Interrupted(observation))
+        .stream(stream.clone())
+        .build();
+    let command = ObserveInference::model_builder()
+        .resolution(ObserveIntentToResolution::apply(intent.as_ref()))
         .stream(ObserveIntentToStream::apply(intent.as_ref()))
         .build();
     let mut state = Modeled::default();
@@ -1325,9 +1400,9 @@ pub fn project_started_session(
         SessionFact::SessionStarted { binding } | SessionFact::SessionSucceeded { binding, .. } => {
             Ok(binding)
         }
-        SessionFact::InferenceRequested { .. } | SessionFact::InferenceObserved { .. } => {
-            Err(SessionProjectionError::NotStarted)
-        }
+        SessionFact::InferenceRequested { .. }
+        | SessionFact::InferenceObserved { .. }
+        | SessionFact::InferenceInterrupted { .. } => Err(SessionProjectionError::NotStarted),
     }
 }
 
@@ -1528,16 +1603,30 @@ fn validate_next_effect(
 
 /// Builds the sole observation fact from a durable matching request.
 #[expect(
+    clippy::pattern_type_mismatch,
     clippy::single_call_fn,
-    reason = "the checked-model mapper has one semantic fact-construction use"
+    reason = "the checked-model mapper matches a borrowed closed resolution and has one semantic fact-construction use"
 )]
-fn inference_observed(
-    assistant: &AssistantText,
+fn inference_resolved(
+    resolution: &InferenceResolution,
     effect_id: &tiber_workflow_core::EffectId,
-) -> SessionFact {
-    SessionFact::InferenceObserved {
-        effect_id: effect_id.clone(),
-        assistant: assistant.clone(),
+) -> Result<SessionFact, CommandError> {
+    match resolution {
+        InferenceResolution::Completed(assistant) => Ok(SessionFact::InferenceObserved {
+            effect_id: effect_id.clone(),
+            assistant: assistant.clone(),
+        }),
+        InferenceResolution::Interrupted(observation)
+            if observation.effect_id() == effect_id
+                && !matches!(observation, EffectObservation::Succeeded { .. }) =>
+        {
+            Ok(SessionFact::InferenceInterrupted {
+                observation: observation.clone(),
+            })
+        }
+        InferenceResolution::Interrupted(_) => {
+            Err("session_inference_interruption_mismatch".into())
+        }
     }
 }
 

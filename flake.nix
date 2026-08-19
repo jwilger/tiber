@@ -39,6 +39,7 @@
         postInstall = ''
           install -d "$out/libexec/tiber"
           mv "$out/bin/tiber" "$out/libexec/tiber/tiber"
+          mv "$out/bin/tiber-process-launcher" "$out/libexec/tiber/tiber-process-launcher"
           mv "$out/bin/tiber-repository-worker" "$out/libexec/tiber/tiber-repository-worker"
           ln -s "${lib.getExe pkgs.bubblewrap}" "$out/libexec/tiber/bwrap"
 
@@ -65,7 +66,9 @@
         env -i HOME="$empty_home" PATH="" "${tiber}/bin/tiber" --help >/dev/null
 
         test -x "${tiber}/libexec/tiber/tiber"
+        test -x "${tiber}/libexec/tiber/tiber-process-launcher"
         test -x "${tiber}/libexec/tiber/tiber-repository-worker"
+        test ! -e "${tiber}/bin/tiber-process-launcher"
         test ! -e "${tiber}/bin/tiber-repository-worker"
         test -L "${tiber}/libexec/tiber/bwrap"
         test -x "$(readlink -f "${tiber}/libexec/tiber/bwrap")"
@@ -75,6 +78,12 @@
           echo "tiber-repository-worker accepted empty stdin" >&2
           exit 1
         fi
+
+        handshake="$TMPDIR/launcher-handshake"
+        env -i HOME="$empty_home" PATH="" TIBER_LAUNCH_HANDSHAKE="$handshake" \
+          "${tiber}/libexec/tiber/tiber-process-launcher" \
+          -- "${pkgs.coreutils}/bin/true"
+        test "$(cat "$handshake")" = "launched"
 
         touch "$out"
       '';

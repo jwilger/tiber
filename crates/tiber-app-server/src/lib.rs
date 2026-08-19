@@ -262,7 +262,7 @@ fn parse_thread_item_types(document: &serde_json::Value) -> Result<Vec<&str>, Co
 mod runtime {
     use alloc::{collections::VecDeque, string::String, sync::Arc, vec::Vec};
     use core::{
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicU64, Ordering},
         time::Duration,
     };
     use std::{
@@ -292,6 +292,16 @@ mod runtime {
     const MAX_COLLECTED_TEXT_BYTES: usize = 256 * 1024;
     /// Maximum inert tool requests accumulated by the convenience collector.
     const MAX_COLLECTED_TOOL_REQUESTS: usize = 256;
+    /// Maximum bytes accepted for any effect correlation identifier.
+    const MAX_EFFECT_ID_BYTES: usize = 256;
+    /// Maximum serialized JSON bytes retained for one effect request.
+    const MAX_EFFECT_ARGUMENT_BYTES: usize = 16 * 1024;
+    /// Minimum length accepted by the configured-command semantic parser.
+    const MIN_CONFIGURED_COMMAND_ID_LENGTH: usize = 1;
+    /// Maximum bytes accepted for one effect completion result.
+    pub const MAX_TIBER_EFFECT_RESULT_BYTES: usize = 16 * 1024;
+    /// Maximum completed effect correlations retained for duplicate detection.
+    const MAX_COMPLETED_EFFECTS: usize = 256;
     /// Maximum wait before rechecking cooperative cancellation.
     const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -308,6 +318,8 @@ mod runtime {
         workspace: PathBuf,
         /// Whole-operation deadline.
         request_timeout: Duration,
+        /// Sorted semantic command identities visible to the model boundary.
+        configured_command_ids: Vec<tiber_process_core::ConfiguredCommandId>,
     }
 
     impl AppServerConfig {
@@ -343,7 +355,46 @@ mod runtime {
                 codex_home,
                 workspace,
                 request_timeout,
+                configured_command_ids: Vec::new(),
             })
+        }
+
+        /// Attaches the bounded semantic command identities discoverable by inference.
+        ///
+        /// This projection intentionally cannot carry executable paths, arguments,
+        /// environment, working directories, network policy, or execution bounds.
+        ///
+        /// # Errors
+        ///
+        /// Returns a stable typed error for an empty, duplicate, or oversized view.
+        pub fn with_configured_command_ids<I>(
+            mut self,
+            command_ids: I,
+        ) -> Result<Self, AppServerError>
+        where
+            I: IntoIterator<Item = tiber_process_core::ConfiguredCommandId>,
+        {
+            self.configured_command_ids = command_ids.into_iter().collect();
+            if self.configured_command_ids.is_empty()
+                || self.configured_command_ids.len() > tiber_process_core::MAX_CONFIGURED_COMMANDS
+            {
+                return Err(AppServerError::new(
+                    "app_server_configured_command_catalog_invalid",
+                    "configured command identity view must be non-empty and bounded",
+                    false,
+                ));
+            }
+            let original_len = self.configured_command_ids.len();
+            self.configured_command_ids.sort();
+            self.configured_command_ids.dedup();
+            if self.configured_command_ids.len() != original_len {
+                return Err(AppServerError::new(
+                    "app_server_configured_command_catalog_invalid",
+                    "configured command identity view must contain unique identities",
+                    false,
+                ));
+            }
+            Ok(self)
         }
 
         /// Prepares the isolated Codex home used by every Tiber-owned Codex child.
@@ -501,6 +552,119 @@ mod runtime {
         pub arguments: serde_json::Value,
     }
 
+    /// Bounded JSON-RPC identity of one app-server effect request.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum TiberEffectRequestId {
+        /// Non-negative numeric JSON-RPC identity.
+        Number(u64),
+        /// Bounded non-control string JSON-RPC identity.
+        String(String),
+    }
+
+    /// A declared Tiber effect awaiting an explicit caller-owned completion.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PendingTiberEffect {
+        /// Owning adapter identity, never exposed across the public boundary.
+        client_id: u64,
+        /// Parsed bounded JSON-RPC request identity.
+        request_id: TiberEffectRequestId,
+        /// App-server call identity.
+        call_id: String,
+        /// App-server thread identity.
+        thread_id: String,
+        /// App-server turn identity.
+        turn_id: String,
+        /// Exact declared Tiber tool name.
+        tool: String,
+        /// Parsed, bounded model-supplied arguments.
+        arguments: serde_json::Value,
+    }
+
+    /// One closed repository proposal awaiting an owner-owned decision.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PendingRepositoryProposal {
+        /// Owning adapter identity, never exposed across the public boundary.
+        client_id: u64,
+        /// Parsed bounded JSON-RPC request identity.
+        request_id: TiberEffectRequestId,
+        /// App-server call identity.
+        call_id: String,
+        /// App-server thread identity.
+        thread_id: String,
+        /// App-server turn identity.
+        turn_id: String,
+        /// Parsed, bounded model-supplied proposal arguments.
+        arguments: serde_json::Value,
+    }
+
+    impl PendingRepositoryProposal {
+        /// Returns the bounded app-server call identity.
+        #[must_use]
+        pub fn call_id(&self) -> &str {
+            &self.call_id
+        }
+
+        /// Returns the parsed bounded model-supplied proposal.
+        #[must_use]
+        pub const fn arguments(&self) -> &serde_json::Value {
+            &self.arguments
+        }
+    }
+
+    impl PendingTiberEffect {
+        /// Returns the bounded parsed JSON-RPC request identity.
+        #[must_use]
+        pub const fn request_id(&self) -> &TiberEffectRequestId {
+            &self.request_id
+        }
+
+        /// Returns the bounded app-server call identity.
+        #[must_use]
+        pub fn call_id(&self) -> &str {
+            &self.call_id
+        }
+
+        /// Returns the bounded app-server thread identity.
+        #[must_use]
+        pub fn thread_id(&self) -> &str {
+            &self.thread_id
+        }
+
+        /// Returns the bounded app-server turn identity.
+        #[must_use]
+        pub fn turn_id(&self) -> &str {
+            &self.turn_id
+        }
+
+        /// Returns the exact declared Tiber tool name.
+        #[must_use]
+        pub fn tool(&self) -> &str {
+            &self.tool
+        }
+
+        /// Returns the parsed bounded model-supplied arguments.
+        #[must_use]
+        pub const fn arguments(&self) -> &serde_json::Value {
+            &self.arguments
+        }
+    }
+
+    /// Caller-owned typed result for one pending Tiber effect.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum TiberEffectResult {
+        /// The effect completed and this bounded text may be returned to the model.
+        Success { output: String },
+        /// The effect failed without exposing adapter authority or raw logs.
+        Failure {
+            /// Stable caller-defined machine code.
+            code: String,
+            /// Bounded presentation-safe detail.
+            message: String,
+            /// Whether policy permits the model to retry the request.
+            retryable: bool,
+        },
+    }
+
     /// Correlation and deadline state for one active inference turn.
     #[derive(Clone, Debug)]
     pub struct TurnHandle {
@@ -510,6 +674,8 @@ mod runtime {
         thread_id: String,
         /// App-server turn identity.
         turn_id: String,
+        /// Owning adapter identity.
+        client_id: u64,
     }
 
     /// Cooperative cancellation shared with an application-shell owner.
@@ -539,6 +705,10 @@ mod runtime {
         AssistantDelta(String),
         /// A model-requested tool was rejected and retained as inert data.
         InertToolRequested(InertToolRequest),
+        /// A closed repository proposal is awaiting an owner-owned decision.
+        RepositoryProposalRequested(PendingRepositoryProposal),
+        /// The exact declared Tiber effect is awaiting caller-owned completion.
+        TiberEffectRequested(PendingTiberEffect),
         /// The correlated turn completed successfully.
         Completed,
     }
@@ -568,7 +738,18 @@ mod runtime {
         config: AppServerConfig,
         /// Cooperative cancellation for application-shell responsiveness.
         cancellation: OperationCancellation,
+        /// Process-local identity used to reject cross-client completions.
+        client_id: u64,
+        /// At most one declared Tiber effect may await completion.
+        pending_effect: Option<PendingTiberEffect>,
+        /// At most one repository proposal may await owner completion.
+        pending_repository_proposal: Option<PendingRepositoryProposal>,
+        /// Bounded exact correlations retained to classify duplicate completion.
+        completed_effects: VecDeque<PendingTiberEffect>,
     }
+
+    /// Next process-local adapter identity.
+    static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
     impl AppServerClient {
         /// Returns the child process identity for lifecycle receipts and tests.
@@ -592,6 +773,17 @@ mod runtime {
             config: AppServerConfig,
             isolated_config: &str,
         ) -> Result<Self, AppServerError> {
+            let client_id = NEXT_CLIENT_ID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |identity| {
+                    identity.checked_add(1)
+                })
+                .map_err(|_identity| {
+                    AppServerError::new(
+                        "app_server_client_id_exhausted",
+                        "app-server client identity space exhausted",
+                        false,
+                    )
+                })?;
             config.prepare_isolated_home(isolated_config)?;
             let mut command = Command::new(&config.executable);
             command
@@ -636,6 +828,10 @@ mod runtime {
                 cancellation: OperationCancellation {
                     cancelled: Arc::new(AtomicBool::new(false)),
                 },
+                client_id,
+                pending_effect: None,
+                pending_repository_proposal: None,
+                completed_effects: VecDeque::new(),
             };
             let initialized = client.request(
             "initialize",
@@ -810,6 +1006,20 @@ mod runtime {
                         }
                         inert_tool_requests.push(request);
                     }
+                    TurnEvent::TiberEffectRequested(_request) => {
+                        return Err(AppServerError::new(
+                            "app_server_effect_completion_required",
+                            "declared Tiber effect requires explicit caller completion",
+                            false,
+                        ));
+                    }
+                    TurnEvent::RepositoryProposalRequested(_request) => {
+                        return Err(AppServerError::new(
+                            "app_server_repository_proposal_completion_required",
+                            "repository proposal requires an explicit owner decision",
+                            false,
+                        ));
+                    }
                     TurnEvent::Completed => {
                         return Ok(ConversationResult {
                             text,
@@ -826,6 +1036,13 @@ mod runtime {
         ///
         /// Returns a typed transport, protocol, policy-profile, or input error.
         pub fn start_turn(&mut self, prompt: &str) -> Result<TurnHandle, AppServerError> {
+            if self.pending_effect.is_some() || self.pending_repository_proposal.is_some() {
+                return Err(AppServerError::new(
+                    "app_server_effect_completion_required",
+                    "complete the pending Tiber effect before starting another turn",
+                    false,
+                ));
+            }
             if prompt.is_empty() {
                 return Err(AppServerError::new(
                     "app_server_prompt_empty",
@@ -840,6 +1057,8 @@ mod runtime {
                     false,
                 ));
             }
+            let configured_command_schema =
+                configured_command_schema(&self.config.configured_command_ids);
             let started = self.request(
             "thread/start",
             serde_json::json!({
@@ -848,8 +1067,19 @@ mod runtime {
                 "cwd": self.config.workspace,
                 "dynamicTools": [
                     {
-                        "description": "Requests a Tiber-owned effect; this spike records it as inert data.",
-                        "inputSchema": { "type": "object" },
+                        "description": "Requests a Tiber-owned effect that waits for explicit policy-controlled completion.",
+                        "inputSchema": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "command": configured_command_schema,
+                                "operation": {
+                                    "const": "run_configured_command",
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["operation", "command"],
+                            "type": "object"
+                        },
                         "name": super::TIBER_EFFECT_TOOL_NAME,
                         "type": "function"
                     },
@@ -899,7 +1129,126 @@ mod runtime {
                 deadline: deadline_after(self.config.request_timeout)?,
                 thread_id,
                 turn_id,
+                client_id: self.client_id,
             })
+        }
+
+        /// Completes one exact pending declared Tiber effect once.
+        ///
+        /// # Errors
+        ///
+        /// Returns a stable typed error for wrong client, turn, or call
+        /// correlation, duplicate completion, or an invalid bounded result.
+        pub fn complete_tiber_effect(
+            &mut self,
+            turn: &TurnHandle,
+            request: &PendingTiberEffect,
+            call_id: &str,
+            result: TiberEffectResult,
+        ) -> Result<(), AppServerError> {
+            if turn.client_id != self.client_id || request.client_id != self.client_id {
+                return Err(AppServerError::new(
+                    "app_server_effect_client_mismatch",
+                    "pending Tiber effect belongs to a different app-server client",
+                    false,
+                ));
+            }
+            if turn.thread_id != request.thread_id || turn.turn_id != request.turn_id {
+                return Err(AppServerError::new(
+                    "app_server_effect_turn_mismatch",
+                    "pending Tiber effect belongs to a different turn",
+                    false,
+                ));
+            }
+            if validate_effect_identifier(call_id).is_err() || call_id != request.call_id {
+                return Err(AppServerError::new(
+                    "app_server_effect_call_mismatch",
+                    "pending Tiber effect call identity does not match",
+                    false,
+                ));
+            }
+            if self.completed_effects.iter().any(|completed| {
+                completed.request_id == request.request_id
+                    && completed.call_id == request.call_id
+                    && completed.thread_id == request.thread_id
+                    && completed.turn_id == request.turn_id
+            }) {
+                return Err(AppServerError::new(
+                    "app_server_effect_already_completed",
+                    "pending Tiber effect was already completed",
+                    false,
+                ));
+            }
+            let pending = self.pending_effect.as_ref().ok_or_else(|| {
+                AppServerError::new(
+                    "app_server_effect_call_mismatch",
+                    "no matching Tiber effect is pending",
+                    false,
+                )
+            })?;
+            if pending != request {
+                return Err(AppServerError::new(
+                    "app_server_effect_call_mismatch",
+                    "a different Tiber effect call is pending",
+                    false,
+                ));
+            }
+            let response = validated_effect_result(result)?;
+            self.respond(effect_request_id_value(&request.request_id), response)?;
+            let completed = self.pending_effect.take().ok_or_else(|| {
+                protocol_error("pending Tiber effect disappeared during completion")
+            })?;
+            if self.completed_effects.len() >= MAX_COMPLETED_EFFECTS {
+                self.completed_effects.pop_front();
+            }
+            self.completed_effects.push_back(completed);
+            Ok(())
+        }
+
+        /// Completes one exact pending repository proposal after the owner decision.
+        ///
+        /// # Errors
+        ///
+        /// Returns a stable typed error when the proposal correlation is stale or
+        /// belongs to another client or turn, or when the result is unbounded.
+        pub fn complete_repository_proposal(
+            &mut self,
+            turn: &TurnHandle,
+            request: &PendingRepositoryProposal,
+            result: TiberEffectResult,
+        ) -> Result<(), AppServerError> {
+            if turn.client_id != self.client_id || request.client_id != self.client_id {
+                return Err(AppServerError::new(
+                    "app_server_repository_proposal_client_mismatch",
+                    "repository proposal belongs to a different app-server client",
+                    false,
+                ));
+            }
+            if turn.thread_id != request.thread_id || turn.turn_id != request.turn_id {
+                return Err(AppServerError::new(
+                    "app_server_repository_proposal_turn_mismatch",
+                    "repository proposal belongs to a different turn",
+                    false,
+                ));
+            }
+            let pending = self.pending_repository_proposal.as_ref().ok_or_else(|| {
+                AppServerError::new(
+                    "app_server_repository_proposal_call_mismatch",
+                    "no matching repository proposal is pending",
+                    false,
+                )
+            })?;
+            if pending != request {
+                return Err(AppServerError::new(
+                    "app_server_repository_proposal_call_mismatch",
+                    "a different repository proposal is pending",
+                    false,
+                ));
+            }
+            let response = validated_effect_result(result)?;
+            self.respond(effect_request_id_value(&request.request_id), response)?;
+            self.pending_repository_proposal = None;
+            Ok(())
         }
 
         /// Returns the next presentation-safe observation for one active turn.
@@ -947,6 +1296,20 @@ mod runtime {
             turn: &TurnHandle,
             deadline: Instant,
         ) -> Result<TurnEvent, AppServerError> {
+            if turn.client_id != self.client_id {
+                return Err(AppServerError::new(
+                    "app_server_turn_client_mismatch",
+                    "turn belongs to a different app-server client",
+                    false,
+                ));
+            }
+            if self.pending_effect.is_some() {
+                return Err(AppServerError::new(
+                    "app_server_effect_completion_required",
+                    "complete the pending Tiber effect before polling the turn",
+                    false,
+                ));
+            }
             loop {
                 self.ensure_not_cancelled()?;
                 let message = self.receive_before(deadline)?;
@@ -963,31 +1326,8 @@ mod runtime {
                         }
                     }
                     Some("item/tool/call") => {
-                        let request_id = message
-                            .get("id")
-                            .cloned()
-                            .ok_or_else(|| protocol_error("tool call omitted request id"))?;
-                        let params = message
-                            .get("params")
-                            .ok_or_else(|| protocol_error("tool call omitted params"))?;
-                        let request = belongs_to_turn(&message, &turn.thread_id, &turn.turn_id)
-                            .then(|| {
-                                Ok::<_, AppServerError>(InertToolRequest {
-                                    call_id: required_string(params, "callId")?,
-                                    tool: required_string(params, "tool")?,
-                                    arguments: params
-                                        .get("arguments")
-                                        .cloned()
-                                        .unwrap_or(serde_json::Value::Null),
-                                })
-                            })
-                            .transpose()?;
-                        self.respond(request_id, serde_json::json!({
-                        "contentItems": [{ "text": "Tiber spike records model-requested tools as inert data.", "type": "inputText" }],
-                        "success": false
-                    }))?;
-                        if let Some(request) = request {
-                            return Ok(TurnEvent::InertToolRequested(request));
+                        if let Some(event) = self.handle_tool_call(&message, turn)? {
+                            return Ok(event);
                         }
                     }
                     Some(
@@ -1042,12 +1382,161 @@ mod runtime {
             }
         }
 
+        /// Rejects a process request while repository owner authority is pending.
+        fn reject_configured_process_conflict(
+            &mut self,
+            request_id: serde_json::Value,
+        ) -> Result<bool, AppServerError> {
+            if self.pending_repository_proposal.is_none() {
+                return Ok(false);
+            }
+            self.respond_rejected_tool_call(
+                request_id,
+                "Tiber rejected a configured process while a repository owner decision is pending.",
+            )?;
+            Ok(true)
+        }
+
+        /// Rejects a repository proposal while either closed authority is pending.
+        fn reject_repository_proposal_conflict(
+            &mut self,
+            request_id: serde_json::Value,
+        ) -> Result<bool, AppServerError> {
+            let message = if self.pending_repository_proposal.is_some() {
+                "Tiber rejected a second repository proposal while an owner decision is pending."
+            } else {
+                return Ok(false);
+            };
+            self.respond_rejected_tool_call(request_id, message)?;
+            Ok(true)
+        }
+
+        /// Responds to one correlated dynamic tool call with a stable inert refusal.
+        fn respond_rejected_tool_call(
+            &mut self,
+            request_id: serde_json::Value,
+            message: &str,
+        ) -> Result<(), AppServerError> {
+            self.respond(
+                request_id,
+                serde_json::json!({
+                    "contentItems": [{ "text": message, "type": "inputText" }],
+                    "success": false
+                }),
+            )
+        }
+
+        /// Handles one dynamic tool call without executing model-requested authority.
+        fn handle_tool_call(
+            &mut self,
+            message: &serde_json::Value,
+            turn: &TurnHandle,
+        ) -> Result<Option<TurnEvent>, AppServerError> {
+            let raw_request_id = message
+                .get("id")
+                .cloned()
+                .ok_or_else(|| protocol_error("tool call omitted request id"))?;
+            let params = message
+                .get("params")
+                .ok_or_else(|| protocol_error("tool call omitted params"))?;
+            if params.get("tool").and_then(serde_json::Value::as_str)
+                == Some(super::TIBER_EFFECT_TOOL_NAME)
+            {
+                if self.reject_configured_process_conflict(raw_request_id.clone())? {
+                    return Ok(None);
+                }
+                let request = pending_tiber_effect(
+                    self.client_id,
+                    raw_request_id.clone(),
+                    params,
+                    super::TIBER_EFFECT_TOOL_NAME.to_owned(),
+                )?;
+                if request.thread_id == turn.thread_id && request.turn_id == turn.turn_id {
+                    self.pending_effect = Some(request.clone());
+                    return Ok(Some(TurnEvent::TiberEffectRequested(request)));
+                }
+                self.respond_rejected_tool_call(
+                    raw_request_id,
+                    "Tiber rejected a tool request outside the active turn.",
+                )?;
+                return Ok(None);
+            }
+            if params.get("tool").and_then(serde_json::Value::as_str)
+                == Some(super::TIBER_REPOSITORY_PROPOSAL_TOOL_NAME)
+            {
+                if self.reject_repository_proposal_conflict(raw_request_id.clone())? {
+                    return Ok(None);
+                }
+                let effect = pending_tiber_effect(
+                    self.client_id,
+                    raw_request_id,
+                    params,
+                    super::TIBER_REPOSITORY_PROPOSAL_TOOL_NAME.to_owned(),
+                )?;
+                if effect.thread_id != turn.thread_id || effect.turn_id != turn.turn_id {
+                    self.respond(
+                        effect_request_id_value(&effect.request_id),
+                        serde_json::json!({
+                            "contentItems": [{ "text": "Tiber rejected a repository proposal outside the active turn.", "type": "inputText" }],
+                            "success": false
+                        }),
+                    )?;
+                    return Ok(None);
+                }
+                let request = PendingRepositoryProposal {
+                    client_id: effect.client_id,
+                    request_id: effect.request_id,
+                    call_id: effect.call_id,
+                    thread_id: effect.thread_id,
+                    turn_id: effect.turn_id,
+                    arguments: effect.arguments,
+                };
+                self.pending_repository_proposal = Some(request.clone());
+                return Ok(Some(TurnEvent::RepositoryProposalRequested(request)));
+            }
+            let belongs = belongs_to_turn(message, &turn.thread_id, &turn.turn_id);
+            if !belongs {
+                self.respond(
+                    raw_request_id,
+                    serde_json::json!({
+                        "contentItems": [{ "text": "Tiber rejected a tool request outside the active turn.", "type": "inputText" }],
+                        "success": false
+                    }),
+                )?;
+                return Ok(None);
+            }
+            let tool = required_string(params, "tool")?;
+            let request = InertToolRequest {
+                call_id: required_string(params, "callId")?,
+                tool,
+                arguments: params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            };
+            self.respond(
+                raw_request_id,
+                serde_json::json!({
+                    "contentItems": [{ "text": "Tiber spike records model-requested tools as inert data.", "type": "inputText" }],
+                    "success": false
+                }),
+            )?;
+            Ok(Some(TurnEvent::InertToolRequested(request)))
+        }
+
         /// Sends one bounded client request and awaits its matching response.
         fn request(
             &mut self,
             method: &str,
             params: serde_json::Value,
         ) -> Result<serde_json::Value, AppServerError> {
+            if self.pending_effect.is_some() {
+                return Err(AppServerError::new(
+                    "app_server_effect_completion_required",
+                    "complete the pending Tiber effect before sending another request",
+                    false,
+                ));
+            }
             let id = self.next_request_id;
             let deadline = deadline_after(self.config.request_timeout)?;
             self.next_request_id = self.next_request_id.checked_add(1).ok_or_else(|| {
@@ -1370,6 +1859,164 @@ mod runtime {
             })
     }
 
+    /// Parses and bounds one exact declared Tiber effect request.
+    fn pending_tiber_effect(
+        client_id: u64,
+        raw_request_id: serde_json::Value,
+        params: &serde_json::Value,
+        tool: String,
+    ) -> Result<PendingTiberEffect, AppServerError> {
+        let request_id = match raw_request_id {
+            serde_json::Value::Number(number) => number
+                .as_u64()
+                .map(TiberEffectRequestId::Number)
+                .ok_or_else(invalid_effect_request)?,
+            serde_json::Value::String(value) => {
+                validate_effect_identifier(&value)?;
+                TiberEffectRequestId::String(value)
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Array(_)
+            | serde_json::Value::Object(_) => return Err(invalid_effect_request()),
+        };
+        let call_id = required_effect_identifier(params, "callId")?;
+        let thread_id = required_effect_identifier(params, "threadId")?;
+        let turn_id = required_effect_identifier(params, "turnId")?;
+        validate_effect_identifier(&tool)?;
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .ok_or_else(invalid_effect_request)?;
+        let encoded_arguments = serde_json::to_vec(&arguments).map_err(|_error| {
+            AppServerError::new(
+                "app_server_effect_request_invalid",
+                "declared Tiber effect arguments could not be encoded",
+                false,
+            )
+        })?;
+        if encoded_arguments.len() > MAX_EFFECT_ARGUMENT_BYTES {
+            return Err(AppServerError::new(
+                "app_server_effect_request_too_large",
+                "declared Tiber effect arguments exceed the bounded request size",
+                false,
+            ));
+        }
+        Ok(PendingTiberEffect {
+            client_id,
+            request_id,
+            call_id,
+            thread_id,
+            turn_id,
+            tool,
+            arguments,
+        })
+    }
+
+    /// Converts a typed request identity back into its exact JSON-RPC representation.
+    fn effect_request_id_value(request_id: &TiberEffectRequestId) -> serde_json::Value {
+        match request_id.clone() {
+            TiberEffectRequestId::Number(value) => serde_json::Value::from(value),
+            TiberEffectRequestId::String(value) => serde_json::Value::from(value),
+        }
+    }
+
+    /// Extracts one required bounded effect correlation identifier.
+    fn required_effect_identifier(
+        value: &serde_json::Value,
+        field: &str,
+    ) -> Result<String, AppServerError> {
+        let identifier = value
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(String::from)
+            .ok_or_else(invalid_effect_request)?;
+        validate_effect_identifier(&identifier)?;
+        Ok(identifier)
+    }
+
+    /// Validates and renders a caller-owned effect result for the app-server protocol.
+    fn validated_effect_result(
+        result: TiberEffectResult,
+    ) -> Result<serde_json::Value, AppServerError> {
+        match result {
+            TiberEffectResult::Success { output } => {
+                validate_effect_result_text(&output)?;
+                Ok(serde_json::json!({
+                    "contentItems": [{ "text": output, "type": "inputText" }],
+                    "success": true
+                }))
+            }
+            TiberEffectResult::Failure {
+                code,
+                message,
+                retryable,
+            } => {
+                if code.is_empty()
+                    || code.len() > MAX_EFFECT_ID_BYTES
+                    || !code.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'_' | b'-' | b'.')
+                    })
+                {
+                    return Err(AppServerError::new(
+                        "app_server_effect_result_invalid",
+                        "Tiber effect failure code is malformed",
+                        false,
+                    ));
+                }
+                validate_effect_result_text(&message)?;
+                let output = serde_json::json!({
+                    "code": code,
+                    "message": message,
+                    "retryable": retryable
+                })
+                .to_string();
+                validate_effect_result_text(&output)?;
+                Ok(serde_json::json!({
+                    "contentItems": [{ "text": output, "type": "inputText" }],
+                    "success": false
+                }))
+            }
+        }
+    }
+
+    /// Rejects empty, oversized, or control-bearing effect correlation identifiers.
+    fn validate_effect_identifier(identifier: &str) -> Result<(), AppServerError> {
+        if identifier.is_empty()
+            || identifier.len() > MAX_EFFECT_ID_BYTES
+            || identifier.chars().any(char::is_control)
+        {
+            return Err(invalid_effect_request());
+        }
+        Ok(())
+    }
+
+    /// Rejects oversized or control-bearing caller-owned model-visible results.
+    fn validate_effect_result_text(text: &str) -> Result<(), AppServerError> {
+        if text.is_empty()
+            || text.len() > MAX_TIBER_EFFECT_RESULT_BYTES
+            || text.chars().any(char::is_control)
+        {
+            return Err(AppServerError::new(
+                "app_server_effect_result_invalid",
+                "Tiber effect result is oversized or contains control characters",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Constructs the stable failure for malformed effect request correlation.
+    fn invalid_effect_request() -> AppServerError {
+        AppServerError::new(
+            "app_server_effect_request_invalid",
+            "declared Tiber effect request correlation is malformed",
+            false,
+        )
+    }
+
     /// Constructs a stable protocol-shape failure.
     fn protocol_error(message: &str) -> AppServerError {
         AppServerError::new("app_server_protocol_invalid", message, false)
@@ -1446,6 +2093,26 @@ mod runtime {
         })
     }
 
+    /// Builds the closed command field schema from semantic identities alone.
+    fn configured_command_schema(
+        command_ids: &[tiber_process_core::ConfiguredCommandId],
+    ) -> serde_json::Value {
+        if command_ids.is_empty() {
+            serde_json::json!({
+                "maxLength": tiber_process_core::MAX_COMMAND_ID_BYTES,
+                "minLength": MIN_CONFIGURED_COMMAND_ID_LENGTH,
+                "type": "string"
+            })
+        } else {
+            serde_json::json!({
+                "enum": command_ids,
+                "maxLength": tiber_process_core::MAX_COMMAND_ID_BYTES,
+                "minLength": MIN_CONFIGURED_COMMAND_ID_LENGTH,
+                "type": "string"
+            })
+        }
+    }
+
     /// Extracts an exact dotted numeric version token from the runtime user agent.
     fn codex_version(user_agent: &str) -> Option<&str> {
         user_agent
@@ -1462,8 +2129,9 @@ mod runtime {
 
 pub use runtime::{
     AccountStatus, AppServerClient, AppServerConfig, AppServerError, ConversationResult,
-    INFERENCE_PERMISSION_PROFILE, InertToolRequest, LoginHandoff, OperationCancellation,
-    SUPPORTED_CODEX_VERSION, TurnEvent, TurnHandle,
+    INFERENCE_PERMISSION_PROFILE, InertToolRequest, LoginHandoff, MAX_TIBER_EFFECT_RESULT_BYTES,
+    OperationCancellation, PendingRepositoryProposal, PendingTiberEffect, SUPPORTED_CODEX_VERSION,
+    TiberEffectRequestId, TiberEffectResult, TurnEvent, TurnHandle,
 };
 
 /// Builds the stable fail-closed error for an unknown schema structure.

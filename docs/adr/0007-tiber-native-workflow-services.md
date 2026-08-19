@@ -27,16 +27,18 @@ append nor an effect executor.
 
 CLI, MCP, and TUI integration points are adapters. Internal task and workflow
 actions call native typed services and never loop back through MCP or shell.
-This initial workflow boundary does not yet add a scheduler, effect runner, or
-app-server/CLI/TUI integration; the app-server remains transport-only and its
-tool requests remain inert.
+The CLI now interprets the closed inference effect through app-server, records
+the observation and terminal advance durably, and restores the TUI projection
+on relaunch. Declared app-server tool requests remain inert until a Tiber-owned
+typed boundary handles them. This does not add a general scheduler or generic
+effect executor.
 
 ## Consequences
 
 All adapters share one domain contract and EventCore history. Extraction work
-must preserve existing behavior and store compatibility. Scheduling, effect
-reconciliation, durable interactive sessions, and runner integration remain
-follow-on work rather than reasons to reopen a generic mutation surface.
+must preserve existing behavior and store compatibility. Broader scheduling
+and operator-directed resolution of uncertain effects remain follow-on work
+rather than reasons to reopen a generic mutation surface.
 
 ## Alternatives considered
 

@@ -20,7 +20,9 @@ mod tests {
     };
 
     use eventcore_fs::FileEventStore;
-    use eventcore_types::{BatchSize, EventStore as _, StreamPattern, StreamVersion, StreamWrites};
+    use eventcore_types::{
+        BatchSize, EventStore as _, StreamId, StreamPattern, StreamVersion, StreamWrites,
+    };
     use tempfile::TempDir;
     use tiber_repository_core::Sha256Digest;
     use tiber_repository_service::{RepositoryMutationEvent, RepositoryMutationFact};
@@ -29,7 +31,7 @@ mod tests {
         decide_request_inference, decide_start_session, task_assignment_scope,
     };
     use tiber_store_git::{TiberEventStore, TransactionEventPage};
-    use tiber_tasks_core::TaskId;
+    use tiber_tasks_core::{TaskEvent, TaskId};
     use tiber_workflow_core::{
         AgentId, AssignmentEpoch, AssignmentId, AttemptNumber, ContextReceiptId,
         DeadlineMilliseconds, EffectId, HarnessState, IdempotencyKey, InferEffect,
@@ -54,6 +56,10 @@ mod tests {
         invocations: PathBuf,
         approved_crash: PathBuf,
         prepared_crash: PathBuf,
+        process_result: PathBuf,
+        process_reconciliations: PathBuf,
+        process_dispatch_crash: PathBuf,
+        process_workflow_observation_crash: PathBuf,
         repository_worker_invocations: PathBuf,
         session_history_reads: PathBuf,
         state_home: PathBuf,
@@ -106,6 +112,11 @@ mod tests {
             let invocations = directory.path().join("invocations");
             let approved_crash = directory.path().join("approved-crash");
             let prepared_crash = directory.path().join("prepared-crash");
+            let process_result = directory.path().join("process-result");
+            let process_reconciliations = directory.path().join("process-reconciliations");
+            let process_dispatch_crash = directory.path().join("process-dispatch-crash");
+            let process_workflow_observation_crash =
+                directory.path().join("process-workflow-observation-crash");
             let repository_worker_invocations =
                 directory.path().join("repository-worker-invocations");
             let session_history_reads = directory.path().join("session-history-reads");
@@ -193,6 +204,10 @@ mod tests {
                 invocations,
                 approved_crash,
                 prepared_crash,
+                process_result,
+                process_reconciliations,
+                process_dispatch_crash,
+                process_workflow_observation_crash,
                 state_home,
                 repository_worker_invocations,
                 session_history_reads,
@@ -245,6 +260,17 @@ mod tests {
             self.start_pty_mode_with_options(mode, capture, false, false, false, None)
         }
 
+        fn start_pty_mode_with_executable(
+            &self,
+            mode: &str,
+            capture: &Path,
+            executable: &Path,
+        ) -> Child {
+            self.start_pty_mode_with_executable_and_options(
+                mode, capture, false, false, false, None, executable, false,
+            )
+        }
+
         fn start_pty_mode_crash_after_approved(&self, mode: &str) -> Child {
             self.start_pty_mode_with_options(mode, Path::new("/dev/null"), true, false, false, None)
         }
@@ -278,13 +304,41 @@ mod tests {
             force_repository_failure: bool,
             repository_worker_override: Option<&Path>,
         ) -> Child {
+            self.start_pty_mode_with_executable_and_options(
+                mode,
+                capture,
+                crash_after_approved,
+                crash_after_prepared,
+                force_repository_failure,
+                repository_worker_override,
+                Path::new(env!("CARGO_BIN_EXE_tiber")),
+                true,
+            )
+        }
+
+        #[expect(
+            clippy::fn_params_excessive_bools,
+            clippy::too_many_arguments,
+            reason = "the black-box fixture keeps process, crash, and executable boundary controls explicit"
+        )]
+        fn start_pty_mode_with_executable_and_options(
+            &self,
+            mode: &str,
+            capture: &Path,
+            crash_after_approved: bool,
+            crash_after_prepared: bool,
+            force_repository_failure: bool,
+            repository_worker_override: Option<&Path>,
+            executable: &Path,
+            install_test_launcher: bool,
+        ) -> Child {
             let mut command = Command::new("script");
             command
                 .args([
                     "--quiet",
                     "--return",
                     "--command",
-                    &format!("stty rows 24 cols 80; {}", env!("CARGO_BIN_EXE_tiber")),
+                    &format!("stty rows 24 cols 80; {}", executable.display()),
                 ])
                 .arg(capture)
                 .current_dir(&self.repository)
@@ -298,6 +352,11 @@ mod tests {
                 .env("TIBER_FIXTURE_COMPLETION_RELEASE", &self.completion_release)
                 .env("TIBER_FIXTURE_OVERSIZED_SENTINEL", &self.oversized)
                 .env("TIBER_FIXTURE_INVOCATIONS", &self.invocations)
+                .env("TIBER_FIXTURE_PROCESS_RESULT", &self.process_result)
+                .env(
+                    "TIBER_TEST_PROCESS_RECONCILIATIONS",
+                    &self.process_reconciliations,
+                )
                 .env(
                     "TIBER_TEST_SESSION_HISTORY_READS",
                     &self.session_history_reads,
@@ -312,6 +371,36 @@ mod tests {
                         "TIBER_TEST_REPOSITORY_WORKER_INVOCATIONS",
                         &self.repository_worker_invocations,
                     );
+            }
+            if mode.starts_with("process-") && install_test_launcher {
+                command.env(
+                    "TIBER_TEST_PROCESS_LAUNCHER",
+                    self.repository.join("process-launcher"),
+                );
+            }
+            if mode == "process-recovery-crash" {
+                command.env(
+                    "TIBER_TEST_CRASH_AFTER_PROCESS_DISPATCH_SENTINEL",
+                    &self.process_dispatch_crash,
+                );
+            }
+            if mode == "process-recovery-terminal-publication-crash" {
+                command.env(
+                    "TIBER_TEST_CRASH_AFTER_PROCESS_TERMINAL_PUBLICATION_SENTINEL",
+                    &self.process_dispatch_crash,
+                );
+            }
+            if mode == "process-recovery-workflow-observation-crash" {
+                command.env(
+                    "TIBER_TEST_CRASH_AFTER_PROCESS_WORKFLOW_OBSERVATION_SENTINEL",
+                    &self.process_workflow_observation_crash,
+                );
+            }
+            if mode == "process-nonquit-error" {
+                command.env(
+                    "TIBER_TEST_TUI_ERROR_SENTINEL",
+                    self.repository.join("nonquit-grandchild-started"),
+                );
             }
             if crash_after_prepared {
                 command.env(
@@ -399,6 +488,39 @@ mod tests {
             git(&self.repository, ["add", "eventstore/events"]);
             git(&self.repository, ["commit", "-m", "long session history"]);
         }
+
+        fn seed_unrelated_stream_catalog(&self, stream_count: usize) {
+            git(&self.repository, ["switch", "tiber"]);
+            let mut writes = StreamWrites::new();
+            for index in 0..stream_count {
+                let stream = StreamId::try_new(format!("unrelated:catalog:{index}"))
+                    .expect("unrelated fixture stream should be valid");
+                writes = writes
+                    .register_stream(stream.clone(), StreamVersion::new(0))
+                    .expect("unrelated fixture stream should register")
+                    .append(
+                        serde_json::from_value::<TaskEvent>(serde_json::json!({
+                            "event": "repository_initialized",
+                            "stream_id": stream.as_ref(),
+                        }))
+                        .expect("catalog event should decode through the public durable wire"),
+                    )
+                    .expect("catalog fixture event should append");
+            }
+            let store = FileEventStore::open(self.repository.join("eventstore"))
+                .expect("fixture event store should reopen");
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime")
+                .block_on(store.append_events(writes))
+                .expect("unrelated catalog should persist");
+            drop(store);
+            git(&self.repository, ["add", "eventstore/events"]);
+            git(
+                &self.repository,
+                ["commit", "-m", "large unrelated stream catalog"],
+            );
+        }
     }
 
     #[test]
@@ -463,6 +585,1202 @@ mod tests {
     }
 
     #[test]
+    fn cargo_run_equivalent_executes_configured_command_without_sibling_launcher() {
+        let fixture = HarnessFixture::new();
+        let development_bin = fixture
+            .repository
+            .parent()
+            .expect("fixture repository should have an isolated parent")
+            .join("development-bin");
+        fs::create_dir_all(&development_bin).expect("development bin should be created");
+        let development_tiber = development_bin.join("tiber");
+        fs::copy(env!("CARGO_BIN_EXE_tiber"), &development_tiber)
+            .expect("fresh development Tiber should be copied without sibling helpers");
+        assert!(
+            !development_bin.join("tiber-process-launcher").exists(),
+            "the development entrypoint must not rely on a separately built sibling launcher"
+        );
+        let hostile_launcher_invoked = fixture.repository.join("hostile-launcher-invoked");
+        let path_launcher = fixture.codex_directory.join("tiber-process-launcher");
+        fs::write(
+            &path_launcher,
+            format!(
+                "#!/bin/sh\nprintf invoked > '{}'\nexit 126\n",
+                hostile_launcher_invoked.display()
+            ),
+        )
+        .expect("hostile PATH launcher should be written");
+        fs::set_permissions(&path_launcher, fs::Permissions::from_mode(0o755))
+            .expect("hostile PATH launcher should be executable");
+        let command = fixture.repository.join("development-command");
+        let command_invocations = fixture.repository.join("development-command-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/development-command-invocations\nwhile :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done\n",
+        )
+        .expect("development command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("development command should be executable");
+        install_process_configuration(&fixture.repository, "output-limit", &command, 5_000);
+
+        let mut child = fixture.start_pty_mode_with_executable(
+            "process-output-limit",
+            &fixture.terminal_capture,
+            &development_tiber,
+        );
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(b"run the development command\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_result);
+        let failure = first_process_failure(&fixture.process_result);
+        assert_eq!(
+            failure.get("code").and_then(serde_json::Value::as_str),
+            Some("process_linux_output_limit_exceeded")
+        );
+        assert!(
+            command_invocations.exists(),
+            "configured command should run through the development entrypoint; terminal:\n{}",
+            fs::read_to_string(&fixture.terminal_capture)
+                .unwrap_or_else(|error| format!("<terminal unavailable: {error}>"))
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(
+            &child
+                .wait_with_output()
+                .expect("packaged Tiber should stop cleanly"),
+        );
+        assert_eq!(
+            fs::read_to_string(command_invocations).expect("invocation should be readable"),
+            "invoked\n"
+        );
+        assert!(
+            !hostile_launcher_invoked.exists(),
+            "development launcher discovery must not consult PATH"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the packaged black-box repair scenario keeps the failed run, approved edit, and successful rerun in one observable workflow"
+    )]
+    fn packaged_conversation_repairs_and_retries_only_the_configured_focused_command() {
+        let fixture = HarnessFixture::new();
+        let launcher = fixture.repository.join("process-launcher");
+        fs::write(
+            &launcher,
+            "#!/bin/sh\n[ \"$1\" = '--' ] || exit 126\nshift\n\"$@\" &\nchild=$!\numask 077\nprintf 'launched\\n' > \"$TIBER_LAUNCH_HANDSHAKE\"\nwait \"$child\"\n",
+        )
+        .expect("test process launcher should be written");
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))
+            .expect("test process launcher should be executable");
+        let command = fixture.repository.join("focused-test");
+        let command_invocations = fixture.repository.join("focused-test-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/focused-test-invocations\ni=0\nwhile [ \"$i\" -lt 20000 ]; do printf '\"'; i=$((i + 1)); done\nprintf 'focused failure\\n' >&2\nexit 1\n",
+        )
+        .expect("configured focused command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("configured focused command should be executable");
+        let other_command = fixture.repository.join("other-test");
+        let other_invocations = fixture.repository.join("other-test-invocations");
+        fs::write(
+            &other_command,
+            "#!/bin/sh\nprintf 'unexpected\\n' >> /workspace/other-test-invocations\n",
+        )
+        .expect("second configured command should be written");
+        fs::set_permissions(&other_command, fs::Permissions::from_mode(0o755))
+            .expect("second configured command should be executable");
+        let config_directory = fixture.repository.join(".tiber");
+        fs::create_dir_all(&config_directory).expect("Tiber config directory should be created");
+        fs::write(
+            config_directory.join("commands.toml"),
+            "[commands.focused-test]\nprogram = '/bin/sh'\narguments = ['/workspace/focused-test']\nworking-directory = '.'\nnetwork = false\ntimeout-milliseconds = 5000\nstdout-bytes = 32768\nstderr-bytes = 4096\n\n[commands.other-test]\nprogram = '/workspace/other-test'\narguments = []\nworking-directory = '.'\nnetwork = false\ntimeout-milliseconds = 5000\nstdout-bytes = 4096\nstderr-bytes = 4096\n",
+        )
+        .expect("trusted command configuration should be written");
+
+        let mut child =
+            fixture.start_pty_mode_with_capture("process-fix", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(b"repair the focused failure\r")
+            .expect("owner prompt should reach Tiber");
+
+        wait_for_session_text(&fixture, "repository change proposed: focused-test");
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept the repository approval")
+            .write_all(b"approve\r")
+            .expect("owner approval should reach Tiber");
+        wait_for_session_text(
+            &fixture,
+            "The approved repair passed the exact configured focused-test command.",
+        );
+
+        let maximum_attempts: usize = 100;
+        for _attempt in 0..maximum_attempts {
+            if fixture.turn_completed.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            fixture.turn_completed.exists(),
+            "process turn should complete; terminal:\n{}",
+            fs::read_to_string(&fixture.terminal_capture)
+                .unwrap_or_else(|error| format!("<terminal unavailable: {error}>"))
+        );
+        assert!(
+            command_invocations.exists(),
+            "configured command should run before turn completion; terminal:\n{}",
+            fs::read_to_string(&fixture.terminal_capture)
+                .unwrap_or_else(|error| format!("<terminal unavailable: {error}>"))
+        );
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(
+            &child
+                .wait_with_output()
+                .expect("packaged Tiber should stop cleanly"),
+        );
+        assert_eq!(
+            fs::read_to_string(command_invocations)
+                .expect("configured command invocation should be readable"),
+            "invoked\ninvoked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&command).expect("repaired focused command should be readable"),
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/focused-test-invocations\nprintf 'focused success\\n'\n"
+        );
+        assert!(
+            !other_invocations.exists(),
+            "a second command request in the same durable effect must not redispatch"
+        );
+        let terminal = fs::read_to_string(&fixture.terminal_capture)
+            .expect("terminal capture should remain readable");
+        assert!(
+            terminal.contains("failed"),
+            "the owner-facing projection must distinguish the initial nonzero exit"
+        );
+        assert!(
+            terminal.contains("completed"),
+            "the successful retry must remain visibly distinct"
+        );
+        assert_no_process_journal_artifacts(&fixture, "terminal artifacts must be retired");
+    }
+
+    #[test]
+    fn configured_timeout_kills_the_entire_process_tree_and_persists_timed_out() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("timeout-command");
+        fs::write(
+            &command,
+            "#!/bin/sh\n/bin/sh -c 'printf started > /workspace/timeout-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/timeout-survivor' &\nwait\n",
+        )
+        .expect("timeout command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("timeout command should be executable");
+        install_process_configuration(&fixture.repository, "timeout", &command, 100);
+
+        let mut child = fixture.start_pty_mode("process-timeout");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the timeout fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_result);
+        wait_for_file(&fixture.turn_completed);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+        let result = first_process_failure(&fixture.process_result);
+        assert_eq!(
+            result.pointer("/code").and_then(serde_json::Value::as_str),
+            Some("process_timed_out"),
+            "unexpected process result: {result}"
+        );
+        assert!(durable_eventstore_text(&fixture.repository).contains("TimedOut"));
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            !fixture.repository.join("timeout-survivor").exists(),
+            "a descendant survived the configured timeout"
+        );
+    }
+
+    #[test]
+    fn completed_process_history_does_not_block_a_later_restart() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("completed-command");
+        fs::write(&command, "#!/bin/sh\nprintf 'completed\\n'\n")
+            .expect("completed command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("completed command should be executable");
+        install_process_configuration(&fixture.repository, "focused-test", &command, 5_000);
+
+        let mut first = fixture.start_pty_mode("process-success");
+        wait_for_file(&fixture.initialized);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the completed fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_result);
+        wait_for_file(&fixture.turn_completed);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach Tiber");
+        assert_success(&first.wait_with_output().expect("first Tiber should exit"));
+        assert!(durable_eventstore_text(&fixture.repository).contains("Completed"));
+
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut restarted = fixture.start_pty_mode("process-recovery-hold");
+        wait_for_file(&fixture.initialized);
+        restarted
+            .stdin
+            .as_mut()
+            .expect("restarted PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach restarted Tiber");
+        let output = restarted
+            .wait_with_output()
+            .expect("restarted Tiber should exit");
+        assert_success(&output);
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("process_history_invalid"),
+            "definitive terminal history must not be reclassified during startup"
+        );
+    }
+
+    #[test]
+    fn unrelated_large_stream_catalog_does_not_block_process_restart() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("catalog-command");
+        let invocations = fixture.repository.join("catalog-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/catalog-invocations\nprintf 'completed\\n'\n",
+        )
+            .expect("catalog command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("catalog command should be executable");
+        install_process_configuration(&fixture.repository, "recovery", &command, 5_000);
+
+        let mut first = fixture.start_pty_mode("process-recovery-crash");
+        wait_for_file(&fixture.initialized);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the catalog fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_dispatch_crash);
+        let expected_crash_code: i32 = 87;
+        assert_eq!(
+            first
+                .wait()
+                .expect("crash boundary should terminate Tiber")
+                .code(),
+            Some(expected_crash_code)
+        );
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocation should be recorded"),
+            "invoked\n"
+        );
+
+        fixture.seed_unrelated_stream_catalog(4_097);
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut restarted = fixture.start_pty_mode("process-recovery-hold");
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(&fixture, "process reconciled: completed");
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocation remains readable"),
+            "invoked\n",
+            "startup recovery must never redispatch the selected process stream"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("one reconciliation should be recorded"),
+            "reconcile\n"
+        );
+        assert_no_process_journal_artifacts(
+            &fixture,
+            "signed completed reconciliation should retire private artifacts",
+        );
+        restarted
+            .stdin
+            .as_mut()
+            .expect("restarted PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach restarted Tiber");
+        assert_success(
+            &restarted
+                .wait_with_output()
+                .expect("restarted Tiber should exit"),
+        );
+    }
+
+    #[test]
+    fn owner_cancel_kills_the_entire_process_tree_and_persists_cancelled() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("cancel-command");
+        fs::write(
+            &command,
+            "#!/bin/sh\n/bin/sh -c 'printf started > /workspace/cancel-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/cancel-survivor' &\nwait\n",
+        )
+        .expect("cancel command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("cancel command should be executable");
+        install_process_configuration(&fixture.repository, "cancel", &command, 5_000);
+
+        let mut child =
+            fixture.start_pty_mode_with_capture("process-cancel", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the cancellation fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.repository.join("cancel-grandchild-started"));
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner cancellation")
+            .write_all(b"cancel\r")
+            .expect("owner cancellation should reach Tiber");
+        wait_for_file(&fixture.process_result);
+        wait_for_file(&fixture.turn_completed);
+
+        fs::remove_file(&fixture.turn_completed)
+            .expect("second prompt should require a fresh completion observation");
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should remain interactive after cancellation")
+            .write_all(b"continue after cancellation\r")
+            .expect("later owner prompt should reach Tiber");
+        wait_for_file(&fixture.turn_completed);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should continue supporting quit")
+            .write_all(&[3])
+            .expect("owner quit intent should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+        assert!(durable_eventstore_text(&fixture.repository).contains("Cancelled"));
+        let terminal = fs::read_to_string(&fixture.terminal_capture)
+            .expect("terminal capture should remain readable");
+        assert!(terminal.contains("configured command active"));
+        assert!(
+            terminal.contains("cancelled:"),
+            "cancelled command status should remain owner-visible"
+        );
+        assert!(!terminal.contains("cancel-command"));
+        assert!(!terminal.contains("/bin/sh"));
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            !fixture.repository.join("cancel-survivor").exists(),
+            "a descendant survived owner cancellation"
+        );
+    }
+
+    #[test]
+    fn nonquit_tui_error_cancels_and_reaps_the_active_configured_process() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("nonquit-error-command");
+        fs::write(
+            &command,
+            "#!/bin/sh\n/bin/sh -c 'printf started > /workspace/nonquit-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/nonquit-survivor' &\nwait\n",
+        )
+        .expect("non-Quit error command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("non-Quit error command should be executable");
+        install_process_configuration(&fixture.repository, "focused-test", &command, 30_000);
+
+        let mut child =
+            fixture.start_pty_mode_with_capture("process-nonquit-error", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the non-Quit error fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.repository.join("nonquit-grandchild-started"));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut timed_out = false;
+        while child
+            .try_wait()
+            .expect("Tiber status should remain observable")
+            .is_none()
+        {
+            if Instant::now() >= deadline {
+                child.kill().expect("hung Tiber should be terminated");
+                let _status = child.wait().expect("terminated Tiber should be reaped");
+                timed_out = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !timed_out,
+            "Tiber hung while cleaning up an active configured process"
+        );
+        let output = child
+            .wait_with_output()
+            .expect("failed TUI should be collected after process cleanup");
+        assert!(
+            !output.status.success(),
+            "injected TUI failure must be returned"
+        );
+        assert!(
+            fs::read_to_string(&fixture.terminal_capture)
+                .expect("terminal failure should be captured")
+                .contains("tiber_tui_io_failed"),
+            "the injected non-Quit error should reach the CLI boundary"
+        );
+        assert!(
+            durable_eventstore_text(&fixture.repository).contains("Cancelled"),
+            "non-Quit cleanup must durably close configured-process authority"
+        );
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            !fixture.repository.join("nonquit-survivor").exists(),
+            "a descendant survived non-Quit TUI cleanup"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the black-box crash/relaunch scenario keeps reconciliation, successor completion, and idempotent restart assertions together"
+    )]
+    fn completed_process_is_reconciled_once_across_restarts_without_redispatch() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("recovery-command");
+        let invocations = fixture.repository.join("recovery-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/recovery-invocations\nprintf 'completed\\n'\n",
+        )
+        .expect("recovery command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("recovery command should be executable");
+        install_process_configuration(&fixture.repository, "recovery", &command, 5_000);
+
+        let mut crashed = fixture.start_pty_mode("process-recovery-crash");
+        wait_for_file(&fixture.initialized);
+        crashed
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the recovery fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_dispatch_crash);
+        let crash_status = crashed
+            .wait()
+            .expect("crash boundary should terminate Tiber");
+        let expected_crash_code: i32 = 87;
+        assert_eq!(crash_status.code(), Some(expected_crash_code));
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should exist"),
+            "invoked\n"
+        );
+
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut first_restart =
+            fixture.start_pty_mode_with_capture("success", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(&fixture, "process reconciled: completed");
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should remain readable"),
+            "invoked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("one reconciliation should be recorded"),
+            "reconcile\n"
+        );
+        assert_no_process_journal_artifacts(
+            &fixture,
+            "signed completed reconciliation should retire private artifacts",
+        );
+        first_restart
+            .stdin
+            .as_mut()
+            .expect("recovered PTY should accept a successor prompt")
+            .write_all(b"continue after process recovery\r")
+            .expect("successor prompt should reach recovered Tiber");
+        wait_for_file(&fixture.turn_completed);
+        wait_for_session_text(&fixture, "assistant: hello from Tiber");
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should remain readable"),
+            "invoked\n",
+            "recovery and the successor turn must not redispatch the interrupted process"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("reconciliation count should remain readable"),
+            "reconcile\n",
+            "the interrupted process must reconcile exactly once"
+        );
+        first_restart
+            .stdin
+            .as_mut()
+            .expect("first restart should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach first restart");
+        assert_success(
+            &first_restart
+                .wait_with_output()
+                .expect("first restart should exit"),
+        );
+
+        fs::remove_file(&fixture.initialized).expect("second restart should reset init sentinel");
+        let mut second_restart =
+            fixture.start_pty_mode_with_capture("process-recovery-hold", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(&fixture, "assistant: hello from Tiber");
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should remain readable"),
+            "invoked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("reconciliation count should remain readable"),
+            "reconcile\n"
+        );
+        second_restart
+            .stdin
+            .as_mut()
+            .expect("second restart should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach second restart");
+        assert_success(
+            &second_restart
+                .wait_with_output()
+                .expect("second restart should exit"),
+        );
+    }
+
+    #[test]
+    fn restart_resumes_interrupted_workflow_after_observation_publication_crash() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("recovery-command");
+        let invocations = fixture.repository.join("recovery-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/recovery-invocations\nprintf 'completed\\n'\n",
+        )
+        .expect("recovery command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("recovery command should be executable");
+        install_process_configuration(&fixture.repository, "recovery", &command, 5_000);
+
+        let mut dispatched = fixture.start_pty_mode("process-recovery-crash");
+        wait_for_file(&fixture.initialized);
+        dispatched
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run before the workflow crash\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_dispatch_crash);
+        let dispatch_crash_code: i32 = 87;
+        assert_eq!(
+            dispatched
+                .wait()
+                .expect("dispatch crash should terminate")
+                .code(),
+            Some(dispatch_crash_code)
+        );
+
+        fs::remove_file(&fixture.initialized).expect("recovery restart should reset sentinel");
+        let mut observation_crash =
+            fixture.start_pty_mode("process-recovery-workflow-observation-crash");
+        wait_for_file(&fixture.process_workflow_observation_crash);
+        let observation_crash_code: i32 = 89;
+        assert_eq!(
+            observation_crash
+                .wait()
+                .expect("workflow-observation crash should terminate")
+                .code(),
+            Some(observation_crash_code)
+        );
+
+        let mut recovered =
+            fixture.start_pty_mode_with_capture("success", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        recovered
+            .stdin
+            .as_mut()
+            .expect("recovered PTY should accept a successor prompt")
+            .write_all(b"continue after the observation crash\r")
+            .expect("successor prompt should reach recovered Tiber");
+        wait_for_file(&fixture.turn_completed);
+        wait_for_session_text(&fixture, "assistant: hello from Tiber");
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should remain readable"),
+            "invoked\n",
+            "neither restart may redispatch the interrupted process"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("reconciliation count should remain readable"),
+            "reconcile\n",
+            "the process must reconcile exactly once across both restarts"
+        );
+        recovered
+            .stdin
+            .as_mut()
+            .expect("recovered PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach recovered Tiber");
+        assert_success(&recovered.wait_with_output().expect("recovered Tiber exits"));
+    }
+
+    #[test]
+    fn signed_terminal_crash_residue_is_retired_on_restart_without_recovery_work() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("recovery-command");
+        let invocations = fixture.repository.join("recovery-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/recovery-invocations\nprintf 'completed\\n'\n",
+        )
+        .expect("recovery command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("recovery command should be executable");
+        install_process_configuration(&fixture.repository, "recovery", &command, 5_000);
+
+        let mut crashed = fixture.start_pty_mode("process-recovery-terminal-publication-crash");
+        wait_for_file(&fixture.initialized);
+        crashed
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the recovery fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_dispatch_crash);
+        let crash_status = crashed
+            .wait()
+            .expect("terminal-publication crash boundary should terminate Tiber");
+        let expected_crash_code: i32 = 88;
+        assert_eq!(crash_status.code(), Some(expected_crash_code));
+        assert_eq!(process_journal_artifact_count(&fixture), 3);
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should exist"),
+            "invoked\n"
+        );
+
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut restart = fixture.start_pty_mode_with_capture("success", &fixture.terminal_capture);
+        wait_for_file(&fixture.initialized);
+        assert_eq!(process_journal_artifact_count(&fixture), 0);
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should remain readable"),
+            "invoked\n"
+        );
+        assert!(
+            !fixture.process_reconciliations.exists(),
+            "signed terminal history must not trigger read-only reconciliation"
+        );
+        let history = durable_eventstore_text(&fixture.repository);
+        assert!(history.contains("Completed"));
+        assert!(!history.contains("Reconciled"));
+        restart
+            .stdin
+            .as_mut()
+            .expect("terminal-crash recovery should accept a successor prompt")
+            .write_all(b"continue after terminal process recovery\r")
+            .expect("successor prompt should reach recovered Tiber");
+        wait_for_file(&fixture.turn_completed);
+        wait_for_session_text(&fixture, "assistant: hello from Tiber");
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should remain readable"),
+            "invoked\n",
+            "terminal process recovery and its successor must not redispatch"
+        );
+        assert!(
+            !fixture.process_reconciliations.exists(),
+            "signed terminal history must never gain a reconciliation"
+        );
+        restart
+            .stdin
+            .as_mut()
+            .expect("restart should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach restart");
+        assert_success(&restart.wait_with_output().expect("restart should exit"));
+    }
+
+    #[test]
+    fn unknown_process_outcome_is_reconciled_once_and_exposes_stable_next_action() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("recovery-command");
+        let invocations = fixture.repository.join("recovery-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/recovery-invocations\nprintf started > /workspace/recovery-started\ni=0\nwhile [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done\nprintf survived > /workspace/recovery-survivor\n",
+        )
+        .expect("unknown recovery command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("unknown recovery command should be executable");
+        install_process_configuration(&fixture.repository, "recovery", &command, 30_000);
+
+        let mut interrupted = fixture.start_pty_mode("process-recovery-unknown");
+        wait_for_file(&fixture.initialized);
+        interrupted
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the uncertain recovery fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.repository.join("recovery-started"));
+        interrupted
+            .kill()
+            .expect("Tiber should be killed during dispatch");
+        let _status = interrupted
+            .wait()
+            .expect("interrupted Tiber should be reaped");
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should exist"),
+            "invoked\n"
+        );
+
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut first_restart = fixture.start_pty_mode("process-recovery-hold");
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(
+            &fixture,
+            "process outcome unknown; next action: inspect the configured operation before retrying",
+        );
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocations should remain readable"),
+            "invoked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("one reconciliation should be recorded"),
+            "reconcile\n"
+        );
+        assert_no_process_journal_artifacts(
+            &fixture,
+            "signed still-unknown reconciliation should retire private artifacts",
+        );
+        first_restart
+            .stdin
+            .as_mut()
+            .expect("first restart should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach first restart");
+        assert_success(
+            &first_restart
+                .wait_with_output()
+                .expect("first restart should exit"),
+        );
+
+        fs::remove_file(&fixture.initialized).expect("second restart should reset init sentinel");
+        let mut second_restart = fixture.start_pty_mode("process-recovery-hold");
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(
+            &fixture,
+            "process outcome unknown; next action: inspect the configured operation before retrying",
+        );
+        assert_eq!(
+            fs::read_to_string(invocations).expect("invocations should remain readable"),
+            "invoked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("reconciliation count should remain readable"),
+            "reconcile\n"
+        );
+        second_restart
+            .stdin
+            .as_mut()
+            .expect("second restart should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach second restart");
+        assert_success(
+            &second_restart
+                .wait_with_output()
+                .expect("second restart should exit"),
+        );
+        assert!(!fixture.repository.join("recovery-survivor").exists());
+    }
+
+    #[test]
+    fn output_limit_is_durably_closed_and_reconciled_without_redispatch() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("output-limit-command");
+        let invocations = fixture.repository.join("output-limit-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/output-limit-invocations\nwhile :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done\n",
+        )
+        .expect("output-limit command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("output-limit command should be executable");
+        install_process_configuration(&fixture.repository, "output-limit", &command, 5_000);
+
+        let mut first = fixture.start_pty_mode("process-output-limit");
+        wait_for_file(&fixture.initialized);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run the output-limit fixture\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_result);
+        let failure = first_process_failure(&fixture.process_result);
+        assert_eq!(
+            failure.get("code").and_then(serde_json::Value::as_str),
+            Some("process_linux_output_limit_exceeded")
+        );
+        wait_for_file(&fixture.turn_completed);
+        first
+            .stdin
+            .as_mut()
+            .expect("PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach Tiber");
+        assert_success(&first.wait_with_output().expect("Tiber should exit"));
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocation should exist"),
+            "invoked\n"
+        );
+        assert!(
+            durable_eventstore_text(&fixture.repository).contains("Unknown"),
+            "post-dispatch output termination must not strand signed Prepared authority"
+        );
+
+        fs::remove_file(&fixture.initialized).expect("restart should reset init sentinel");
+        let mut restart = fixture.start_pty_mode("process-recovery-hold");
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(&fixture, "process reconciled: not-completed");
+        assert_eq!(
+            fs::read_to_string(&invocations).expect("invocation remains readable"),
+            "invoked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("reconciliation should be recorded"),
+            "reconcile\n"
+        );
+        restart
+            .stdin
+            .as_mut()
+            .expect("restart should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach restart");
+        assert_success(&restart.wait_with_output().expect("restart should exit"));
+
+        fs::remove_file(&fixture.initialized).expect("second restart resets sentinel");
+        let mut second = fixture.start_pty_mode("process-recovery-hold");
+        wait_for_file(&fixture.initialized);
+        wait_for_session_text(&fixture, "process reconciled: not-completed");
+        assert_eq!(
+            fs::read_to_string(invocations).expect("invocation remains readable"),
+            "invoked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("reconciliation remains readable"),
+            "reconcile\n"
+        );
+        second
+            .stdin
+            .as_mut()
+            .expect("second restart should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach second restart");
+        assert_success(&second.wait_with_output().expect("second restart exits"));
+    }
+
+    #[test]
+    fn invalid_adapter_configuration_fails_before_signed_process_preparation() {
+        let fixture = HarnessFixture::new();
+        let command = fixture.repository.join("config-failure-command");
+        let invocations = fixture.repository.join("config-failure-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/config-failure-invocations\n",
+        )
+        .expect("configuration-failure command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("configuration-failure command should be executable");
+        install_process_configuration(&fixture.repository, "config-failure", &command, 5_000);
+
+        let mut child = fixture.start_pty_mode("process-adapter-config");
+        wait_for_file(&fixture.initialized);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept owner input")
+            .write_all(b"run with an unavailable launcher\r")
+            .expect("owner prompt should reach Tiber");
+        wait_for_file(&fixture.process_result);
+        let failure = first_process_failure(&fixture.process_result);
+        assert_eq!(
+            failure.get("code").and_then(serde_json::Value::as_str),
+            Some("process_adapter_configuration_invalid")
+        );
+        wait_for_file(&fixture.turn_completed);
+        child
+            .stdin
+            .as_mut()
+            .expect("PTY should accept quit")
+            .write_all(&[3])
+            .expect("quit should reach Tiber");
+        assert_success(&child.wait_with_output().expect("Tiber should exit"));
+        assert!(
+            !invocations.exists(),
+            "invalid configuration must not dispatch"
+        );
+        assert!(
+            !durable_eventstore_text(&fixture.repository).contains("tiber:process:"),
+            "local adapter configuration failure must precede signed process preparation"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one packaged acceptance table keeps every hostile model-selected process authority under the same black-box invariant"
+    )]
+    fn packaged_conversation_refuses_model_selected_process_authority_without_starting_a_process() {
+        struct RefusalCase {
+            code: &'static str,
+            durable_refusal: bool,
+            message: &'static str,
+            mode: &'static str,
+        }
+
+        let cases = [
+            RefusalCase {
+                mode: "process-policy-shell",
+                code: "process_request_invalid",
+                message: "configured process request is malformed",
+                durable_refusal: false,
+            },
+            RefusalCase {
+                mode: "process-policy-cwd",
+                code: "process_request_invalid",
+                message: "configured process request is malformed",
+                durable_refusal: false,
+            },
+            RefusalCase {
+                mode: "process-policy-env",
+                code: "process_request_invalid",
+                message: "configured process request is malformed",
+                durable_refusal: false,
+            },
+            RefusalCase {
+                mode: "process-policy-network",
+                code: "process_request_invalid",
+                message: "configured process request is malformed",
+                durable_refusal: false,
+            },
+            RefusalCase {
+                mode: "process-policy-executable",
+                code: "process_request_invalid",
+                message: "configured process request is malformed",
+                durable_refusal: false,
+            },
+            RefusalCase {
+                mode: "process-policy-malformed",
+                code: "process_request_invalid",
+                message: "configured process request is malformed",
+                durable_refusal: false,
+            },
+            RefusalCase {
+                mode: "process-policy-unknown",
+                code: "process_policy_unknown_configured_command",
+                message: "configured command is not present in trusted configuration",
+                durable_refusal: true,
+            },
+        ];
+
+        for case in cases {
+            let fixture = HarnessFixture::new();
+            let process_started = fixture.repository.join("process-started");
+            let command = fixture.repository.join("known-command");
+            fs::write(
+                &command,
+                "#!/bin/sh\nprintf 'started\\n' > /workspace/process-started\n",
+            )
+            .expect("configured sentinel command should be written");
+            fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+                .expect("configured sentinel command should be executable");
+            let config_directory = fixture.repository.join(".tiber");
+            fs::create_dir_all(&config_directory)
+                .expect("Tiber config directory should be created");
+            fs::write(
+                config_directory.join("commands.toml"),
+                "[commands.known]\nprogram = '/workspace/known-command'\narguments = []\nworking-directory = '.'\nenvironment = {}\nnetwork = false\ntimeout-milliseconds = 5000\nstdout-bytes = 4096\nstderr-bytes = 4096\n",
+            )
+            .expect("trusted command configuration should be written");
+
+            let mut child = fixture.start_pty_mode(case.mode);
+            wait_for_file(&fixture.initialized);
+            child
+                .stdin
+                .as_mut()
+                .expect("PTY should accept owner input")
+                .write_all(b"attempt forbidden process authority\r")
+                .expect("owner prompt should reach Tiber");
+            wait_for_file(&fixture.process_result);
+            wait_for_file(&fixture.turn_completed);
+            child
+                .stdin
+                .as_mut()
+                .expect("PTY should remain interactive")
+                .write_all(&[3])
+                .expect("owner quit intent should reach Tiber");
+            assert_success(&child.wait_with_output().expect("Tiber should exit cleanly"));
+
+            let results: Vec<serde_json::Value> = serde_json::from_slice(
+                &fs::read(&fixture.process_result).expect("process result should be captured"),
+            )
+            .expect("process result should remain JSON");
+            assert_eq!(
+                results.len(),
+                usize::from(case.durable_refusal) + 1,
+                "{}",
+                case.mode
+            );
+            if case.durable_refusal {
+                assert_eq!(
+                    results.first(),
+                    results.get(1),
+                    "retained refusal must replay exactly"
+                );
+            }
+            let result = results.first().expect("fixture should capture one result");
+            assert_eq!(
+                result.get("success"),
+                Some(&serde_json::Value::Bool(false)),
+                "{}",
+                case.mode
+            );
+            let returned_text = result
+                .pointer("/contentItems/0/text")
+                .and_then(serde_json::Value::as_str)
+                .expect("failure should contain bounded model-facing text");
+            let returned: serde_json::Value =
+                serde_json::from_str(returned_text).expect("failure text should remain JSON");
+            assert_eq!(
+                returned.get("code").and_then(serde_json::Value::as_str),
+                Some(case.code),
+                "{}",
+                case.mode
+            );
+            assert_eq!(
+                returned.get("message").and_then(serde_json::Value::as_str),
+                Some(case.message),
+                "{}",
+                case.mode
+            );
+            assert_eq!(
+                returned.get("retryable"),
+                Some(&serde_json::Value::Bool(false)),
+                "{}",
+                case.mode
+            );
+            assert!(
+                !process_started.exists(),
+                "{} must not start a process",
+                case.mode
+            );
+
+            let durable_bytes = durable_eventstore_text(&fixture.repository);
+            assert_eq!(
+                durable_bytes.contains("process_policy_unknown_configured_command"),
+                case.durable_refusal,
+                "{}",
+                case.mode
+            );
+            for secret in [
+                "ambient-shell-secret",
+                "ambient-cwd-secret",
+                "ambient-env-secret",
+                "ambient-executable-secret",
+                "ambient-unknown-command-secret",
+            ] {
+                assert!(
+                    !returned.to_string().contains(secret),
+                    "{} leaked through result",
+                    case.mode
+                );
+                assert!(
+                    !durable_bytes.contains(secret),
+                    "{} leaked through durable authority",
+                    case.mode
+                );
+            }
+            if case.durable_refusal {
+                fs::remove_file(&fixture.initialized)
+                    .expect("refusal restart should reset init sentinel");
+                let mut restarted = fixture.start_pty_mode("process-recovery-hold");
+                wait_for_file(&fixture.initialized);
+                restarted
+                    .stdin
+                    .as_mut()
+                    .expect("restarted refusal PTY should accept quit")
+                    .write_all(&[3])
+                    .expect("quit should reach restarted refusal Tiber");
+                assert_success(
+                    &restarted
+                        .wait_with_output()
+                        .expect("restarted refusal Tiber should exit"),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn owner_approves_an_exact_scoped_repository_change_from_the_conversation() {
         let fixture = HarnessFixture::new();
         let target = fixture.repository.join("README.md");
@@ -480,10 +1798,7 @@ mod tests {
             .expect("PTY should accept owner input")
             .write_all(b"improve the fixture file\r")
             .expect("owner prompt should reach Tiber");
-        wait_for_session_text(
-            &fixture,
-            "I inspected README.md and propose changing before to after.",
-        );
+        wait_for_session_text(&fixture, "repository change proposed: README.md");
         child
             .stdin
             .as_mut()
@@ -544,6 +1859,12 @@ mod tests {
             invocation_count(&fixture),
             1,
             "early prompt must remain gated"
+        );
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            invocation_count(&fixture),
+            1,
+            "all queued early input must remain gated"
         );
         fs::write(&fixture.completion_release, b"continue\n").expect("release completion");
         wait_for_file(&fixture.turn_completed);
@@ -3039,6 +4360,75 @@ mod tests {
             .expect("fixture Git command should start");
         assert!(output.status.success());
         String::from_utf8(output.stdout).expect("fixture Git output should be UTF-8")
+    }
+
+    fn durable_eventstore_text(repository: &Path) -> String {
+        let paths = git_output(
+            repository,
+            ["ls-tree", "-r", "--name-only", "tiber", "eventstore"],
+        );
+        let mut text = String::new();
+        for path in paths.lines() {
+            text.push_str(&git_output(repository, ["show", &format!("tiber:{path}")]));
+        }
+        text
+    }
+
+    fn process_journal_artifact_count(fixture: &HarnessFixture) -> usize {
+        let repository_roots = fixture.state_home.join("tiber/process");
+        let Ok(repositories) = fs::read_dir(repository_roots) else {
+            return 0;
+        };
+        repositories
+            .filter_map(Result::ok)
+            .filter_map(|repository| fs::read_dir(repository.path()).ok())
+            .map(Iterator::count)
+            .sum()
+    }
+
+    fn assert_no_process_journal_artifacts(fixture: &HarnessFixture, message: &str) {
+        assert_eq!(process_journal_artifact_count(fixture), 0, "{message}");
+    }
+
+    fn install_test_process_launcher(repository: &Path) {
+        let launcher = repository.join("process-launcher");
+        fs::write(
+            &launcher,
+            "#!/bin/sh\n[ \"$1\" = '--' ] || exit 126\nshift\n\"$@\" &\nchild=$!\numask 077\nprintf 'launched\\n' > \"$TIBER_LAUNCH_HANDSHAKE\"\nwait \"$child\"\n",
+        )
+        .expect("test process launcher should be written");
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))
+            .expect("test process launcher should be executable");
+    }
+
+    fn install_process_configuration(
+        repository: &Path,
+        id: &str,
+        command: &Path,
+        timeout_milliseconds: u64,
+    ) {
+        let config_directory = repository.join(".tiber");
+        fs::create_dir_all(&config_directory).expect("Tiber config directory should be created");
+        fs::write(
+            config_directory.join("commands.toml"),
+            format!(
+                "[commands.{id}]\nprogram = '/bin/sh'\narguments = ['/workspace/{}']\nworking-directory = '.'\nenvironment = {{}}\nnetwork = false\ntimeout-milliseconds = {timeout_milliseconds}\nstdout-bytes = 4096\nstderr-bytes = 4096\n",
+                command.file_name().expect("configured command should have a name").to_string_lossy()
+            ),
+        )
+        .expect("trusted command configuration should be written");
+    }
+
+    fn first_process_failure(path: &Path) -> serde_json::Value {
+        let results: Vec<serde_json::Value> =
+            serde_json::from_slice(&fs::read(path).expect("process result should be captured"))
+                .expect("process result should remain JSON");
+        let result = results.first().expect("one process result should exist");
+        let text = result
+            .pointer("/contentItems/0/text")
+            .and_then(serde_json::Value::as_str)
+            .expect("failure should contain bounded model-facing text");
+        serde_json::from_str(text).expect("failure text should remain JSON")
     }
 
     fn utf8(path: &Path) -> &str {

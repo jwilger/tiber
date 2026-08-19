@@ -13,13 +13,17 @@
 
 mod tasks;
 
+extern crate alloc;
+
+use alloc::{collections::BTreeMap, string::FromUtf8Error};
 use std::{
     collections::HashSet,
     env, fs,
     io::Read as _,
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process,
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -27,10 +31,30 @@ use std::{
 use eventcore_types::{BatchSize, EventStoreError, StreamPattern};
 use ratatui::crossterm::event::{self, Event};
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags, fstat, open, openat2};
+use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use tiber_app_server::{
-    AccountStatus, AppServerClient, AppServerConfig, OperationCancellation,
-    TIBER_REPOSITORY_PROPOSAL_TOOL_NAME, TurnEvent, inspect_protocol_schema,
+    AccountStatus, AppServerClient, AppServerConfig, MAX_TIBER_EFFECT_RESULT_BYTES,
+    OperationCancellation, PendingRepositoryProposal, PendingTiberEffect, TiberEffectRequestId,
+    TiberEffectResult, TurnEvent, inspect_protocol_schema,
+};
+use tiber_process_core::{
+    AssignmentWorkflowProvenance, ConfiguredCommand, ConfiguredCommandCatalog, ConfiguredCommandId,
+    FixedEnvironment, LiteralArgument, MAX_TIMEOUT, OutputBounds, ProcessInvocationId,
+    ProcessPolicyError, ProcessRequest, RelativeWorkingDirectory,
+};
+use tiber_process_linux::{
+    LinuxProcessAdapter, LinuxProcessAdapterConfig, ProcessCancellation, ProcessDispatchOutcome,
+    run_private_launcher,
+};
+use tiber_process_service::{
+    MAX_PROCESS_INVOCATION_STREAMS, PreparedProcessIdentity, ProcessExitStatus, ProcessFact,
+    ProcessReconciliationOutcome, ProcessRestartState, ProcessServiceError, ProcessStream,
+    ProcessUnknown, admit_process_invocation, authorize_prepared_process,
+    authorize_process_retirement, classify_process_restart, decide_process_request,
+    decide_record_cancelled, decide_record_completed,
+    decide_record_reconciled as decide_record_process_reconciled, decide_record_spawn_failed,
+    decide_record_timed_out, decide_record_unknown as decide_record_process_unknown,
 };
 use tiber_repository_core::{
     ComponentScope, OwnerApprovalId, RepositoryAssignmentContext, RepositoryCapability,
@@ -52,8 +76,9 @@ use tiber_repository_service::{
 };
 use tiber_session_service::{
     AssistantText, AssistantTextError, PromptText, PromptTextError, SessionBinding, SessionEvent,
-    SessionFact, SessionServiceError, decide_observe_inference, decide_request_inference,
-    decide_start_session, decide_succeed_session, project_started_session, task_assignment_scope,
+    SessionFact, SessionServiceError, decide_interrupt_inference, decide_observe_inference,
+    decide_request_inference, decide_start_session, decide_succeed_session,
+    project_started_session, task_assignment_scope,
 };
 use tiber_store_git::{
     GitStoreError, TiberEventStore, TransactionEventPage, TransactionHistoryError,
@@ -64,8 +89,9 @@ use tiber_tasks_service::TaskBoardProjection;
 use tiber_tui::{ComposerIntent, ConversationProjection, ProjectionEvent};
 use tiber_workflow_core::{
     AgentId, AssignmentEpoch, AssignmentId, AttemptNumber, ContextReceiptId, DeadlineMilliseconds,
-    EffectId, EffectObservation, EffectReceiptId, HarnessError, HarnessState, IdempotencyKey,
-    InferEffect, PolicyDecisionId, SessionId, WorkflowId,
+    EffectFailureCode, EffectId, EffectObservation, EffectReceiptId, HarnessError, HarnessState,
+    IdempotencyKey, InferEffect, PolicyDecisionId, Retryability, SessionId, WorkflowId,
+    continue_after_interruption,
 };
 use tiber_workflow_service::{
     WorkflowEvent, WorkflowServiceError, WorkflowStream, decide_advance_workflow,
@@ -80,6 +106,125 @@ const ISOLATED_CONFIG: &str = include_str!("../../../config/app-server.toml");
 const TUI_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Maximum observations applied before terminal input is polled again.
 const MAX_OBSERVATIONS_PER_FRAME: usize = 16;
+/// Maximum trusted configured-command document accepted at the CLI boundary.
+const MAX_COMMAND_CONFIGURATION_BYTES: u64 = 64 * 1024;
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Parsed top-level trusted configured-command document.
+struct CommandConfigurationDocument {
+    /// Semantic identifiers mapped to fixed trusted execution entries.
+    commands: BTreeMap<String, CommandConfigurationEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+/// One external configured-command entry before semantic validation.
+struct CommandConfigurationEntry {
+    /// Fixed absolute sandbox executable path.
+    program: PathBuf,
+    /// Fixed literal direct arguments.
+    #[serde(default)]
+    arguments: Vec<String>,
+    /// Fixed repository-relative working directory.
+    working_directory: String,
+    /// Fixed cleared-process environment entries.
+    #[serde(default)]
+    environment: BTreeMap<String, String>,
+    /// Explicit network request, which Tiber requires to be false.
+    network: bool,
+    /// Fixed execution deadline.
+    timeout_milliseconds: u64,
+    /// Fixed stdout capture bound.
+    stdout_bytes: usize,
+    /// Fixed stderr capture bound.
+    stderr_bytes: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+/// Stable trusted configured-command boundary failures.
+enum ConfiguredProcessError {
+    /// The trusted document could not be read.
+    #[error("configured command document is unavailable")]
+    Io(#[from] std::io::Error),
+    /// The trusted document exceeded its byte bound before parsing.
+    #[error("configured command document exceeds its semantic bound")]
+    TooLarge,
+    /// TOML shape or fields were malformed.
+    #[error("configured command document is malformed")]
+    Malformed(#[from] toml::de::Error),
+    /// The document was not valid UTF-8 TOML text.
+    #[error("configured command document is not valid UTF-8")]
+    Encoding(#[from] FromUtf8Error),
+    /// Configuration attempted to enable network access.
+    #[error("configured command requests network authority")]
+    NetworkRequested,
+    /// A parsed value violated process-core semantic policy.
+    #[error("configured command violates process policy")]
+    Policy(#[from] ProcessPolicyError),
+}
+
+impl ConfiguredProcessError {
+    /// Returns the stable owner-facing machine code.
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "the code mapper borrows typed configuration failures without consuming their causes"
+    )]
+    const fn code(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "process_configuration_unavailable",
+            Self::TooLarge => "process_configuration_too_large",
+            Self::Malformed(_) | Self::Encoding(_) => "process_configuration_malformed",
+            Self::NetworkRequested => "process_configuration_network_forbidden",
+            Self::Policy(_) => "process_configuration_rejected",
+        }
+    }
+}
+
+/// Parses the optional trusted command document exactly once at startup.
+fn load_configured_process_catalog(
+    repository: &Path,
+) -> Result<Option<ConfiguredCommandCatalog>, ConfiguredProcessError> {
+    let path = repository.join(".tiber/commands.toml");
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ConfiguredProcessError::Io(error)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_COMMAND_CONFIGURATION_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_COMMAND_CONFIGURATION_BYTES {
+        return Err(ConfiguredProcessError::TooLarge);
+    }
+    let document: CommandConfigurationDocument = toml::from_str(&String::from_utf8(bytes)?)?;
+    let commands = document
+        .commands
+        .into_iter()
+        .map(|(raw_id, entry)| {
+            if entry.network {
+                return Err(ConfiguredProcessError::NetworkRequested);
+            }
+            let id = ConfiguredCommandId::parse(&raw_id)?;
+            let arguments = entry
+                .arguments
+                .iter()
+                .map(|argument| LiteralArgument::parse(argument))
+                .collect::<Result<Vec<_>, _>>()?;
+            let command = ConfiguredCommand::new(
+                entry.program,
+                arguments,
+                RelativeWorkingDirectory::parse(&entry.working_directory)?,
+                FixedEnvironment::new(entry.environment)?,
+                Duration::from_millis(entry.timeout_milliseconds),
+                OutputBounds::new(entry.stdout_bytes, entry.stderr_bytes)?,
+            )?;
+            Ok((id, command))
+        })
+        .collect::<Result<Vec<_>, ConfiguredProcessError>>()?;
+    ConfiguredCommandCatalog::new(commands)
+        .map(Some)
+        .map_err(ConfiguredProcessError::from)
+}
 #[expect(
     clippy::print_stderr,
     reason = "a command-line adapter intentionally writes its result and diagnostics"
@@ -97,6 +242,7 @@ fn main() {
         "converse" => run_conversation(arguments),
         "session" => run_session(arguments),
         "tasks" => run_tasks(arguments),
+        "__tiber-process-launcher" => process::exit(run_private_launcher(arguments)),
         "-h" | "--help" => {
             if arguments.next().is_some() {
                 eprintln!("explicit help accepts no further arguments");
@@ -150,6 +296,10 @@ fn run_session(mut arguments: impl Iterator<Item = std::ffi::OsString>) {
                     "{}: signed repository receipt could not be read",
                     error.code()
                 );
+                process::exit(1);
+            }
+            if let Err(error) = print_process_receipts(&repository, &events) {
+                eprintln!("{}: signed process receipt could not be read", error.code());
                 process::exit(1);
             }
         }
@@ -322,6 +472,14 @@ fn print_session_binding(
         if let SessionFact::InferenceObserved { assistant, .. } = event.fact() {
             println!("assistant: {}", assistant.as_str());
         }
+        if let SessionFact::InferenceInterrupted { observation } = event.fact() {
+            let code = match observation {
+                EffectObservation::Failed { code, .. } => code.as_str(),
+                EffectObservation::OutcomeUnknown { .. } => "inference_outcome_unknown",
+                EffectObservation::Succeeded { .. } => "inference_resolution_invalid",
+            };
+            println!("inference interrupted: {code}");
+        }
     }
 }
 
@@ -430,6 +588,59 @@ fn print_repository_receipts(
     Ok(())
 }
 
+/// Renders typed process reconciliation receipts for the active effect.
+#[expect(
+    clippy::print_stdout,
+    clippy::pattern_type_mismatch,
+    clippy::semicolon_if_nothing_returned,
+    clippy::wildcard_enum_match_arm,
+    reason = "the public session query renders durable process receipts"
+)]
+fn print_process_receipts(
+    repository: &Path,
+    session_events: &[SessionEvent],
+) -> Result<(), ProcessEffectError> {
+    let Some(effect) = session_events
+        .iter()
+        .rev()
+        .find_map(|event| match event.fact() {
+            SessionFact::InferenceRequested { effect, .. } => Some(effect),
+            _ => None,
+        })
+    else {
+        return Ok(());
+    };
+    let store = TiberEventStore::open(repository)?;
+    for stream in store
+        .stream_ids()
+        .iter()
+        .filter_map(|stream| ProcessStream::from_verified_effect_stream(effect.effect_id(), stream))
+    {
+        let history = store.read_process_history(&stream)?;
+        if let Some(ProcessFact::Reconciled(reconciled)) = history
+            .events()
+            .last()
+            .map(tiber_process_service::ProcessEvent::fact)
+        {
+            match reconciled.outcome() {
+                ProcessReconciliationOutcome::Completed(_) => {
+                    println!("process reconciled: completed")
+                }
+                ProcessReconciliationOutcome::DefinitelyNotCompleted => {
+                    println!("process reconciled: not-completed")
+                }
+                ProcessReconciliationOutcome::StillUnknown => println!(
+                    "process outcome unknown; next action: inspect the configured operation before retrying"
+                ),
+                _ => println!(
+                    "process outcome unknown; next action: upgrade Tiber before continuing"
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Renders one safe repository precondition without exposing raw content.
 fn repository_precondition_text(precondition: RepositoryMutationPrecondition) -> String {
     match precondition {
@@ -529,6 +740,10 @@ fn run_tui() {
         eprintln!("tiber_session_repository_unavailable: {error}");
         process::exit(1);
     });
+    let process_catalog = load_configured_process_catalog(&repository).unwrap_or_else(|error| {
+        eprintln!("{}: {error}", error.code());
+        process::exit(1);
+    });
     let (_binding, session_events) = ensure_started_session(&repository).unwrap_or_else(|error| {
         eprintln!("{}: {error}", error.code());
         process::exit(1);
@@ -541,7 +756,7 @@ fn run_tui() {
         eprintln!("{}: {error}", error.code());
         process::exit(1);
     });
-    let history = active_session_events(&session_events).to_vec();
+    let mut history = active_session_events(&session_events).to_vec();
     let store = TiberEventStore::open(&repository).unwrap_or_else(|error| {
         eprintln!("tiber_session_store_unavailable: {error}");
         process::exit(1);
@@ -557,13 +772,54 @@ fn run_tui() {
             process::exit(1);
         },
     );
+    apply_process_restart_receipts(&repository, &history, &mut projection).unwrap_or_else(
+        |error| {
+            eprintln!("{}: {error}", error.code());
+            process::exit(1);
+        },
+    );
+    if resolve_interrupted_process_workflow(&repository, &history).unwrap_or_else(|error| {
+        eprintln!("{}: {error}", error.code());
+        process::exit(1);
+    }) {
+        let refreshed_store = TiberEventStore::open(&repository).unwrap_or_else(|error| {
+            eprintln!("tiber_session_store_unavailable: {error}");
+            process::exit(1);
+        });
+        history = active_session_events(&read_session_events(&refreshed_store).unwrap_or_else(
+            |error| {
+                eprintln!("{}: {error}", error.code());
+                process::exit(1);
+            },
+        ))
+        .to_vec();
+        projection = restored_conversation_projection(&history);
+        apply_repository_restart_receipts(&repository, &history, &mut projection).unwrap_or_else(
+            |error| {
+                eprintln!("{}: {error}", error.code());
+                process::exit(1);
+            },
+        );
+        apply_process_restart_receipts(&repository, &history, &mut projection).unwrap_or_else(
+            |error| {
+                eprintln!("{}: {error}", error.code());
+                process::exit(1);
+            },
+        );
+    }
     let mut terminal = ratatui::try_init().unwrap_or_else(|error| {
         eprintln!("tiber_tui_initialize_failed: {error}");
         process::exit(1);
     });
-    let client = start_default_client();
+    let client = start_default_client(process_catalog.as_ref());
     let mut worker = InferenceWorker::start(client);
-    let result = run_tui_loop(&repository, &mut terminal, &mut worker, &mut projection);
+    let result = run_tui_loop(
+        &repository,
+        process_catalog.as_ref(),
+        &mut terminal,
+        &mut worker,
+        &mut projection,
+    );
     worker.stop();
     ratatui::restore();
     result.unwrap_or_else(|error| {
@@ -575,6 +831,7 @@ fn run_tui() {
 /// Ensures the sole active native task has one durable conversation binding.
 #[expect(
     clippy::collapsible_if,
+    clippy::too_many_lines,
     reason = "the harness boundary preserves its closed recovery and projection control flow"
 )]
 #[expect(
@@ -608,8 +865,15 @@ fn ensure_started_session(
                 _ => None,
             });
         if unresolved.is_some_and(|effect_id| {
-            !active_events.iter().any(|event| {
-                matches!(event.fact(), SessionFact::InferenceObserved { effect_id: observed, .. } if observed == effect_id)
+            !active_events.iter().any(|event| match event.fact() {
+                SessionFact::InferenceObserved {
+                    effect_id: observed,
+                    ..
+                } => observed == effect_id,
+                SessionFact::InferenceInterrupted { observation } => {
+                    observation.effect_id() == effect_id
+                }
+                _ => false,
             })
         }) {
             return Ok((binding, session_events));
@@ -720,6 +984,9 @@ fn restored_conversation_projection(events: &[SessionEvent]) -> ConversationProj
                 });
                 projection.apply(ProjectionEvent::TurnCompleted);
             }
+            SessionFact::InferenceInterrupted { .. } => {
+                projection.apply(ProjectionEvent::TurnCompleted);
+            }
             _ => {}
         }
     }
@@ -728,8 +995,15 @@ fn restored_conversation_projection(events: &[SessionEvent]) -> ConversationProj
         _ => None,
     });
     if unresolved.is_some_and(|effect_id| {
-        !events.iter().any(|event| {
-            matches!(event.fact(), SessionFact::InferenceObserved { effect_id: observed, .. } if observed == effect_id)
+        !events.iter().any(|event| match event.fact() {
+            SessionFact::InferenceObserved {
+                effect_id: observed,
+                ..
+            } => observed == effect_id,
+            SessionFact::InferenceInterrupted { observation } => {
+                observation.effect_id() == effect_id
+            }
+            _ => false,
         })
     }) {
         projection.apply(ProjectionEvent::ReconciliationRequired {
@@ -806,6 +1080,237 @@ fn apply_repository_restart_receipts(
         }
     }
     Ok(())
+}
+
+/// Reconciles every signed per-invocation process stream for the active effect once.
+#[expect(
+    clippy::collapsible_if,
+    clippy::pattern_type_mismatch,
+    clippy::shadow_unrelated,
+    clippy::wildcard_enum_match_arm,
+    reason = "the startup shell keeps signed snapshot refreshes and the closed reconciliation lifecycle visibly ordered"
+)]
+fn apply_process_restart_receipts(
+    repository: &Path,
+    session_events: &[SessionEvent],
+    projection: &mut ConversationProjection,
+) -> Result<(), ProcessEffectError> {
+    let Some(effect) = session_events
+        .iter()
+        .rev()
+        .find_map(|event| match event.fact() {
+            SessionFact::InferenceRequested { effect, .. } => Some(effect),
+            _ => None,
+        })
+    else {
+        return Ok(());
+    };
+    let store = TiberEventStore::open(repository)?;
+    let streams = store
+        .stream_ids()
+        .iter()
+        .filter_map(|stream| ProcessStream::from_verified_effect_stream(effect.effect_id(), stream))
+        .take(MAX_PROCESS_INVOCATION_STREAMS.saturating_add(1))
+        .collect::<Vec<_>>();
+    if streams.len() > MAX_PROCESS_INVOCATION_STREAMS {
+        return Err(ProcessEffectError::Service(
+            ProcessServiceError::InvalidHistory,
+        ));
+    }
+    drop(store);
+    for stream in streams {
+        let store = TiberEventStore::open(repository)?;
+        let history = store.read_process_history(&stream)?;
+        if let ProcessRestartState::Prepared(identity) =
+            classify_process_restart(history.events(), &stream)?
+        {
+            let unknown = decide_record_process_unknown(
+                history.events(),
+                stream.clone(),
+                ProcessUnknown::new(identity),
+            )?;
+            let runtime = RuntimeBuilder::new_current_thread().build()?;
+            let mut publisher = TiberEventPublisher::open_at(repository, history.revision())?;
+            let _revision = runtime.block_on(publisher.publish_process(&stream, unknown))?;
+        }
+
+        let store = TiberEventStore::open(repository)?;
+        let history = store.read_process_history(&stream)?;
+        match classify_process_restart(history.events(), &stream)? {
+            ProcessRestartState::Unknown(capability) => {
+                if cfg!(debug_assertions) {
+                    if let Some(path) = env::var_os("TIBER_TEST_PROCESS_RECONCILIATIONS") {
+                        use std::io::Write as _;
+                        fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)?
+                            .write_all(b"reconcile\n")?;
+                    }
+                }
+                let adapter = LinuxProcessAdapter::new(process_adapter_config(repository)?);
+                let reconciled = adapter.reconcile(capability)?;
+                let outcome = reconciliation_projection(reconciled.outcome());
+                let publication =
+                    decide_record_process_reconciled(history.events(), stream.clone(), reconciled)?;
+                let runtime = RuntimeBuilder::new_current_thread().build()?;
+                let mut publisher = TiberEventPublisher::open_at(repository, history.revision())?;
+                let _revision =
+                    runtime.block_on(publisher.publish_process(&stream, publication))?;
+                projection.apply(outcome);
+                retire_closed_process_artifacts(repository, &stream)?;
+            }
+            ProcessRestartState::Reconciled(outcome) => {
+                projection.apply(reconciliation_projection(&outcome));
+                retire_closed_process_artifacts(repository, &stream)?;
+            }
+            ProcessRestartState::Closed => {
+                retire_closed_process_artifacts(repository, &stream)?;
+            }
+            _ => {
+                return Err(ProcessEffectError::Service(
+                    ProcessServiceError::InvalidHistory,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Closes an inference turn whose requested child process reached durable
+/// terminal authority while the enclosing app-server turn was interrupted.
+///
+/// The repair records only a sanitized failed observation. It never fabricates
+/// assistant output, replays inference, or redispatches a process.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::wildcard_enum_match_arm,
+    reason = "startup recovery folds borrowed non-exhaustive facts and rejects unsupported process lifecycle states"
+)]
+fn resolve_interrupted_process_workflow(
+    repository: &Path,
+    session_events: &[SessionEvent],
+) -> Result<bool, ProcessEffectError> {
+    let Some(effect) = session_events
+        .iter()
+        .rev()
+        .find_map(|event| match event.fact() {
+            SessionFact::InferenceRequested { effect, .. } => Some(effect),
+            _ => None,
+        })
+    else {
+        return Ok(false);
+    };
+    if session_events.iter().any(|event| match event.fact() {
+        SessionFact::InferenceObserved { effect_id, .. } => effect_id == effect.effect_id(),
+        SessionFact::InferenceInterrupted { observation } => {
+            observation.effect_id() == effect.effect_id()
+        }
+        _ => false,
+    }) {
+        return Ok(false);
+    }
+
+    let store = TiberEventStore::open(repository)?;
+    let streams = store
+        .stream_ids()
+        .iter()
+        .filter_map(|stream| ProcessStream::from_verified_effect_stream(effect.effect_id(), stream))
+        .take(MAX_PROCESS_INVOCATION_STREAMS.saturating_add(1))
+        .collect::<Vec<_>>();
+    if streams.is_empty() {
+        return Ok(false);
+    }
+    if streams.len() > MAX_PROCESS_INVOCATION_STREAMS {
+        return Err(ProcessEffectError::Service(
+            ProcessServiceError::InvalidHistory,
+        ));
+    }
+    for stream in &streams {
+        let history = store.read_process_history(stream)?;
+        if !matches!(
+            classify_process_restart(history.events(), stream)?,
+            ProcessRestartState::Closed | ProcessRestartState::Reconciled(_)
+        ) {
+            return Ok(false);
+        }
+    }
+
+    let workflow_stream = WorkflowStream::for_effect(effect)?;
+    let workflow_history = read_workflow_events_query(&store, &workflow_stream)?;
+    if !matches!(
+        workflow_history.last().map(WorkflowEvent::fact),
+        Some(tiber_workflow_service::WorkflowFact::EffectRequested { .. })
+    ) {
+        return Ok(false);
+    }
+    let observation = EffectObservation::Failed {
+        code: EffectFailureCode::parse("process_recovery_interrupted")?,
+        effect_id: effect.effect_id().clone(),
+        retryability: Retryability::NotRetryable,
+    };
+    let session = decide_interrupt_inference(session_events, observation.clone())?;
+    let workflow =
+        decide_record_observation(&workflow_history, workflow_stream.clone(), observation)?;
+    let revision = store.revision().clone();
+    drop(store);
+    let runtime = RuntimeBuilder::new_current_thread().build()?;
+    let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+    let observed = runtime
+        .block_on(publisher.publish_inference_observation_with_workflow(session, workflow))?;
+    if cfg!(debug_assertions)
+        && let Some(path) =
+            env::var_os("TIBER_TEST_CRASH_AFTER_PROCESS_WORKFLOW_OBSERVATION_SENTINEL")
+    {
+        fs::write(path, b"crash\n")?;
+        process::exit(89);
+    }
+    let observed_store = TiberEventStore::open(repository)?;
+    let observed_history = read_workflow_events_query(&observed_store, &workflow_stream)?;
+    let advance = decide_advance_workflow(&observed_history, workflow_stream)?;
+    let mut terminal_publisher = TiberEventPublisher::open_at(repository, observed.revision())?;
+    let _stopped = runtime.block_on(terminal_publisher.publish_workflow_advance(advance))?;
+    Ok(true)
+}
+
+/// Re-reads exact signed lifecycle authority before durably retiring private
+/// adapter artifacts. Prepared, unknown, and refusal-only histories are a
+/// deliberate no-op at this boundary.
+fn retire_closed_process_artifacts(
+    repository: &Path,
+    stream: &ProcessStream,
+) -> Result<(), ProcessEffectError> {
+    let store = TiberEventStore::open(repository)?;
+    let history = store.read_process_history(stream)?;
+    let Some(capability) = authorize_process_retirement(history.events(), stream)? else {
+        return Ok(());
+    };
+    LinuxProcessAdapter::new(process_adapter_config(repository)?).retire(capability)?;
+    Ok(())
+}
+
+/// Maps a closed content-free reconciliation result into owner-visible next state.
+#[expect(
+    clippy::pattern_type_mismatch,
+    reason = "the presentation mapper borrows the closed typed reconciliation result"
+)]
+fn reconciliation_projection(outcome: &ProcessReconciliationOutcome) -> ProjectionEvent {
+    match outcome {
+        ProcessReconciliationOutcome::Completed(_) => ProjectionEvent::ProcessReconciled {
+            outcome: "completed".to_owned(),
+        },
+        ProcessReconciliationOutcome::DefinitelyNotCompleted => {
+            ProjectionEvent::ProcessReconciled {
+                outcome: "not-completed".to_owned(),
+            }
+        }
+        ProcessReconciliationOutcome::StillUnknown => ProjectionEvent::ProcessUnknown {
+            next_action: "inspect the configured operation before retrying".to_owned(),
+        },
+        _ => ProjectionEvent::ProcessUnknown {
+            next_action: "upgrade Tiber before continuing".to_owned(),
+        },
+    }
 }
 
 /// Builds stable first-turn identities so an unchanged start can be reconciled.
@@ -910,20 +1415,76 @@ impl SessionStartupError {
     clippy::question_mark_used,
     reason = "the imperative terminal shell propagates sanitized I/O failures to one owner-facing boundary"
 )]
+fn run_tui_loop(
+    repository: &Path,
+    process_catalog: Option<&ConfiguredCommandCatalog>,
+    terminal: &mut ratatui::DefaultTerminal,
+    worker: &mut InferenceWorker,
+    projection: &mut ConversationProjection,
+) -> Result<(), TuiRunError> {
+    let mut active_process = None;
+    let result = drive_tui_loop(
+        repository,
+        process_catalog,
+        terminal,
+        worker,
+        projection,
+        &mut active_process,
+    );
+    if let Some(process) = active_process.take() {
+        let terminal_result = process.cancel_and_finish();
+        let completion = worker.complete_tiber_effect(terminal_result);
+        if result.is_ok() {
+            completion?;
+        }
+    }
+    result
+}
+
+/// Runs the terminal event cycle under the configured-process lifetime owner.
 #[expect(
     clippy::too_many_lines,
     reason = "this imperative CLI boundary keeps the closed typed lifecycle projection and owner-facing control flow explicit"
 )]
-fn run_tui_loop(
+fn drive_tui_loop(
     repository: &Path,
+    process_catalog: Option<&ConfiguredCommandCatalog>,
     terminal: &mut ratatui::DefaultTerminal,
     worker: &mut InferenceWorker,
     projection: &mut ConversationProjection,
+    active_process: &mut Option<ActiveConfiguredProcess>,
 ) -> Result<(), TuiRunError> {
     let mut dirty = true;
     let mut pending_repository_change = None;
     let mut repository_proposal_admitted = false;
     loop {
+        if cfg!(debug_assertions)
+            && active_process.is_some()
+            && env::var_os("TIBER_TEST_TUI_ERROR_SENTINEL")
+                .is_some_and(|path| Path::new(&path).is_file())
+        {
+            return Err(TuiRunError::Terminal(std::io::Error::other(
+                "injected terminal failure while configured process is active",
+            )));
+        }
+        if let Some(running_process) = active_process.as_ref() {
+            match running_process.result.try_recv() {
+                Ok(result) => {
+                    let completed_process =
+                        active_process.take().ok_or(TuiRunError::WorkerStopped)?;
+                    if let Some(command) = completed_process.command() {
+                        projection.apply(ProjectionEvent::ConfiguredCommandFinished {
+                            command: command.to_owned(),
+                            status: configured_process_status(&result),
+                        });
+                        dirty = true;
+                    }
+                    worker.complete_tiber_effect(completed_process.finish(result))?;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => return Err(TuiRunError::WorkerStopped),
+            }
+        }
         for _observation in 0..MAX_OBSERVATIONS_PER_FRAME {
             match worker.observations.try_recv() {
                 Ok(WorkerObservation::Projection(observation)) => {
@@ -942,9 +1503,17 @@ fn run_tui_loop(
                 Ok(WorkerObservation::RepositoryProposal {
                     expected,
                     path,
+                    request,
                     replacement,
                 }) => {
-                    if !repository_proposal_admitted {
+                    if repository_proposal_admitted {
+                        worker.complete_repository_proposal(TiberEffectResult::Failure {
+                            code: "repository_proposal_already_pending".to_owned(),
+                            message: "another repository proposal already awaits an owner decision"
+                                .to_owned(),
+                            retryable: false,
+                        })?;
+                    } else {
                         let (pending, diff) = publish_repository_proposal(
                             repository,
                             &path,
@@ -952,9 +1521,38 @@ fn run_tui_loop(
                             &replacement,
                         )?;
                         projection.apply(ProjectionEvent::RepositoryChangeProposed { diff, path });
-                        pending_repository_change = Some(pending);
+                        pending_repository_change = Some(PendingRepositoryConversation {
+                            change: pending,
+                            request,
+                        });
                         repository_proposal_admitted = true;
                         dirty = true;
+                    }
+                }
+                Ok(WorkerObservation::TiberEffectRequested(request)) => {
+                    if pending_repository_change.is_some() {
+                        worker.complete_tiber_effect(process_terminal_failure(
+                            "repository_proposal_pending",
+                            "a configured command cannot start while a repository owner decision is pending",
+                        ))?;
+                    } else if active_process.is_some() {
+                        worker.complete_tiber_effect(process_terminal_failure(
+                            "process_already_active",
+                            "another configured command is already active",
+                        ))?;
+                    } else {
+                        let process = ActiveConfiguredProcess::start(
+                            repository.to_path_buf(),
+                            process_catalog.cloned(),
+                            request,
+                        );
+                        if let Some(command) = process.command() {
+                            projection.apply(ProjectionEvent::ConfiguredCommandActive {
+                                command: command.to_owned(),
+                            });
+                            dirty = true;
+                        }
+                        *active_process = Some(process);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -979,6 +1577,14 @@ fn run_tui_loop(
         match projection.handle_key(key) {
             ComposerIntent::None => {}
             ComposerIntent::Quit => {
+                if let Some(process) = active_process.take() {
+                    process.cancellation.cancel();
+                    let result = process
+                        .result
+                        .recv()
+                        .map_err(|_error| TuiRunError::WorkerStopped)?;
+                    worker.complete_tiber_effect(process.finish(result))?;
+                }
                 worker.cancellation.cancel();
                 return Ok(());
             }
@@ -986,14 +1592,27 @@ fn run_tui_loop(
                 let Some(pending) = pending_repository_change.take() else {
                     continue;
                 };
-                let path = pending.path.as_str().to_owned();
-                match publish_approved_repository_change(repository, pending)? {
+                let path = pending.change.path.as_str().to_owned();
+                match publish_approved_repository_change(repository, pending.change)? {
                     RepositoryApprovalResult::Applied => {
+                        worker.complete_repository_proposal(TiberEffectResult::Success {
+                            output: serde_json::json!({
+                                "path": &path,
+                                "status": "applied"
+                            })
+                            .to_string(),
+                        })?;
                         projection.apply(ProjectionEvent::RepositoryChangeApplied { path });
                     }
-                    RepositoryApprovalResult::Reproposed { diff, pending } => {
+                    RepositoryApprovalResult::Reproposed {
+                        diff,
+                        pending: change,
+                    } => {
                         projection.apply(ProjectionEvent::RepositoryChangeProposed { diff, path });
-                        pending_repository_change = Some(pending);
+                        pending_repository_change = Some(PendingRepositoryConversation {
+                            change,
+                            request: pending.request,
+                        });
                     }
                 }
             }
@@ -1001,17 +1620,41 @@ fn run_tui_loop(
                 let Some(pending) = pending_repository_change.take() else {
                     continue;
                 };
-                let path = pending.path.as_str().to_owned();
-                publish_denied_repository_change(repository, pending)?;
+                let path = pending.change.path.as_str().to_owned();
+                publish_denied_repository_change(repository, pending.change)?;
                 projection.apply(ProjectionEvent::RepositoryChangeDenied { path });
+                worker.complete_repository_proposal(TiberEffectResult::Failure {
+                    code: "repository_proposal_denied".to_owned(),
+                    message: "the owner denied the repository proposal".to_owned(),
+                    retryable: false,
+                })?;
             }
             ComposerIntent::Cancel => {
                 let Some(pending) = pending_repository_change.take() else {
                     continue;
                 };
-                let path = pending.path.as_str().to_owned();
-                publish_cancelled_repository_change(repository, pending)?;
+                let path = pending.change.path.as_str().to_owned();
+                publish_cancelled_repository_change(repository, pending.change)?;
                 projection.apply(ProjectionEvent::RepositoryChangeCancelled { path });
+                worker.complete_repository_proposal(TiberEffectResult::Failure {
+                    code: "repository_proposal_cancelled".to_owned(),
+                    message: "the owner cancelled the repository proposal".to_owned(),
+                    retryable: false,
+                })?;
+            }
+            ComposerIntent::CancelConfiguredCommand => {
+                let Some(process) = active_process.take() else {
+                    continue;
+                };
+                let command = process.command().map(str::to_owned);
+                let result = process.cancel_and_finish();
+                if let Some(command) = command {
+                    projection.apply(ProjectionEvent::ConfiguredCommandFinished {
+                        command,
+                        status: configured_process_status(&result),
+                    });
+                }
+                worker.complete_tiber_effect(result)?;
             }
             ComposerIntent::Submit(prompt) => {
                 publish_prompt_request(repository, &prompt)
@@ -1060,6 +1703,11 @@ fn publish_prompt_request(repository: &Path, prompt: &str) -> Result<(), PromptP
             .find_map(|event| match event.fact() {
                 tiber_workflow_service::WorkflowFact::WorkflowCompleted { successor, .. } => {
                     Some(successor.initial_effect().clone())
+                }
+                tiber_workflow_service::WorkflowFact::WorkflowStopped { state, .. } => {
+                    continue_after_interruption(state)
+                        .ok()
+                        .map(|successor| successor.initial_effect().clone())
                 }
                 _ => None,
             })
@@ -1484,6 +2132,9 @@ fn recoverable_repository_effect(
         .iter()
         .filter_map(|event| match event.fact() {
             SessionFact::InferenceObserved { effect_id, .. } => Some(effect_id.as_str()),
+            SessionFact::InferenceInterrupted { observation } => {
+                Some(observation.effect_id().as_str())
+            }
             _ => None,
         })
         .collect::<HashSet<_>>();
@@ -1920,6 +2571,79 @@ enum TuiRunError {
     Assistant(#[from] AssistantTextError),
 }
 
+#[derive(Debug, thiserror::Error)]
+/// Typed failures from interpreting one configured process effect.
+enum ProcessEffectError {
+    /// Model arguments did not match the exact closed request shape.
+    #[error("configured process request is malformed")]
+    InvalidRequest,
+    /// No trusted configured-command document exists.
+    #[error("no configured command catalog is available")]
+    MissingCatalog,
+    /// A future adapter outcome is unsupported by this shell.
+    #[error("process adapter returned an unsupported outcome")]
+    UnsupportedOutcome,
+    /// Local process state or helper resolution failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// The signed Git store could not be opened.
+    #[error(transparent)]
+    Store(#[from] GitStoreError),
+    /// Verified process history could not be selected.
+    #[error(transparent)]
+    History(#[from] tiber_store_git::ProcessHistoryError),
+    /// Signed publication failed.
+    #[error(transparent)]
+    Publication(#[from] TiberPublicationError),
+    /// Modeled process authority rejected the transition.
+    #[error(transparent)]
+    Service(#[from] ProcessServiceError),
+    /// Modeled session authority rejected interrupted-turn closure.
+    #[error(transparent)]
+    Session(#[from] SessionServiceError),
+    /// Verified session or workflow history could not be read.
+    #[error(transparent)]
+    Query(#[from] SessionQueryError),
+    /// Pure workflow identity or transition construction failed.
+    #[error(transparent)]
+    Harness(#[from] HarnessError),
+    /// Modeled workflow authority rejected interrupted-turn closure.
+    #[error(transparent)]
+    Workflow(#[from] WorkflowServiceError),
+    /// Fixed Linux adapter configuration was invalid.
+    #[error(transparent)]
+    LinuxConfiguration(#[from] tiber_process_linux::LinuxProcessConfigurationError),
+    /// Linux dispatch failed before producing a modeled outcome.
+    #[error(transparent)]
+    Linux(#[from] tiber_process_linux::LinuxProcessError),
+}
+
+impl ProcessEffectError {
+    /// Returns a stable bounded machine code for the model-facing failure.
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "the code mapper borrows typed process failures without consuming their causes"
+    )]
+    const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "process_request_invalid",
+            Self::MissingCatalog => "process_configuration_unavailable",
+            Self::UnsupportedOutcome => "process_outcome_unsupported",
+            Self::Io(_) => "process_io_failed",
+            Self::Store(_) | Self::History(_) | Self::Publication(_) => {
+                "process_publication_failed"
+            }
+            Self::Service(error) => error.code(),
+            Self::Session(error) => error.code(),
+            Self::Query(error) => error.code(),
+            Self::Harness(error) => error.code(),
+            Self::Workflow(error) => error.code(),
+            Self::LinuxConfiguration(_) => "process_adapter_configuration_invalid",
+            Self::Linux(error) => error.code(),
+        }
+    }
+}
+
 impl TuiRunError {
     /// Returns the stable owner-facing failure code.
     #[expect(
@@ -1956,6 +2680,140 @@ struct PendingRepositoryChange {
     stream: RepositoryMutationStream,
 }
 
+/// One repository mutation and its exact pending model-call correlation.
+struct PendingRepositoryConversation {
+    /// Durable repository mutation awaiting the owner decision.
+    change: PendingRepositoryChange,
+    /// Exact app-server request to complete after that decision is durable.
+    request: PendingRepositoryProposal,
+}
+
+/// One configured process running outside the terminal input loop.
+struct ActiveConfiguredProcess {
+    /// Sanitized semantic identity safe for owner-facing projection.
+    command: Option<String>,
+    /// Cooperative owner cancellation observed by the Linux adapter.
+    cancellation: ProcessCancellation,
+    /// Bounded one-shot terminal result.
+    result: Receiver<TiberEffectResult>,
+    /// Execution lifecycle handle joined after its result is received.
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ActiveConfiguredProcess {
+    /// Starts one exact correlated process effect without blocking terminal input.
+    fn start(
+        repository: PathBuf,
+        catalog: Option<ConfiguredCommandCatalog>,
+        request: PendingTiberEffect,
+    ) -> Self {
+        let command = configured_command_identity(&request);
+        let cancellation = ProcessCancellation::default();
+        let execution_cancellation = cancellation.clone();
+        let (sender, result) = mpsc::sync_channel(1);
+        let thread = thread::spawn(move || {
+            let outcome = execute_configured_process(
+                &repository,
+                catalog.as_ref(),
+                &request,
+                &execution_cancellation,
+            );
+            let _sent = sender.send(outcome);
+        });
+        Self {
+            command,
+            cancellation,
+            result,
+            thread: Some(thread),
+        }
+    }
+
+    /// Returns the semantic command identity safe for owner-facing projection.
+    fn command(&self) -> Option<&str> {
+        self.command.as_deref()
+    }
+
+    /// Joins completed execution and returns its exact terminal result.
+    fn finish(mut self, result: TiberEffectResult) -> TiberEffectResult {
+        if let Some(thread) = self.thread.take() {
+            let _joined = thread.join();
+        }
+        result
+    }
+
+    /// Cancels unfinished execution, drains its terminal channel, and joins its owner thread.
+    fn cancel_and_finish(mut self) -> TiberEffectResult {
+        self.cancellation.cancel();
+        let result = self.result.recv().unwrap_or_else(|_error| {
+            process_terminal_failure(
+                "process_execution_stopped",
+                "configured command execution stopped before returning a result",
+            )
+        });
+        if let Some(thread) = self.thread.take() {
+            let _joined = thread.join();
+        }
+        result
+    }
+}
+
+impl Drop for ActiveConfiguredProcess {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        let _result = self.result.recv();
+        if let Some(thread) = self.thread.take() {
+            let _joined = thread.join();
+        }
+    }
+}
+
+/// Parses only the bounded semantic command identity safe for owner-facing projection.
+fn configured_command_identity(pending: &PendingTiberEffect) -> Option<String> {
+    pending
+        .arguments()
+        .as_object()
+        .filter(|arguments| {
+            arguments.len() == 2
+                && arguments
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("run_configured_command")
+        })
+        .and_then(|arguments| arguments.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|command| ConfiguredCommandId::parse(command).ok())
+        .map(|command| command.as_str().to_owned())
+}
+
+/// Returns one sanitized terminal status without exposing process configuration or output.
+#[expect(
+    clippy::pattern_type_mismatch,
+    reason = "the status projection borrows a closed effect result so the caller can still return that exact result to the app-server"
+)]
+fn configured_process_status(result: &TiberEffectResult) -> String {
+    match result {
+        TiberEffectResult::Success { output } => serde_json::from_str::<serde_json::Value>(output)
+            .ok()
+            .and_then(|parsed| {
+                parsed
+                    .pointer("/status/exit_code")
+                    .and_then(serde_json::Value::as_i64)
+            })
+            .filter(|exit_code| *exit_code != 0)
+            .map_or_else(
+                || "completed".to_owned(),
+                |exit_code| format!("failed (exit status {exit_code})"),
+            ),
+        TiberEffectResult::Failure { code, .. } if code == "process_cancelled" => {
+            "cancelled".to_owned()
+        }
+        TiberEffectResult::Failure { code, .. } if code == "process_timed_out" => {
+            "timed out".to_owned()
+        }
+        TiberEffectResult::Failure { .. } => "failed".to_owned(),
+    }
+}
+
 /// Outcome of one explicit repository approval attempt.
 #[expect(
     clippy::large_enum_variant,
@@ -1973,6 +2831,368 @@ enum RepositoryApprovalResult {
     },
 }
 
+/// Converts one closed pending effect into an exact bounded app-server result.
+fn execute_configured_process(
+    repository: &Path,
+    catalog: Option<&ConfiguredCommandCatalog>,
+    pending: &PendingTiberEffect,
+    cancellation: &ProcessCancellation,
+) -> TiberEffectResult {
+    match try_execute_configured_process(repository, catalog, pending, cancellation) {
+        Ok(result) => result,
+        Err(error) => TiberEffectResult::Failure {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+            retryable: false,
+        },
+    }
+}
+
+/// Runs signed preparation, authorization, dispatch, and terminal publication in order.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one imperative process shell visibly orders signed preparation, authority, dispatch, and terminal publication"
+)]
+fn try_execute_configured_process(
+    repository: &Path,
+    catalog: Option<&ConfiguredCommandCatalog>,
+    pending: &PendingTiberEffect,
+    cancellation: &ProcessCancellation,
+) -> Result<TiberEffectResult, ProcessEffectError> {
+    let catalog = catalog.ok_or(ProcessEffectError::MissingCatalog)?;
+    let arguments = pending
+        .arguments()
+        .as_object()
+        .ok_or(ProcessEffectError::InvalidRequest)?;
+    if arguments.len() != 2
+        || arguments
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            != Some("run_configured_command")
+    {
+        return Err(ProcessEffectError::InvalidRequest);
+    }
+    let command_id = arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ProcessEffectError::InvalidRequest)
+        .and_then(|value| {
+            ConfiguredCommandId::parse(value).map_err(|_error| ProcessEffectError::InvalidRequest)
+        })?;
+    let store = TiberEventStore::open(repository)?;
+    let effect =
+        active_inference_effect(&store).map_err(|_error| ProcessEffectError::InvalidRequest)?;
+    let provenance = AssignmentWorkflowProvenance::new(
+        effect.workflow_id().clone(),
+        effect.assignment_id().clone(),
+        effect.effect_id().clone(),
+    );
+    let invocation = match pending.request_id().clone() {
+        TiberEffectRequestId::Number(value) => format!("json-number:{value}"),
+        TiberEffectRequestId::String(value) => format!("json-string:{value}"),
+    };
+    let request = ProcessRequest::for_invocation(
+        command_id,
+        ProcessInvocationId::parse(&invocation)
+            .map_err(|_error| ProcessEffectError::InvalidRequest)?,
+        provenance,
+    );
+    let stream = ProcessStream::for_request(&request)?;
+    admit_process_invocation(effect.effect_id(), store.stream_ids(), &stream)?;
+    let history = store.read_process_history(&stream)?;
+    let request_publication =
+        decide_process_request(history.events(), stream.clone(), request.clone(), catalog)?;
+    if let Some(result) = retained_process_result(history.events()) {
+        retire_closed_process_artifacts(repository, &stream)?;
+        return Ok(result);
+    }
+    if let Some(identity) = retained_prepared_identity(history.events()) {
+        let unknown = decide_record_process_unknown(
+            history.events(),
+            stream.clone(),
+            ProcessUnknown::new(identity),
+        )?;
+        let runtime = RuntimeBuilder::new_current_thread().build()?;
+        let mut publisher = TiberEventPublisher::open_at(repository, history.revision())?;
+        let _unknown_revision = runtime.block_on(publisher.publish_process(&stream, unknown))?;
+        return Ok(process_terminal_failure(
+            "process_outcome_unknown",
+            "configured command outcome is unknown after restart",
+        ));
+    }
+    if !history.events().is_empty() {
+        return Err(ProcessEffectError::Service(
+            ProcessServiceError::InvalidHistory,
+        ));
+    }
+    let runtime = RuntimeBuilder::new_current_thread().build()?;
+    if let Err(refusal) = catalog.resolve(request.command_id()) {
+        let mut refusal_publisher = TiberEventPublisher::open_at(repository, history.revision())?;
+        let _refused_revision =
+            runtime.block_on(refusal_publisher.publish_process(&stream, request_publication))?;
+        return Ok(process_terminal_failure(
+            refusal.code(),
+            "configured command is not present in trusted configuration",
+        ));
+    }
+    let adapter_config = process_adapter_config(repository)?;
+    let mut preparation_publisher = TiberEventPublisher::open_at(repository, history.revision())?;
+    let _prepared_revision =
+        runtime.block_on(preparation_publisher.publish_process(&stream, request_publication))?;
+
+    let prepared_store = TiberEventStore::open(repository)?;
+    let prepared_history = prepared_store.read_process_history(&stream)?;
+    let authority =
+        authorize_prepared_process(prepared_history.events(), &stream, &request, catalog)?;
+    let adapter = LinuxProcessAdapter::new(adapter_config);
+    let outcome = adapter.execute(authority, cancellation)?;
+    if cfg!(debug_assertions)
+        && let Some(sentinel) = env::var_os("TIBER_TEST_CRASH_AFTER_PROCESS_DISPATCH_SENTINEL")
+    {
+        fs::write(sentinel, b"dispatched\n")?;
+        process::exit(87);
+    }
+    let terminal_store = TiberEventStore::open(repository)?;
+    let terminal_history = terminal_store.read_process_history(&stream)?;
+    let (terminal_publication, result) = match outcome {
+        ProcessDispatchOutcome::Completed(completed) => {
+            let status = completed.status();
+            let stdout = completed.stdout().as_bytes();
+            let stderr = completed.stderr().as_bytes();
+            let ProcessExitStatus::Exited(code) = status else {
+                return Err(ProcessEffectError::UnsupportedOutcome);
+            };
+            let output = render_completed_process_result(code, stdout, stderr);
+            let completed_publication = decide_record_completed(
+                terminal_history.events(),
+                stream.clone(),
+                completed.into_receipt()?,
+            )?;
+            (completed_publication, TiberEffectResult::Success { output })
+        }
+        ProcessDispatchOutcome::SpawnFailed(failure) => (
+            decide_record_spawn_failed(terminal_history.events(), stream.clone(), failure)?,
+            process_terminal_failure("process_spawn_failed", "configured command could not start"),
+        ),
+        ProcessDispatchOutcome::TimedOut(timed_out) => (
+            decide_record_timed_out(terminal_history.events(), stream.clone(), timed_out)?,
+            process_terminal_failure("process_timed_out", "configured command timed out"),
+        ),
+        ProcessDispatchOutcome::Cancelled(cancelled) => (
+            decide_record_cancelled(terminal_history.events(), stream.clone(), cancelled)?,
+            process_terminal_failure("process_cancelled", "configured command was cancelled"),
+        ),
+        ProcessDispatchOutcome::OutcomeUnknown(unknown) => (
+            decide_record_process_unknown(terminal_history.events(), stream.clone(), unknown)?,
+            process_terminal_failure(
+                "process_outcome_unknown",
+                "configured command outcome is unknown",
+            ),
+        ),
+        ProcessDispatchOutcome::OutputLimitExceeded(unknown) => (
+            decide_record_process_unknown(terminal_history.events(), stream.clone(), unknown)?,
+            process_terminal_failure(
+                "process_linux_output_limit_exceeded",
+                "configured command exceeded its output bound",
+            ),
+        ),
+        _ => return Err(ProcessEffectError::UnsupportedOutcome),
+    };
+    let mut terminal_publisher =
+        TiberEventPublisher::open_at(repository, terminal_history.revision())?;
+    let _terminal_revision =
+        runtime.block_on(terminal_publisher.publish_process(&stream, terminal_publication))?;
+    if cfg!(debug_assertions)
+        && let Some(sentinel) =
+            env::var_os("TIBER_TEST_CRASH_AFTER_PROCESS_TERMINAL_PUBLICATION_SENTINEL")
+    {
+        fs::write(sentinel, b"published\n")?;
+        process::exit(88);
+    }
+    retire_closed_process_artifacts(repository, &stream)?;
+    Ok(result)
+}
+
+/// Selects exact retained preparation only from atomic requested/prepared history.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "future process facts cannot be treated as redispatchable preparation"
+)]
+fn retained_prepared_identity(
+    events: &[tiber_process_service::ProcessEvent],
+) -> Option<PreparedProcessIdentity> {
+    if events.len() != 2 {
+        return None;
+    }
+    match events.get(1)?.fact().clone() {
+        ProcessFact::Prepared(identity) => Some(identity),
+        _ => None,
+    }
+}
+
+/// Projects terminal retained history without minting new dispatch authority.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "future retained facts fail closed to no redispatch until the CLI interprets them explicitly"
+)]
+fn retained_process_result(
+    events: &[tiber_process_service::ProcessEvent],
+) -> Option<TiberEffectResult> {
+    match events.last()?.fact().clone() {
+        ProcessFact::Completed(_) => Some(TiberEffectResult::Success {
+            output: "configured command already completed".to_owned(),
+        }),
+        ProcessFact::Refused { code, .. } => Some(process_terminal_failure(
+            code.code(),
+            "configured command is not present in trusted configuration",
+        )),
+        ProcessFact::SpawnFailed(_) => Some(process_terminal_failure(
+            "process_spawn_failed",
+            "configured command previously failed to start",
+        )),
+        ProcessFact::TimedOut(_) => Some(process_terminal_failure(
+            "process_timed_out",
+            "configured command previously timed out",
+        )),
+        ProcessFact::Cancelled(_) => Some(process_terminal_failure(
+            "process_cancelled",
+            "configured command was previously cancelled",
+        )),
+        ProcessFact::Unknown(_) => Some(process_terminal_failure(
+            "process_outcome_unknown",
+            "configured command outcome remains unknown",
+        )),
+        ProcessFact::Reconciled(_) => Some(process_terminal_failure(
+            "process_outcome_reconciled",
+            "configured command outcome was reconciled without redispatch",
+        )),
+        _ => None,
+    }
+}
+
+/// Builds one bounded non-retryable process terminal failure.
+fn process_terminal_failure(code: &str, message: &str) -> TiberEffectResult {
+    TiberEffectResult::Failure {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        retryable: false,
+    }
+}
+
+/// Renders bounded command output inside the app-server's exact completion envelope.
+fn render_completed_process_result(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> String {
+    let empty = serde_json::json!({
+        "status": { "exit_code": exit_code },
+        "stdout": "",
+        "stdout_truncated": false,
+        "stderr": "",
+        "stderr_truncated": false,
+    })
+    .to_string();
+    let available = MAX_TIBER_EFFECT_RESULT_BYTES.saturating_sub(empty.len());
+    let stdout_budget = available.checked_shr(1).unwrap_or_default();
+    let stderr_budget = available.saturating_sub(stdout_budget);
+    let (stdout, stdout_truncated) = bounded_json_text(stdout, stdout_budget);
+    let (stderr, stderr_truncated) = bounded_json_text(stderr, stderr_budget);
+    let output = serde_json::json!({
+        "status": { "exit_code": exit_code },
+        "stdout": stdout,
+        "stdout_truncated": stdout_truncated,
+        "stderr": stderr,
+        "stderr_truncated": stderr_truncated,
+    })
+    .to_string();
+    if output.len() <= MAX_TIBER_EFFECT_RESULT_BYTES {
+        output
+    } else {
+        empty
+    }
+}
+
+/// Retains as many sanitized characters as fit their encoded JSON-string budget.
+fn bounded_json_text(bytes: &[u8], encoded_budget: usize) -> (String, bool) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut output = String::new();
+    let mut encoded_bytes: usize = 0;
+    let mut truncated = false;
+    for character in text.chars() {
+        let sanitized = if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
+            '\u{fffd}'
+        } else {
+            character
+        };
+        let cost = match sanitized {
+            '"' | '\\' | '\n' | '\r' | '\t' => 2,
+            _ => sanitized.len_utf8(),
+        };
+        if encoded_bytes.saturating_add(cost) > encoded_budget {
+            truncated = true;
+            break;
+        }
+        output.push(sanitized);
+        encoded_bytes = encoded_bytes.saturating_add(cost);
+    }
+    (output, truncated)
+}
+
+/// Resolves fixed package helpers and one private repository-scoped process state root.
+fn process_adapter_config(
+    repository: &Path,
+) -> Result<LinuxProcessAdapterConfig, ProcessEffectError> {
+    let repository_root = repository.canonicalize()?;
+    let executable = env::current_exe()?;
+    let helper_directory = executable.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "helper directory unavailable")
+    })?;
+    let sibling_bubblewrap = helper_directory.join("bwrap");
+    let bubblewrap = if sibling_bubblewrap.is_file() {
+        sibling_bubblewrap
+    } else {
+        resolve_executable("bwrap").ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "bubblewrap unavailable")
+        })?
+    };
+    let installed_launcher = helper_directory.join("tiber-process-launcher");
+    let configured_launcher = if cfg!(debug_assertions) {
+        env::var_os("TIBER_TEST_PROCESS_LAUNCHER").map(PathBuf::from)
+    } else {
+        None
+    };
+    let (launcher, launcher_arguments) = configured_launcher.map_or_else(
+        || {
+            if installed_launcher.is_file() {
+                (installed_launcher, Vec::new())
+            } else {
+                (
+                    executable,
+                    vec![std::ffi::OsString::from("__tiber-process-launcher")],
+                )
+            }
+        },
+        |launcher| (launcher, Vec::new()),
+    );
+    let state_base = env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "state home unavailable")
+        })?;
+    let repository_digest = Sha256Digest::of(repository_root.as_os_str().as_encoded_bytes());
+    let state_root = state_base
+        .join("tiber/process")
+        .join(repository_digest.as_hex());
+    fs::create_dir_all(&state_root)?;
+    fs::set_permissions(&state_root, fs::Permissions::from_mode(0o700))?;
+    Ok(LinuxProcessAdapterConfig::new(
+        repository_root,
+        state_root,
+        bubblewrap,
+        launcher,
+        MAX_TIMEOUT,
+    )?
+    .with_launcher_arguments(launcher_arguments))
+}
+
 /// Commands accepted by the inference-owning imperative worker.
 enum InferenceCommand {
     /// Start one owner-submitted turn.
@@ -1987,6 +3207,10 @@ struct InferenceWorker {
     commands: SyncSender<InferenceCommand>,
     /// Presentation-only observations returned by the adapter owner.
     observations: Receiver<WorkerObservation>,
+    /// Main-thread results returned to the app-server-owning worker.
+    effect_results: SyncSender<TiberEffectResult>,
+    /// Owner decisions returned for the exact pending repository proposal.
+    repository_results: SyncSender<Option<TiberEffectResult>>,
     /// Cooperative cancellation observed during bounded protocol waits.
     cancellation: OperationCancellation,
     /// Worker lifecycle handle.
@@ -2010,9 +3234,13 @@ enum WorkerObservation {
         expected: Vec<u8>,
         /// Root-relative repository path selected by the proposal.
         path: String,
+        /// Exact app-server proposal correlation awaiting owner completion.
+        request: PendingRepositoryProposal,
         /// Exact replacement bytes proposed for the target.
         replacement: Vec<u8>,
     },
+    /// One declared Tiber effect awaiting policy-owned execution on the main thread.
+    TiberEffectRequested(PendingTiberEffect),
 }
 
 impl InferenceWorker {
@@ -2026,6 +3254,8 @@ impl InferenceWorker {
         let worker_cancellation = cancellation.clone();
         let (command_sender, command_receiver) = mpsc::sync_channel(1);
         let (observation_sender, observations) = mpsc::sync_channel(32);
+        let (effect_result_sender, effect_result_receiver) = mpsc::sync_channel(1);
+        let (repository_result_sender, repository_result_receiver) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
             while let Ok(command) = command_receiver.recv() {
                 let InferenceCommand::Submit(prompt) = command else {
@@ -2050,7 +3280,32 @@ impl InferenceWorker {
                     }
                 };
                 let mut assistant = String::new();
+                let mut pending_repository_request = None;
                 loop {
+                    if let Some(request) = pending_repository_request.as_ref() {
+                        match repository_result_receiver.try_recv() {
+                            Ok(Some(result)) => {
+                                if let Err(error) =
+                                    client.complete_repository_proposal(&turn, request, result)
+                                {
+                                    let _sent = send_observation(
+                                        &observation_sender,
+                                        &worker_cancellation,
+                                        WorkerObservation::Projection(
+                                            ProjectionEvent::ReconciliationRequired {
+                                                code: error.code().to_owned(),
+                                                message: error.to_string(),
+                                            },
+                                        ),
+                                    );
+                                    break;
+                                }
+                                pending_repository_request = None;
+                            }
+                            Ok(None) | Err(TryRecvError::Disconnected) => break,
+                            Err(TryRecvError::Empty) => {}
+                        }
+                    }
                     let (observation, terminal) = match client
                         .poll_turn_event(&turn, TUI_POLL_INTERVAL)
                     {
@@ -2088,51 +3343,142 @@ impl InferenceWorker {
                                 false,
                             )
                         }
-                        Ok(Some(TurnEvent::InertToolRequested(request))) => {
-                            let repository_proposal = (request.tool
-                                == TIBER_REPOSITORY_PROPOSAL_TOOL_NAME
-                                && request
-                                    .arguments
-                                    .get("action")
-                                    .and_then(|value| value.as_str())
-                                    == Some("write"))
-                            .then(|| {
-                                Some(WorkerObservation::RepositoryProposal {
-                                    expected: request
-                                        .arguments
-                                        .get("expected")?
-                                        .as_str()?
-                                        .as_bytes()
-                                        .to_vec(),
-                                    path: request.arguments.get("path")?.as_str()?.to_owned(),
-                                    replacement: request
-                                        .arguments
-                                        .get("replacement")?
-                                        .as_str()?
-                                        .as_bytes()
-                                        .to_vec(),
-                                })
-                            })
-                            .flatten();
-                            (
-                                repository_proposal.unwrap_or({
-                                    WorkerObservation::Projection(
-                                        ProjectionEvent::InertToolRequested {
-                                            arguments: request.arguments,
-                                            call_id: request.call_id,
-                                            tool: request.tool,
-                                        },
-                                    )
-                                }),
-                                false,
-                            )
-                        }
-                        Ok(Some(TurnEvent::Completed)) => (
-                            WorkerObservation::Completed {
-                                assistant: core::mem::take(&mut assistant),
-                            },
-                            true,
+                        Ok(Some(TurnEvent::InertToolRequested(request))) => (
+                            WorkerObservation::Projection(ProjectionEvent::InertToolRequested {
+                                arguments: request.arguments,
+                                call_id: request.call_id,
+                                tool: request.tool,
+                            }),
+                            false,
                         ),
+                        Ok(Some(TurnEvent::RepositoryProposalRequested(request))) => {
+                            let arguments = request.arguments();
+                            let proposal =
+                                (arguments.get("action").and_then(|value| value.as_str())
+                                    == Some("write"))
+                                .then(|| {
+                                    Some(WorkerObservation::RepositoryProposal {
+                                        expected: arguments
+                                            .get("expected")?
+                                            .as_str()?
+                                            .as_bytes()
+                                            .to_vec(),
+                                        path: arguments.get("path")?.as_str()?.to_owned(),
+                                        request: request.clone(),
+                                        replacement: arguments
+                                            .get("replacement")?
+                                            .as_str()?
+                                            .as_bytes()
+                                            .to_vec(),
+                                    })
+                                })
+                                .flatten();
+                            let Some(proposal) = proposal else {
+                                let error = TiberEffectResult::Failure {
+                                    code: "repository_proposal_invalid".to_owned(),
+                                    message: "repository proposal arguments are invalid".to_owned(),
+                                    retryable: false,
+                                };
+                                if let Err(error) =
+                                    client.complete_repository_proposal(&turn, &request, error)
+                                {
+                                    let _sent = send_observation(
+                                        &observation_sender,
+                                        &worker_cancellation,
+                                        WorkerObservation::Projection(
+                                            ProjectionEvent::ReconciliationRequired {
+                                                code: error.code().to_owned(),
+                                                message: error.to_string(),
+                                            },
+                                        ),
+                                    );
+                                    break;
+                                }
+                                continue;
+                            };
+                            if !send_observation(
+                                &observation_sender,
+                                &worker_cancellation,
+                                proposal,
+                            ) {
+                                break;
+                            }
+                            pending_repository_request = Some(request);
+                            continue;
+                        }
+                        Ok(Some(TurnEvent::TiberEffectRequested(request))) => {
+                            if !send_observation(
+                                &observation_sender,
+                                &worker_cancellation,
+                                WorkerObservation::TiberEffectRequested(request.clone()),
+                            ) {
+                                break;
+                            }
+                            let result = loop {
+                                if worker_cancellation.is_cancelled() {
+                                    break None;
+                                }
+                                match effect_result_receiver.recv_timeout(TUI_POLL_INTERVAL) {
+                                    Ok(result) => break Some(result),
+                                    Err(RecvTimeoutError::Timeout) => {}
+                                    Err(RecvTimeoutError::Disconnected) => break None,
+                                }
+                            };
+                            let Some(result) = result else {
+                                break;
+                            };
+                            let call_id = request.call_id().to_owned();
+                            match client.complete_tiber_effect(&turn, &request, &call_id, result) {
+                                Ok(()) => continue,
+                                Err(error) => (
+                                    WorkerObservation::Projection(
+                                        ProjectionEvent::ReconciliationRequired {
+                                            code: error.code().to_owned(),
+                                            message: error.to_string(),
+                                        },
+                                    ),
+                                    true,
+                                ),
+                            }
+                        }
+                        Ok(Some(TurnEvent::Completed)) => {
+                            let completed = WorkerObservation::Completed {
+                                assistant: core::mem::take(&mut assistant),
+                            };
+                            let Some(request) = pending_repository_request.take() else {
+                                let _sent = send_observation(
+                                    &observation_sender,
+                                    &worker_cancellation,
+                                    completed,
+                                );
+                                break;
+                            };
+                            if !send_observation(
+                                &observation_sender,
+                                &worker_cancellation,
+                                completed,
+                            ) {
+                                break;
+                            }
+                            let Ok(Some(result)) = repository_result_receiver.recv() else {
+                                break;
+                            };
+                            if let Err(error) =
+                                client.complete_repository_proposal(&turn, &request, result)
+                            {
+                                let _sent = send_observation(
+                                    &observation_sender,
+                                    &worker_cancellation,
+                                    WorkerObservation::Projection(
+                                        ProjectionEvent::ReconciliationRequired {
+                                            code: error.code().to_owned(),
+                                            message: error.to_string(),
+                                        },
+                                    ),
+                                );
+                            }
+                            break;
+                        }
                         Err(error) => (
                             WorkerObservation::Projection(
                                 ProjectionEvent::ReconciliationRequired {
@@ -2154,6 +3500,8 @@ impl InferenceWorker {
         Self {
             commands: command_sender,
             observations,
+            effect_results: effect_result_sender,
+            repository_results: repository_result_sender,
             cancellation,
             thread: Some(thread),
         }
@@ -2166,9 +3514,24 @@ impl InferenceWorker {
             .map_err(|_error| "inference worker stopped unexpectedly".to_owned())
     }
 
+    /// Returns one exact caller-owned result before protocol polling resumes.
+    fn complete_tiber_effect(&self, result: TiberEffectResult) -> Result<(), TuiRunError> {
+        self.effect_results
+            .send(result)
+            .map_err(|_error| TuiRunError::WorkerStopped)
+    }
+
+    /// Returns the owner decision for the exact pending repository proposal.
+    fn complete_repository_proposal(&self, result: TiberEffectResult) -> Result<(), TuiRunError> {
+        self.repository_results
+            .send(Some(result))
+            .map_err(|_error| TuiRunError::WorkerStopped)
+    }
+
     /// Cancels the current operation and joins the worker.
     fn stop(&mut self) {
         self.cancellation.cancel();
+        let _pending_repository_result = self.repository_results.try_send(None);
         let _ignored = self.commands.send(InferenceCommand::Stop);
         if let Some(thread) = self.thread.take() {
             let _join_result = thread.join();
@@ -2299,7 +3662,7 @@ fn run_conversation(arguments: impl Iterator<Item = std::ffi::OsString>) {
         usage();
         process::exit(2);
     }
-    let mut client = start_default_client();
+    let mut client = start_default_client(None);
     let result = client.converse(&prompt).unwrap_or_else(|error| {
         eprintln!("{}: {error}", error.code());
         process::exit(1);
@@ -2318,8 +3681,16 @@ fn run_conversation(arguments: impl Iterator<Item = std::ffi::OsString>) {
     reason = "startup failures are emitted as stable CLI diagnostics"
 )]
 /// Starts the default isolated app-server client.
-fn start_default_client() -> AppServerClient {
-    let config = default_app_server_config();
+fn start_default_client(process_catalog: Option<&ConfiguredCommandCatalog>) -> AppServerClient {
+    let mut config = default_app_server_config();
+    if let Some(catalog) = process_catalog {
+        config = config
+            .with_configured_command_ids(catalog.command_ids().cloned())
+            .unwrap_or_else(|error| {
+                eprintln!("{}: {error}", error.code());
+                process::exit(1);
+            });
+    }
     AppServerClient::start(config, ISOLATED_CONFIG).unwrap_or_else(|error| {
         eprintln!("{}: {error}", error.code());
         process::exit(1);
@@ -2436,6 +3807,32 @@ mod tests {
             rendered,
             "--- a/README.md\n+++ b/README.md\n-b\"same\\x0a\"\n-b\"old\\xff\\x0a\"\n-b\"no-newline\"\n+b\"same\\x0a\"\n+b\"new\\x1b[31m\\x0a\"\n+b\"no-newline\"\n"
         );
+    }
+
+    #[test]
+    fn configured_process_status_distinguishes_nonzero_exit_from_success() {
+        let zero = TiberEffectResult::Success {
+            output: render_completed_process_result(0, b"ok\n", b""),
+        };
+        let nonzero = TiberEffectResult::Success {
+            output: render_completed_process_result(23, b"", b"failed\n"),
+        };
+
+        assert_eq!(configured_process_status(&zero), "completed");
+        assert_eq!(
+            configured_process_status(&nonzero),
+            "failed (exit status 23)"
+        );
+        for (code, expected) in [
+            ("process_cancelled", "cancelled"),
+            ("process_timed_out", "timed out"),
+            ("process_outcome_unknown", "failed"),
+        ] {
+            assert_eq!(
+                configured_process_status(&process_terminal_failure(code, "sanitized")),
+                expected
+            );
+        }
     }
 
     /// Builds the deterministic fake app-server configuration used by the CLI shell.
@@ -2593,6 +3990,7 @@ mod tests {
                 expected,
                 path,
                 replacement,
+                ..
             }) if expected == b"before\n"
                 && path == "README.md"
                 && replacement == b"after\n"
@@ -2607,6 +4005,27 @@ mod tests {
             .submit("cancel the delayed start".to_owned())
             .expect("worker should accept one prompt");
         thread::sleep(Duration::from_millis(75));
+        let started = Instant::now();
+        worker.stop();
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn inference_worker_cancels_pending_tiber_effect_and_joins_promptly() {
+        let mut worker = InferenceWorker::start(fixture_client("process-success"));
+        worker
+            .submit("start the configured command".to_owned())
+            .expect("worker should accept one prompt");
+        loop {
+            let observation = worker
+                .observations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("worker observation should arrive");
+            if matches!(observation, WorkerObservation::TiberEffectRequested(_)) {
+                break;
+            }
+        }
+
         let started = Instant::now();
         worker.stop();
         assert!(started.elapsed() < Duration::from_millis(500));

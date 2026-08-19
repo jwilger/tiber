@@ -31,8 +31,9 @@ reconciliation, and terminal workflow outcome.
   provenance, trust labels, authoritative context construction, the bounded
   observation policy, and no-progress termination.
 - **Ports:** `InferenceGateway`, `MemoryBackend`, `TaskService`,
-  `WorkflowService`, `ExternalToolService`, `RepositoryService`, and future
-  `ProcessService`, `VerificationService`, and `DeliveryService` ports.
+  `WorkflowService`, `ExternalToolService`, `RepositoryService`,
+  `ProcessService`, and future `VerificationService` and `DeliveryService`
+  ports.
 - **Adapters:** Codex app-server inference, native Tiber Tasks, native
   development workflow, RMCP client, Hindsight HTTP, Git/forge, Linux
   isolation, and verification runners.
@@ -124,6 +125,36 @@ required before the core can mint opaque adapter authority. The shell executes
 that authority only through the fixed Bubblewrap repository worker. Stale
 preimages require a new signed proposal and approval; signed `Prepared` without
 a terminal fact permits one read-only reconciliation and never redispatch.
+
+Configured process execution is the second connected non-inference vertical
+slice. The trusted repository-owned `.tiber/commands.toml` is parsed once when
+the TUI starts and maps semantic command IDs to fixed absolute executables,
+literal argv, repository-relative working directories, cleared fixed
+environments, deadlines, and output bounds; network is always denied. The
+model requests only `run_configured_command` plus a command ID and never sees
+or supplies that execution plan. Each app-server invocation identity derives a
+distinct process stream under the active durable effect.
+
+Command-specific checked EventCore models own atomic `Requested`/`Prepared` or
+content-free `Refused` publication and the `Completed`, `SpawnFailed`,
+`TimedOut`, `Cancelled`, `Unknown`, and `Reconciled` lifecycle. Verified
+requested/prepared history and unchanged configuration are required before the
+core can mint opaque process authority. The Linux adapter executes it through
+a fixed Bubblewrap profile and a package-private direct-argv launcher. Raw
+bounded stdout and stderr are returned only as an ephemeral, sanitized tool
+result; durable signed facts and the private journal retain byte counts and
+digests, not output content. Retained preparation is never redispatched. At TUI
+startup the CLI automatically records `Unknown`, consumes the one-shot
+read-only reconciliation capability through the Linux adapter, publishes
+`Reconciled`, and projects `completed`, `not-completed`, or `still-unknown` to
+the public session. Once every process stream for the active effect is closed
+or reconciled, the CLI records a sanitized inference interruption, advances
+the enclosing workflow, and exposes its successor so a new prompt can proceed
+without replaying the interrupted inference. There is no explicit owner
+recovery command. The pass scans verified stream identities, then fails closed
+above 64 matching process streams for the active effect or four events in any
+selected process stream; unrelated historical streams do not consume that
+effect-scoped budget.
 
 ## Agent and context lifecycle
 
@@ -401,6 +432,16 @@ It enforces resource bounds, timeout, cancellation, and child cleanup, and
 returns typed non-durable outcomes. The v1 implementation targets only x86_64
 Linux. S3 adds durable receipt facts and recovery evidence, but does not claim
 durable working-tree filesystem state beyond those journal facts.
+
+Configured commands use a separate `tiber-process-linux` adapter. It accepts
+only opaque authority derived from signed process history and the startup
+catalog, clears the environment, and constructs a fixed network-denied
+Bubblewrap invocation around a private direct-argv launcher. The launcher
+handshake distinguishes a definitive pre-launch failure from an outcome that
+became uncertain after launch. Its private full-fsync journal is operational
+evidence, not business authority, and contains no raw stdout or stderr. The
+package installs the launcher and pinned Bubblewrap helper under `libexec`; it
+does not expose a second public command.
 
 ## Recovery, verification, and delivery
 
