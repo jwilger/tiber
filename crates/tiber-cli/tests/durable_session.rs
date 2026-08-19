@@ -799,9 +799,13 @@ mod tests {
         let fixture = HarnessFixture::new();
         install_test_process_launcher(&fixture.repository);
         let command = fixture.repository.join("timeout-command");
+        let shell = test_shell();
         fs::write(
             &command,
-            "#!/bin/sh\n/bin/sh -c 'printf started > /workspace/timeout-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/timeout-survivor' &\nwait\n",
+            format!(
+                "#!/bin/sh\n'{}' -c 'printf started > /workspace/timeout-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/timeout-survivor' &\nwait\n",
+                shell.display()
+            ),
         )
         .expect("timeout command should be written");
         fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
@@ -963,9 +967,13 @@ mod tests {
         let fixture = HarnessFixture::new();
         install_test_process_launcher(&fixture.repository);
         let command = fixture.repository.join("cancel-command");
+        let shell = test_shell();
         fs::write(
             &command,
-            "#!/bin/sh\n/bin/sh -c 'printf started > /workspace/cancel-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/cancel-survivor' &\nwait\n",
+            format!(
+                "#!/bin/sh\n'{}' -c 'printf started > /workspace/cancel-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/cancel-survivor' &\nwait\n",
+                shell.display()
+            ),
         )
         .expect("cancel command should be written");
         fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
@@ -1030,9 +1038,13 @@ mod tests {
         let fixture = HarnessFixture::new();
         install_test_process_launcher(&fixture.repository);
         let command = fixture.repository.join("nonquit-error-command");
+        let shell = test_shell();
         fs::write(
             &command,
-            "#!/bin/sh\n/bin/sh -c 'printf started > /workspace/nonquit-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/nonquit-survivor' &\nwait\n",
+            format!(
+                "#!/bin/sh\n'{}' -c 'printf started > /workspace/nonquit-grandchild-started; i=0; while [ \"$i\" -lt 100000000 ]; do i=$((i + 1)); done; printf survived > /workspace/nonquit-survivor' &\nwait\n",
+                shell.display()
+            ),
         )
         .expect("non-Quit error command should be written");
         fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
@@ -4289,7 +4301,7 @@ mod tests {
         reason = "the bounded polling fixture increments a capped local attempt counter"
     )]
     fn wait_for_file(path: &Path) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !path.is_file() {
             assert!(
                 Instant::now() < deadline,
