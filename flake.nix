@@ -122,6 +122,7 @@
           lefthook
           nodejs_22
           prettier
+          util-linux
           rust-analyzer
           rustc
           rustfmt

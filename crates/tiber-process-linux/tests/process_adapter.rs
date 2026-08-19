@@ -583,6 +583,25 @@ fn explicit_cancellation_kills_and_reaps_the_complete_process_tree() {
         heartbeat.exists(),
         "descendant should start before cancellation"
     );
+    let acknowledgment_started = std::time::Instant::now();
+    while !journal_artifacts(state.path()).iter().any(|artifact| {
+        artifact
+            .extension()
+            .is_some_and(|extension| extension == "launch")
+            && artifact.join("launched").exists()
+    }) && acknowledgment_started.elapsed() < Duration::from_secs(2)
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        journal_artifacts(state.path()).iter().any(|artifact| {
+            artifact
+                .extension()
+                .is_some_and(|extension| extension == "launch")
+                && artifact.join("launched").exists()
+        }),
+        "launcher should durably acknowledge the target before cancellation"
+    );
 
     cancellation.cancel();
     let outcome = handle
@@ -590,7 +609,10 @@ fn explicit_cancellation_kills_and_reaps_the_complete_process_tree() {
         .expect("adapter thread should not panic")
         .expect("cancellation should produce a definitive outcome");
 
-    assert!(matches!(outcome, ProcessDispatchOutcome::Cancelled(_)));
+    assert!(
+        matches!(outcome, ProcessDispatchOutcome::Cancelled(_)),
+        "expected cancellation, received {outcome:?}"
+    );
     let stopped_size = fs::metadata(&heartbeat).expect("heartbeat metadata").len();
     thread::sleep(Duration::from_millis(200));
     assert_eq!(
