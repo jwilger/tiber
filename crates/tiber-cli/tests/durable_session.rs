@@ -15,6 +15,7 @@ mod tests {
         os::unix::fs::{PermissionsExt as _, symlink},
         path::{Path, PathBuf},
         process::{Child, Command, Output, Stdio},
+        sync::{Mutex, MutexGuard, OnceLock},
         thread,
         time::{Duration, Instant},
     };
@@ -46,6 +47,7 @@ mod tests {
         reason = "fixture fields follow construction and cleanup flow rather than public API ordering"
     )]
     struct HarnessFixture {
+        _parallel_process_guard: MutexGuard<'static, ()>,
         _directory: TempDir,
         codex_directory: PathBuf,
         initialized: PathBuf,
@@ -98,6 +100,12 @@ mod tests {
             reason = "one bounded black-box fixture constructs the complete signed repository and fake provider"
         )]
         fn with_task(task_prefix: &str, start_task: bool) -> Self {
+            static FIXTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+            let parallel_process_guard = FIXTURE_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let directory = TempDir::new().expect("fixture directory should be created");
             let repository = directory.path().join("repository");
             let codex_directory = directory.path().join("bin");
@@ -194,6 +202,7 @@ mod tests {
                 .expect("fixture Codex wrapper should be executable");
 
             let mut fixture = Self {
+                _parallel_process_guard: parallel_process_guard,
                 _directory: directory,
                 codex_directory,
                 initialized,
