@@ -467,11 +467,13 @@ fn deadline_kills_and_reaps_the_complete_process_tree() {
         .expect("private state root permissions");
     let bubblewrap = executable_on_path("bwrap");
     let setsid = executable_on_path("setsid");
+    let shell = executable_on_path("sh");
     let sleep = executable_on_path("sleep");
     let heartbeat = repository.path().join("descendant-heartbeat");
     let command = format!(
-        "'{}' /bin/sh -c 'while :; do printf x >> /workspace/descendant-heartbeat; \"{}\" 0.02; done' & wait",
+        "'{}' '{}' -c 'while :; do printf x >> /workspace/descendant-heartbeat; \"{}\" 0.02; done' & wait",
         setsid.display(),
+        shell.display(),
         sleep.display()
     );
     let config = adapter_config(
@@ -482,7 +484,7 @@ fn deadline_kills_and_reaps_the_complete_process_tree() {
     )
     .expect("trusted adapter configuration");
     let (authority, mut history, stream) = fixture_preparation(
-        "/bin/sh",
+        shell.to_string_lossy().as_ref(),
         &["-c", &command],
         Duration::from_secs(1),
         1_000_000,
@@ -545,11 +547,13 @@ fn explicit_cancellation_kills_and_reaps_the_complete_process_tree() {
         .expect("private state root permissions");
     let bubblewrap = executable_on_path("bwrap");
     let setsid = executable_on_path("setsid");
+    let shell = executable_on_path("sh");
     let sleep = executable_on_path("sleep");
     let heartbeat = repository.path().join("cancel-heartbeat");
     let command = format!(
-        "'{}' /bin/sh -c 'while :; do printf x >> /workspace/cancel-heartbeat; \"{}\" 0.02; done' & wait",
+        "'{}' '{}' -c 'while :; do printf x >> /workspace/cancel-heartbeat; \"{}\" 0.02; done' & wait",
         setsid.display(),
+        shell.display(),
         sleep.display()
     );
     let config = adapter_config(
@@ -560,7 +564,7 @@ fn explicit_cancellation_kills_and_reaps_the_complete_process_tree() {
     )
     .expect("trusted adapter configuration");
     let authority = fixture_authority(
-        "/bin/sh",
+        shell.to_string_lossy().as_ref(),
         &["-c", &command],
         Duration::from_secs(10),
         1_000_000,
@@ -814,11 +818,13 @@ fn output_cap_kills_the_tree_and_returns_only_a_typed_bounded_failure() {
         .expect("private state root permissions");
     let bubblewrap = executable_on_path("bwrap");
     let setsid = executable_on_path("setsid");
+    let shell = executable_on_path("sh");
     let sleep = executable_on_path("sleep");
     let heartbeat = repository.path().join("bounded-heartbeat");
     let command = format!(
-        "'{}' /bin/sh -c 'while :; do printf x >> /workspace/bounded-heartbeat; \"{}\" 0.02; done' & \"{}\" 0.2; printf 0123456789; wait",
+        "'{}' '{}' -c 'while :; do printf x >> /workspace/bounded-heartbeat; \"{}\" 0.02; done' & \"{}\" 0.2; printf 0123456789; wait",
         setsid.display(),
+        shell.display(),
         sleep.display(),
         sleep.display()
     );
@@ -830,7 +836,7 @@ fn output_cap_kills_the_tree_and_returns_only_a_typed_bounded_failure() {
     )
     .expect("trusted adapter configuration");
     let authority = fixture_authority(
-        "/bin/sh",
+        shell.to_string_lossy().as_ref(),
         &["-c", &command],
         Duration::from_secs(4),
         4,
@@ -859,7 +865,7 @@ fn output_cap_kills_the_tree_and_returns_only_a_typed_bounded_failure() {
     );
     let replay = LinuxProcessAdapter::new(config).execute(
         fixture_authority(
-            "/bin/sh",
+            shell.to_string_lossy().as_ref(),
             &["-c", &command],
             Duration::from_secs(4),
             4,
