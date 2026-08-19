@@ -15,7 +15,6 @@ mod tests {
         os::unix::fs::{PermissionsExt as _, symlink},
         path::{Path, PathBuf},
         process::{Child, Command, Output, Stdio},
-        sync::{Mutex, MutexGuard, OnceLock},
         thread,
         time::{Duration, Instant},
     };
@@ -47,7 +46,6 @@ mod tests {
         reason = "fixture fields follow construction and cleanup flow rather than public API ordering"
     )]
     struct HarnessFixture {
-        _parallel_process_guard: MutexGuard<'static, ()>,
         _directory: TempDir,
         codex_directory: PathBuf,
         initialized: PathBuf,
@@ -100,12 +98,6 @@ mod tests {
             reason = "one bounded black-box fixture constructs the complete signed repository and fake provider"
         )]
         fn with_task(task_prefix: &str, start_task: bool) -> Self {
-            static FIXTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-            let parallel_process_guard = FIXTURE_LOCK
-                .get_or_init(|| Mutex::new(()))
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let directory = TempDir::new().expect("fixture directory should be created");
             let repository = directory.path().join("repository");
             let codex_directory = directory.path().join("bin");
@@ -202,7 +194,6 @@ mod tests {
                 .expect("fixture Codex wrapper should be executable");
 
             let mut fixture = Self {
-                _parallel_process_guard: parallel_process_guard,
                 _directory: directory,
                 codex_directory,
                 initialized,
@@ -685,9 +676,13 @@ mod tests {
     fn packaged_conversation_repairs_and_retries_only_the_configured_focused_command() {
         let fixture = HarnessFixture::new();
         let launcher = fixture.repository.join("process-launcher");
+        let shell = test_shell();
         fs::write(
             &launcher,
-            "#!/bin/sh\n[ \"$1\" = '--' ] || exit 126\nshift\n\"$@\" &\nchild=$!\numask 077\nprintf 'launched\\n' > \"$TIBER_LAUNCH_HANDSHAKE\"\nwait \"$child\"\n",
+            format!(
+                "#!{}\n[ \"$1\" = '--' ] || exit 126\nshift\n\"$@\" &\nchild=$!\numask 077\nprintf 'launched\\n' > \"$TIBER_LAUNCH_HANDSHAKE\"\nwait \"$child\"\n",
+                shell.display()
+            ),
         )
         .expect("test process launcher should be written");
         fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))
@@ -714,7 +709,10 @@ mod tests {
         fs::create_dir_all(&config_directory).expect("Tiber config directory should be created");
         fs::write(
             config_directory.join("commands.toml"),
-            "[commands.focused-test]\nprogram = '/bin/sh'\narguments = ['/workspace/focused-test']\nworking-directory = '.'\nnetwork = false\ntimeout-milliseconds = 5000\nstdout-bytes = 32768\nstderr-bytes = 4096\n\n[commands.other-test]\nprogram = '/workspace/other-test'\narguments = []\nworking-directory = '.'\nnetwork = false\ntimeout-milliseconds = 5000\nstdout-bytes = 4096\nstderr-bytes = 4096\n",
+            format!(
+                "[commands.focused-test]\nprogram = '{}'\narguments = ['/workspace/focused-test']\nworking-directory = '.'\nnetwork = false\ntimeout-milliseconds = 5000\nstdout-bytes = 32768\nstderr-bytes = 4096\n\n[commands.other-test]\nprogram = '/workspace/other-test'\narguments = []\nworking-directory = '.'\nnetwork = false\ntimeout-milliseconds = 5000\nstdout-bytes = 4096\nstderr-bytes = 4096\n",
+                shell.display()
+            ),
         )
         .expect("trusted command configuration should be written");
 
@@ -4401,13 +4399,25 @@ mod tests {
 
     fn install_test_process_launcher(repository: &Path) {
         let launcher = repository.join("process-launcher");
+        let shell = test_shell();
         fs::write(
             &launcher,
-            "#!/bin/sh\n[ \"$1\" = '--' ] || exit 126\nshift\n\"$@\" &\nchild=$!\numask 077\nprintf 'launched\\n' > \"$TIBER_LAUNCH_HANDSHAKE\"\nwait \"$child\"\n",
+            format!(
+                "#!{}\n[ \"$1\" = '--' ] || exit 126\nshift\n\"$@\" &\nchild=$!\numask 077\nprintf 'launched\\n' > \"$TIBER_LAUNCH_HANDSHAKE\"\nwait \"$child\"\n",
+                shell.display()
+            ),
         )
         .expect("test process launcher should be written");
         fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))
             .expect("test process launcher should be executable");
+    }
+
+    fn test_shell() -> PathBuf {
+        let path = env::var_os("PATH").expect("test PATH should be available");
+        env::split_paths(&path)
+            .map(|directory| directory.join("sh"))
+            .find(|candidate| candidate.is_file())
+            .expect("the pinned test shell should be available")
     }
 
     fn install_process_configuration(
@@ -4421,7 +4431,8 @@ mod tests {
         fs::write(
             config_directory.join("commands.toml"),
             format!(
-                "[commands.{id}]\nprogram = '/bin/sh'\narguments = ['/workspace/{}']\nworking-directory = '.'\nenvironment = {{}}\nnetwork = false\ntimeout-milliseconds = {timeout_milliseconds}\nstdout-bytes = 4096\nstderr-bytes = 4096\n",
+                "[commands.{id}]\nprogram = '{}'\narguments = ['/workspace/{}']\nworking-directory = '.'\nenvironment = {{}}\nnetwork = false\ntimeout-milliseconds = {timeout_milliseconds}\nstdout-bytes = 4096\nstderr-bytes = 4096\n",
+                test_shell().display(),
                 command.file_name().expect("configured command should have a name").to_string_lossy()
             ),
         )

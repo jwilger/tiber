@@ -1143,6 +1143,7 @@ fn real_bubblewrap_enforces_mount_network_cwd_and_environment_boundaries() {
     });
     let curl = executable_on_path("curl");
     let env = executable_on_path("env");
+    let shell = executable_on_path("sh");
     let command = format!(
         "printf '%s\\n%s\\n' \"$PWD\" \"$TOKEN\"; [ -e '{}' ] && printf host-leak; '{}' | while IFS= read -r entry; do case \"$entry\" in HOME=*|PATH=*) printf env-leak ;; esac; done; '{}' --silent --max-time 0.5 'http://{}' >/dev/null 2>&1 && printf network-leak || :",
         host_secret.display(),
@@ -1161,7 +1162,7 @@ fn real_bubblewrap_enforces_mount_network_cwd_and_environment_boundaries() {
     let outcome = LinuxProcessAdapter::new(config)
         .execute(
             fixture_authority_with_environment(
-                "/bin/sh",
+                shell.to_string_lossy().as_ref(),
                 &["-c", &command],
                 "subdir",
                 &[("TOKEN", "fixed")],
