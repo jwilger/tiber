@@ -2,6 +2,8 @@
 members = [
   "crates/tiber-app-server",
   "crates/tiber-cli",
+  "crates/tiber-codex-gateway",
+  "crates/tiber-codex-gateway-core",
   "crates/tiber-external-tools-core",
   "crates/tiber-hindsight-http",
   "crates/tiber-integration-audit",
@@ -37,6 +39,8 @@ eventcore-fs = "=2.0.1"
 eventcore-types = "=2.0.1"
 eventcore-memory = "=2.0.1"
 futures = "=0.3.32"
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = "=0.28.0"
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.143"

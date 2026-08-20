@@ -338,7 +338,10 @@ mod tests {
                     "--quiet",
                     "--return",
                     "--command",
-                    &format!("stty rows 24 cols 80; {}", executable.display()),
+                    &format!(
+                        "stty rows 24 cols 80; {} __tiber-test-legacy-tui",
+                        executable.display()
+                    ),
                 ])
                 .arg(capture)
                 .current_dir(&self.repository)
@@ -521,6 +524,132 @@ mod tests {
                 ["commit", "-m", "large unrelated stream catalog"],
             );
         }
+    }
+
+    #[test]
+    fn bare_tiber_launches_the_reviewed_codex_tui_through_a_private_gateway() {
+        let fixture = HarnessFixture::new();
+        let invocation = fixture.repository.join("codex-tui-invocation.json");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_MODE", "success")
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("bare Tiber should supervise the native Codex TUI");
+
+        assert!(
+            output.status.success(),
+            "bare Tiber failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(
+            output.stderr.is_empty(),
+            "bare Tiber wrote stderr bytes: {:?}",
+            output.stderr
+        );
+        let arguments: Vec<String> = serde_json::from_slice(
+            &fs::read(invocation).expect("Codex TUI invocation should be recorded"),
+        )
+        .expect("Codex TUI arguments should remain JSON");
+        assert_eq!(arguments.first().map(String::as_str), Some("--remote"));
+        let endpoint = arguments
+            .get(1)
+            .expect("Codex TUI invocation should include one remote endpoint");
+        assert!(endpoint.starts_with("unix://"));
+        assert!(
+            !endpoint.trim_start_matches("unix://").is_empty(),
+            "the private gateway endpoint must have a concrete socket path"
+        );
+        assert_eq!(arguments.len(), 2);
+        assert!(
+            !fixture.initialized.is_file(),
+            "the legacy direct app-server client must not initialize"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the bounded real-PTY compatibility fixture polls the reviewed Codex startup"
+    )]
+    fn reviewed_codex_tui_connects_through_tiber_and_restores_the_terminal() {
+        let temporary = TempDir::new().expect("native Codex fixture should isolate state");
+        let capture = temporary.path().join("native-codex-terminal.txt");
+        let state_home = temporary.path().join("state");
+        let mut child = Command::new("script")
+            .args([
+                "--quiet",
+                "--return",
+                "--command",
+                &format!("stty rows 24 cols 80; {}", env!("CARGO_BIN_EXE_tiber")),
+            ])
+            .arg(&capture)
+            .current_dir(temporary.path())
+            .env("XDG_STATE_HOME", state_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("reviewed native Codex should start in a PTY");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if child
+                .try_wait()
+                .expect("native Codex status should remain readable")
+                .is_some()
+            {
+                let rendered = fs::read_to_string(&capture).unwrap_or_default();
+                panic!("native Codex exited before the PTY boundary: {rendered}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        child
+            .stdin
+            .as_mut()
+            .expect("native Codex PTY stdin should remain open")
+            .write_all(&[3])
+            .expect("Ctrl-C should reach native Codex");
+        let status = child.wait().expect("native Codex should stop cleanly");
+
+        assert!(status.success());
+        let rendered =
+            fs::read_to_string(capture).expect("terminal capture should remain readable");
+        assert!(rendered.contains("Welcome"));
+        assert!(rendered.contains("OpenAI's"));
+        assert!(!rendered.contains("app_server_version_incompatible"));
+        assert!(!rendered.contains("failed to connect to remote app server"));
+    }
+
+    #[test]
+    fn incompatible_codex_is_rejected_before_terminal_takeover() {
+        let fixture = HarnessFixture::new();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_MODE", "wrong-version")
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("bare Tiber should report an incompatible Codex runtime");
+
+        assert!(!output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "startup rejection must not draw a TUI"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("diagnostic should be UTF-8");
+        assert_eq!(
+            stderr,
+            "app_server_version_incompatible: app-server must report reviewed Codex version 0.147.0\n"
+        );
+        assert!(
+            !fixture.initialized.is_file(),
+            "incompatible app-server must not be initialized"
+        );
     }
 
     #[test]

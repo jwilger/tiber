@@ -2,12 +2,37 @@
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import readline from "node:readline";
 
 const fixtureMode =
   process.env.TIBER_FIXTURE_MODE ??
   process.argv.find((argument) => argument.startsWith("--mode="))?.slice(7) ??
   "success";
+if (process.argv.includes("--version")) {
+  console.log(
+    fixtureMode === "wrong-version"
+      ? "codex-cli 0.148.0"
+      : "codex-cli 0.147.0",
+  );
+  process.exit(0);
+}
+const remoteIndex = process.argv.indexOf("--remote");
+if (remoteIndex >= 0 && process.env.TIBER_FIXTURE_CODEX_TUI_INVOCATION) {
+  fs.writeFileSync(
+    process.env.TIBER_FIXTURE_CODEX_TUI_INVOCATION,
+    JSON.stringify(process.argv.slice(2)),
+  );
+  process.exit(0);
+}
+const listenIndex = process.argv.indexOf("--listen");
+if (process.argv.includes("app-server") && listenIndex >= 0) {
+  const endpoint = process.argv.at(listenIndex + 1);
+  if (!endpoint?.startsWith("unix://")) process.exit(2);
+  const server = net.createServer(() => {});
+  server.listen(endpoint.slice("unix://".length));
+  setInterval(() => {}, 1000);
+}
 const fixtureAuthState = process.env.TIBER_FIXTURE_AUTH_STATE;
 const fixtureStdinCanary = "fixture-stdin-token";
 const processPolicyResults = [];

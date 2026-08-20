@@ -22,7 +22,7 @@ use std::{
     io::Read as _,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
-    process,
+    process::{self, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     thread::{self, JoinHandle},
     time::Duration,
@@ -35,9 +35,11 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use tiber_app_server::{
     AccountStatus, AppServerClient, AppServerConfig, MAX_TIBER_EFFECT_RESULT_BYTES,
-    OperationCancellation, PendingRepositoryProposal, PendingTiberEffect, TiberEffectRequestId,
-    TiberEffectResult, TurnEvent, inspect_protocol_schema,
+    OperationCancellation, PendingRepositoryProposal, PendingTiberEffect, SUPPORTED_CODEX_VERSION,
+    TiberEffectRequestId, TiberEffectResult, TurnEvent, inspect_protocol_schema,
 };
+use tiber_codex_gateway::{EffectResponse, Gateway, GatewayConfig};
+use tiber_codex_gateway_core::{EffectKind, EffectRequest, GatewayPolicy};
 use tiber_process_core::{
     AssignmentWorkflowProvenance, ConfiguredCommand, ConfiguredCommandCatalog, ConfiguredCommandId,
     FixedEnvironment, LiteralArgument, MAX_TIMEOUT, OutputBounds, ProcessInvocationId,
@@ -225,6 +227,327 @@ fn load_configured_process_catalog(
         .map(Some)
         .map_err(ConfiguredProcessError::from)
 }
+
+/// Launches the reviewed native Codex TUI through Tiber's private policy gateway.
+#[expect(
+    clippy::print_stderr,
+    clippy::too_many_lines,
+    clippy::unseparated_literal_suffix,
+    reason = "the native supervisor owns one ordered child/gateway lifecycle, emits stable diagnostics, and retains conventional exit-code spelling"
+)]
+fn run_native_codex_tui() {
+    preflight_default_codex_runtime();
+    let executable = resolve_executable("codex").unwrap_or_else(|| {
+        eprintln!("app_server_executable_not_found: codex is not on PATH");
+        process::exit(1);
+    });
+    let codex_home = tiber_codex_home().unwrap_or_else(|| {
+        eprintln!("app_server_state_home_unavailable: HOME and XDG_STATE_HOME are unset");
+        process::exit(1);
+    });
+    let workspace = env::current_dir().unwrap_or_else(|error| {
+        eprintln!("app_server_workspace_unavailable: {error}");
+        process::exit(1);
+    });
+    let app_server_config = AppServerConfig::new(
+        executable.clone(),
+        vec![
+            "app-server".to_owned(),
+            "--stdio".to_owned(),
+            "--strict-config".to_owned(),
+        ],
+        codex_home.clone(),
+        workspace.clone(),
+        Duration::from_mins(10),
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("{}: {error}", error.code());
+        process::exit(1);
+    });
+    app_server_config
+        .prepare_isolated_home(ISOLATED_CONFIG)
+        .unwrap_or_else(|error| {
+            eprintln!("{}: {error}", error.code());
+            process::exit(1);
+        });
+
+    let runtime_directory = tempfile::Builder::new()
+        .prefix("tiber-codex-")
+        .tempdir()
+        .unwrap_or_else(|error| {
+            eprintln!("codex_gateway_runtime_directory_failed: {error}");
+            process::exit(1);
+        });
+    let gateway_socket = runtime_directory.path().join("gateway.sock");
+    let upstream_socket = runtime_directory.path().join("app-server.sock");
+    let policy = GatewayPolicy::new(
+        "You are operating through Tiber. Treat every tool request as an inert proposal; Tiber alone authorizes effects and records durable receipts.",
+        native_dynamic_tools(),
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("{}: {error}", error.code());
+        process::exit(1);
+    });
+    let (shutdown_sender, gateway_thread) =
+        start_native_gateway(&gateway_socket, &upstream_socket, &workspace, policy);
+
+    let upstream_endpoint = format!("unix://{}", upstream_socket.display());
+    let backend_result = process::Command::new(&executable)
+        .args([
+            "app-server",
+            "--listen",
+            upstream_endpoint.as_str(),
+            "--strict-config",
+        ])
+        .current_dir(&workspace)
+        .env("CODEX_HOME", &codex_home)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut backend = match backend_result {
+        Ok(backend) => backend,
+        Err(error) => {
+            let _gateway_result = stop_native_gateway(&shutdown_sender, gateway_thread);
+            eprintln!("app_server_start_failed: {error}");
+            process::exit(1);
+        }
+    };
+    if let Err(error) = wait_for_app_server_socket(&upstream_socket, &mut backend) {
+        drop(backend.kill());
+        drop(backend.wait());
+        let _gateway_result = stop_native_gateway(&shutdown_sender, gateway_thread);
+        eprintln!("{}: {}", error.code, error.message);
+        process::exit(1);
+    }
+
+    let gateway_endpoint = format!("unix://{}", gateway_socket.display());
+    let tui_result = process::Command::new(executable)
+        .args(["--remote", gateway_endpoint.as_str()])
+        .current_dir(workspace)
+        .env("CODEX_HOME", codex_home)
+        .status();
+
+    drop(backend.kill());
+    drop(backend.wait());
+    let gateway_result = stop_native_gateway(&shutdown_sender, gateway_thread);
+    let tui_status = match tui_result {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("codex_tui_start_failed: {error}");
+            process::exit(1);
+        }
+    };
+    if let Err(code) = gateway_result {
+        eprintln!("{code}: Codex gateway stopped before the native TUI");
+        process::exit(1);
+    }
+    if !tui_status.success() {
+        eprintln!("codex_tui_failed: reviewed Codex TUI exited unsuccessfully");
+        process::exit(tui_status.code().unwrap_or(1i32));
+    }
+}
+
+/// Stops and joins the native gateway before returning control to the shell.
+fn stop_native_gateway(
+    shutdown_sender: &tokio::sync::watch::Sender<bool>,
+    gateway_thread: JoinHandle<Result<(), String>>,
+) -> Result<(), &'static str> {
+    let _shutdown_result = shutdown_sender.send(true);
+    match gateway_thread.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err("codex_gateway_stopped"),
+        Err(_) => Err("codex_gateway_thread_failed"),
+    }
+}
+
+/// Starts the bounded gateway runtime and fail-closed effect responder.
+#[expect(
+    clippy::print_stderr,
+    reason = "gateway setup failures occur before native terminal takeover"
+)]
+fn start_native_gateway(
+    gateway_socket: &Path,
+    upstream_socket: &Path,
+    repository: &Path,
+    policy: GatewayPolicy,
+) -> (
+    tokio::sync::watch::Sender<bool>,
+    JoinHandle<Result<(), String>>,
+) {
+    let repository = repository.to_owned();
+    let (effect_sender, mut effects) = tokio::sync::mpsc::channel(8);
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| {
+            eprintln!("codex_gateway_runtime_failed: {error}");
+            process::exit(1);
+        });
+    let gateway = {
+        let _runtime_guard = runtime.enter();
+        Gateway::bind(
+            GatewayConfig::new(gateway_socket, upstream_socket, policy),
+            effect_sender,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("{}: {error}", error.code());
+            process::exit(1);
+        })
+    };
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
+    let gateway_thread = thread::spawn(move || {
+        runtime.block_on(async move {
+            let effect_task = tokio::spawn(async move {
+                while let Some(call) = effects.recv().await {
+                    let response = native_effect_response(&repository, call.request())
+                        .map_err(|_error| "codex_gateway_effect_response_failed".to_owned())?;
+                    call.complete(response)
+                        .map_err(|_response| "codex_gateway_effect_completion_failed".to_owned())?;
+                }
+                Ok::<(), String>(())
+            });
+            let gateway_result = gateway
+                .serve_one(shutdown_receiver)
+                .await
+                .map_err(|error| error.code().to_owned());
+            effect_task.abort();
+            drop(effect_task.await);
+            gateway_result
+        })
+    });
+    (shutdown_sender, gateway_thread)
+}
+
+/// Declares the bounded signed task-board surface visible to native Codex.
+fn native_dynamic_tools() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "description": "Runs one bounded Tiber task-board operation through signed task authority.",
+        "inputSchema": {
+            "additionalProperties": false,
+            "properties": {
+                "arguments": {
+                    "items": { "maxLength": 4096, "type": "string" },
+                    "maxItems": 32,
+                    "minItems": 1,
+                    "type": "array"
+                }
+            },
+            "required": ["arguments"],
+            "type": "object"
+        },
+        "name": "tiber_tasks",
+        "type": "function"
+    })]
+}
+
+/// Applies application policy to one intercepted native Codex effect.
+fn native_effect_response(
+    repository: &Path,
+    request: &EffectRequest,
+) -> Result<EffectResponse, tiber_codex_gateway::TransportError> {
+    if request.kind() != EffectKind::DynamicToolCall
+        || request
+            .params()
+            .get("tool")
+            .and_then(serde_json::Value::as_str)
+            != Some("tiber_tasks")
+    {
+        return EffectResponse::failure(-32601, "Tiber has not authorized this effect", None);
+    }
+    EffectResponse::dynamic_tool_call(native_task_result(repository, request.params()))
+}
+
+/// Parses and executes one bounded native task call through existing signed authority.
+fn native_task_result(repository: &Path, params: &serde_json::Value) -> serde_json::Value {
+    let Some(arguments) = params
+        .get("arguments")
+        .and_then(|arguments| arguments.get("arguments"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return native_task_failure("tiber_tasks_invalid_arguments");
+    };
+    if arguments.is_empty() || arguments.len() > 32 {
+        return native_task_failure("tiber_tasks_invalid_arguments");
+    }
+    let parsed_arguments = arguments
+        .iter()
+        .map(|argument| {
+            argument
+                .as_str()
+                .filter(|argument| argument.len() <= 4096)
+                .map(std::ffi::OsString::from)
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(parsed_arguments) = parsed_arguments else {
+        return native_task_failure("tiber_tasks_invalid_arguments");
+    };
+    let command = match tasks::parse(parsed_arguments.into_iter()) {
+        Ok(command) => command,
+        Err(error) => return native_task_failure(error.code()),
+    };
+    let result =
+        tasks::context_free_output(&command).map_or_else(|| tasks::run(repository, command), Ok);
+    match result {
+        Ok(output) if output.len() <= MAX_TIBER_EFFECT_RESULT_BYTES => serde_json::json!({
+            "contentItems": [{ "text": output, "type": "inputText" }],
+            "success": true
+        }),
+        Ok(_) => native_task_failure("tiber_tasks_result_too_large"),
+        Err(error) => native_task_failure(error.code()),
+    }
+}
+
+/// Renders one content-free stable task failure for the model-facing tool result.
+fn native_task_failure(code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "contentItems": [{ "text": code, "type": "inputText" }],
+        "success": false
+    })
+}
+
+/// A stable backend-readiness failure and its owner-facing explanation.
+struct BackendReadinessError {
+    /// Stable machine-readable failure code.
+    code: &'static str,
+    /// Sanitized owner-facing explanation.
+    message: String,
+}
+
+/// Waits for the private backend socket or reports why the child was not ready.
+fn wait_for_app_server_socket(
+    socket: &Path,
+    child: &mut process::Child,
+) -> Result<(), BackendReadinessError> {
+    let readiness_attempts: core::ops::Range<usize> = 0..200;
+    for _ in readiness_attempts {
+        if socket.exists() {
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return Err(BackendReadinessError {
+                    code: "app_server_start_failed",
+                    message: "app-server exited before readiness".to_owned(),
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(BackendReadinessError {
+                    code: "app_server_readiness_failed",
+                    message: error.to_string(),
+                });
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(BackendReadinessError {
+        code: "app_server_readiness_timeout",
+        message: "app-server did not bind its private socket".to_owned(),
+    })
+}
 #[expect(
     clippy::print_stderr,
     reason = "a command-line adapter intentionally writes its result and diagnostics"
@@ -233,7 +556,7 @@ fn main() {
     let mut arguments = env::args_os();
     let _executable = arguments.next();
     let Some(command) = arguments.next() else {
-        run_tui();
+        run_native_codex_tui();
         return;
     };
     match command.to_string_lossy().as_ref() {
@@ -242,6 +565,7 @@ fn main() {
         "converse" => run_conversation(arguments),
         "session" => run_session(arguments),
         "tasks" => run_tasks(arguments),
+        "__tiber-test-legacy-tui" if cfg!(debug_assertions) => run_tui(),
         "__tiber-process-launcher" => process::exit(run_private_launcher(arguments)),
         "-h" | "--help" => {
             if arguments.next().is_some() {
@@ -736,6 +1060,7 @@ fn exit_for_task_error(error: &tasks::TaskCliError) -> ! {
     reason = "terminal startup and adapter failures use stable owner-facing diagnostics"
 )]
 fn run_tui() {
+    preflight_default_codex_runtime();
     let repository = env::current_dir().unwrap_or_else(|error| {
         eprintln!("tiber_session_repository_unavailable: {error}");
         process::exit(1);
@@ -826,6 +1151,37 @@ fn run_tui() {
         eprintln!("{}: {error}", error.code());
         process::exit(1);
     });
+}
+
+/// Rejects an unreviewed ambient Codex binary before Tiber takes over the terminal.
+#[expect(
+    clippy::print_stderr,
+    reason = "startup compatibility failures use stable owner-facing diagnostics"
+)]
+fn preflight_default_codex_runtime() {
+    let executable = resolve_executable("codex").unwrap_or_else(|| {
+        eprintln!("app_server_executable_not_found: codex is not on PATH");
+        process::exit(1);
+    });
+    let output = process::Command::new(executable)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| {
+            eprintln!("app_server_executable_unavailable: {error}");
+            process::exit(1);
+        });
+    if !output.status.success() {
+        eprintln!("app_server_executable_unavailable: codex --version failed");
+        process::exit(1);
+    }
+    let reported = String::from_utf8(output.stdout).unwrap_or_default();
+    let expected = format!("codex-cli {SUPPORTED_CODEX_VERSION}");
+    if reported.trim() != expected {
+        eprintln!(
+            "app_server_version_incompatible: app-server must report reviewed Codex version {SUPPORTED_CODEX_VERSION}"
+        );
+        process::exit(1);
+    }
 }
 
 /// Ensures the sole active native task has one durable conversation binding.
@@ -3794,6 +4150,49 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn native_codex_receives_only_the_signed_bounded_task_surface() {
+        let declarations = native_dynamic_tools();
+        assert_eq!(declarations.len(), 1);
+        let declaration = declarations
+            .first()
+            .expect("one native task declaration should exist");
+        assert_eq!(
+            declaration.get("name"),
+            Some(&serde_json::json!("tiber_tasks"))
+        );
+        assert!(
+            declaration
+                .pointer("/inputSchema/properties/program")
+                .is_none()
+        );
+        assert!(
+            declaration
+                .pointer("/inputSchema/properties/environment")
+                .is_none()
+        );
+        assert!(
+            declaration
+                .pointer("/inputSchema/properties/shell")
+                .is_none()
+        );
+
+        let result = native_task_result(
+            Path::new("."),
+            &serde_json::json!({
+                "arguments": { "arguments": ["--help"] },
+                "tool": "tiber_tasks"
+            }),
+        );
+        assert_eq!(result.get("success"), Some(&serde_json::json!(true)));
+        assert!(
+            result
+                .pointer("/contentItems/0/text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| text.contains("tiber tasks"))
+        );
+    }
 
     #[test]
     fn repository_diff_marks_every_record_and_escapes_exact_bytes() {

@@ -7,8 +7,13 @@ delivery. Inference is one bounded input to that authority, never the
 authority itself.
 
 Tiber v1 targets x86_64 Linux. The primary executable is `tiber`; running it
-without an argument opens the terminal UI. Native task operations live only
-under `tiber tasks …`. The shipped `list`, `show`, `search`, and `next` commands
+without an argument launches the reviewed, pinned Codex TUI through a private
+Tiber policy gateway. This is the actual Codex terminal experience, not a
+look-alike UI. Tiber supervises the Codex TUI and app-server processes,
+rewrites the inference permission profile, and intercepts effect-bearing
+requests before they can reach either client. Native task operations live under
+`tiber tasks …` and are also declared to Codex as the bounded `tiber_tasks`
+dynamic tool. The shipped `list`, `show`, `search`, and `next` commands
 are read-only queries over `EventCore` task history preserved on the signed
 `tiber` authority branch. When an `origin` remote exists, they resolve its
 currently advertised `tiber` commit and fetch that exact object without moving
@@ -49,8 +54,10 @@ the trampoline. Recording an observation persists `EffectObserved` by itself;
 only a later advance decision may call `step` to request, complete, or stop.
 There is no generic workflow append or effect executor. The CLI interprets its
 closed `Infer` effect through app-server, durably records observations and the
-terminal advance, and restores the TUI projection on relaunch. App-server tool
-requests remain inert until a Tiber-owned typed boundary handles them; broader
+terminal advance, and restores the projection on relaunch. The former
+projection TUI remains only as a debug-only integration-test driver; the public
+no-argument interface is native Codex. App-server tool requests remain inert
+until a Tiber-owned typed boundary handles them; broader
 scheduling and operator-directed uncertain-effect resolution remain later
 slices.
 

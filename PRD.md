@@ -257,13 +257,13 @@ compromised trusted toolchain are outside the v1 threat model.
 
 ## Terminal experience
 
-The target TUI preserves the useful Codex transcript, streaming, composer,
-Plan mode, `/side`, `/btw`, resume, diff display, status bar, and status card
-interactions. It will add workflow phase, active task, assignment, agent, gate,
-memory, and integration health plus `/tasks`, `/memory`, and
-`/integrations`. The current extracted slice provides transcript, streaming,
-composer, typed failures, and inert-tool proposals. UI state is a projection;
-it never grants authority.
+The terminal interface is the reviewed Codex TUI itself, launched with a
+private `--remote unix://…` endpoint owned by Tiber. Codex therefore preserves
+its exact transcript, streaming, composer, keys, history, diff display, status
+bar, and status-card behavior without a drifting imitation. Tiber injects
+bounded workflow and task tools through the app-server protocol and keeps every
+effect inert until signed application policy completes it. UI state and the
+Codex client never grant authority.
 
 ## Functional requirements
 
@@ -320,14 +320,17 @@ it never grants authority.
   merely to manufacture evidence.
 - Rust Edition 2024, forbidden unsafe code, strict workspace Clippy inheritance,
   and warnings denied in CI.
-- Credentials are never read, copied, logged, decoded, retained, serialized,
-  forwarded, or traced by Tiber. API-key-mode login hands inherited owner stdin
-  directly to the isolated `codex login --with-api-key` child with ambient
-  API-key environment variables removed and child output suppressed; Tiber
-  records only a stable exit diagnostic, kills and reaps the child if its
+- API-key credentials are never read, copied, logged, decoded, retained,
+  serialized, forwarded, or traced by Tiber. API-key-mode login hands inherited
+  owner stdin directly to the isolated `codex login --with-api-key` child with
+  ambient API-key environment variables removed and child output suppressed;
+  Tiber records only a stable exit diagnostic, kills and reaps the child if its
   configured ten-minute deadline expires, and requires app-server to confirm the
-  resulting `ApiKey` account state. Codex's non-terminal-stdin requirement keeps
-  owner-supplied key input out of Tiber's memory and domain handling.
+  Codex-owned account state. Subscription refresh messages necessarily traverse
+  the local gateway as bounded JSON-RPC frames; Tiber may transiently buffer and
+  parse their envelope solely to correlate the reviewed Codex TUI and app-server
+  peers, but never exposes token fields to application policy, logs them,
+  persists them, or converts them into workflow or effect authority.
 - Observable model, context, policy, tool, memory, and delivery decisions with
   sensitive data redacted.
 - Reproducible x86_64 Linux packaging and clean-machine installation.
@@ -361,7 +364,7 @@ it never grants authority.
 
 - Platforms other than x86_64 Linux in v1.
 - Direct OpenAI Responses API or Anthropic/Claude inference providers.
-- `codex --remote` or Codex runtime authority.
+- Allowing an ambient or unsupported Codex version to define runtime authority.
 - Installing or globally configuring Codex, Claude, MCP, Hindsight, shells, or
   SSH.
 - MCP sampling, elicitation, or MCP tasks in the initial integration.

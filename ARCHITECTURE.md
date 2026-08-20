@@ -8,11 +8,11 @@ memory, and remote delivery systems. The Phase 1 effective-authority spike
 accepts app-server behind a Tiber-owned read-only, offline permission profile.
 
 ```text
-owner -> Tiber TUI -> application state machines -> closed TiberEffect set
-                                                -> imperative interpreters
-app-server inference port                        -> repositories/processes
-third-party MCP <-> external-tool adapter         -> Hindsight
-EventCore store <-> domain authority              -> forge/CI
+owner -> reviewed Codex TUI -> private Tiber gateway -> Codex app-server
+                                      |                (inference only)
+                                      v
+                         application state machines -> closed effects
+                         EventCore domain authority -> interpreters
 ```
 
 OpenAI supplies inference only. Tool requests are untrusted proposals. Tiber
@@ -21,8 +21,14 @@ reconciliation, and terminal workflow outcome.
 
 ## Component model
 
-- **Tiber TUI:** a fork-derived Codex-compatible presentation adapter consuming
-  typed projection events and emitting typed intents.
+- **Terminal presentation:** the reviewed, pinned Codex executable connects to
+  Tiber over a private Unix-socket WebSocket endpoint. Tiber forwards
+  presentation traffic without re-encoding it, so Codex owns the pixels,
+  keyboard behavior, composer, and history rather than a look-alike fork.
+- **Codex gateway:** terminates both protocol connections, rewrites effective
+  inference policy, intercepts every effect-bearing server request, and returns
+  only application-created bounded completions. The native Codex client and
+  app-server never form a direct authority path.
 - **Application core:** explicit state machines for conversations,
   assignments, effects, verification, delivery, recovery, and cancellation.
 - **EventCore domains:** authoritative facts for sessions, agents, tasks,
