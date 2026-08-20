@@ -844,7 +844,7 @@ fn output_cap_kills_the_tree_and_returns_only_a_typed_bounded_failure() {
     let sleep = executable_on_path("sleep");
     let heartbeat = repository.path().join("bounded-heartbeat");
     let command = format!(
-        "'{}' '{}' -c 'while :; do printf x >> /workspace/bounded-heartbeat; \"{}\" 0.02; done' & \"{}\" 0.2; printf 0123456789; wait",
+        "'{}' '{}' -c 'while :; do printf x >> /workspace/bounded-heartbeat; \"{}\" 0.02; done' & while [ ! -s /workspace/bounded-heartbeat ]; do \"{}\" 0.01; done; printf 0123456789; wait",
         setsid.display(),
         shell.display(),
         sleep.display(),
