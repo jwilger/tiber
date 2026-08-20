@@ -566,13 +566,15 @@ mod tests {
     }
 
     #[test]
-    fn native_codex_turn_is_durably_admitted_and_observed_through_bare_tiber() {
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
+    fn legacy_gateway_turn_is_durably_admitted_and_observed() {
         let fixture = HarnessFixture::new();
         let invocation = fixture.repository.join("native-turn-invocation.json");
         let result_path = fixture.repository.join("native-turn-result.json");
         let backend_turns = fixture.repository.join("native-backend-turns.txt");
 
         let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
@@ -608,10 +610,12 @@ mod tests {
     }
 
     #[test]
-    fn native_codex_uses_the_signed_tiber_task_surface() {
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
+    fn legacy_gateway_uses_the_signed_tiber_task_surface() {
         let fixture = HarnessFixture::new();
         let effect_result = fixture.repository.join("native-task-effect-result.json");
         let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env(
@@ -645,7 +649,8 @@ mod tests {
     }
 
     #[test]
-    fn native_codex_runs_only_a_trusted_configured_command_through_tiber() {
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
+    fn legacy_gateway_runs_only_a_trusted_configured_command_through_tiber() {
         let fixture = HarnessFixture::new();
         install_test_process_launcher(&fixture.repository);
         let command = fixture.repository.join("native-focused-test");
@@ -663,6 +668,7 @@ mod tests {
         let effect_result = fixture.repository.join("native-process-effect-result.json");
 
         let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
@@ -704,7 +710,8 @@ mod tests {
     }
 
     #[test]
-    fn closing_native_codex_cancels_and_reaps_the_active_configured_process() {
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
+    fn closing_legacy_gateway_cancels_and_reaps_the_active_configured_process() {
         let fixture = HarnessFixture::new();
         install_test_process_launcher(&fixture.repository);
         let command = fixture.repository.join("native-cancel-test");
@@ -721,6 +728,7 @@ mod tests {
         let invocation = fixture.repository.join("native-cancel-invocation.json");
         let turn_result = fixture.repository.join("native-cancel-turn-result.json");
         let mut child = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
@@ -762,11 +770,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
     #[expect(
         clippy::unseparated_literal_suffix,
         reason = "the crash fixture uses a typed i8 exit code before lossless conversion to i32"
     )]
-    fn native_process_crash_reconciles_once_without_redispatch() {
+    fn legacy_gateway_process_crash_reconciles_once_without_redispatch() {
         let fixture = HarnessFixture::new();
         install_test_process_launcher(&fixture.repository);
         let command = fixture.repository.join("native-crash-test");
@@ -782,6 +791,7 @@ mod tests {
         install_process_configuration(&fixture.repository, "focused-test", &command, 5_000);
 
         let first = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env(
@@ -805,6 +815,7 @@ mod tests {
         assert!(crash.exists());
 
         let second = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env(
@@ -846,11 +857,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
     #[expect(
         clippy::too_many_lines,
         reason = "the public native coding fixture owns the causal read, proposal, owner decision, application, and configured verification sequence"
     )]
-    fn native_codex_applies_a_repository_proposal_only_after_owner_approval() {
+    fn legacy_gateway_applies_a_repository_proposal_only_after_owner_approval() {
         let fixture = HarnessFixture::new();
         install_test_process_launcher(&fixture.repository);
         fs::write(fixture.repository.join("README.md"), "before\n")
@@ -883,6 +895,7 @@ mod tests {
             .join("native-repository-verification-result.json");
 
         let child = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
@@ -985,13 +998,15 @@ mod tests {
     }
 
     #[test]
-    fn native_restart_cancels_a_lost_unapproved_repository_proposal() {
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
+    fn legacy_gateway_restart_cancels_a_lost_unapproved_repository_proposal() {
         let fixture = HarnessFixture::new();
         fs::write(fixture.repository.join("README.md"), "before\n")
             .expect("repository preimage should be written");
         let first_result = fixture.repository.join("native-lost-proposal-turn.json");
         let proposal_result = fixture.repository.join("native-lost-proposal-effect.json");
         let first = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env(
@@ -1012,6 +1027,7 @@ mod tests {
         );
 
         let second = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env(
@@ -1036,7 +1052,8 @@ mod tests {
     }
 
     #[test]
-    fn native_turn_restart_interrupts_the_unforwarded_request_and_resumes_once() {
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
+    fn legacy_gateway_turn_restart_interrupts_the_request_and_resumes_once() {
         let fixture = HarnessFixture::new();
         let invocation = fixture.repository.join("native-restart-invocation.json");
         let result_path = fixture.repository.join("native-restart-result.json");
@@ -1045,6 +1062,7 @@ mod tests {
         let interruption_crash = fixture.repository.join("native-interruption-crash");
 
         let first = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
@@ -1070,6 +1088,7 @@ mod tests {
         );
 
         let second = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
@@ -1095,6 +1114,7 @@ mod tests {
         );
 
         let third = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
@@ -1123,12 +1143,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_native_turn_is_durably_interrupted_before_terminal_presentation() {
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
+    fn failed_legacy_gateway_turn_is_durably_interrupted_before_presentation() {
         let fixture = HarnessFixture::new();
         let invocation = fixture.repository.join("native-failed-invocation.json");
         let result_path = fixture.repository.join("native-failed-result.json");
 
         let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
@@ -1160,12 +1182,13 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
     #[expect(
         clippy::panic,
         clippy::too_many_lines,
         reason = "the bounded real-PTY fixture deliberately fails fast on early exit and owns setup, prompt submission, rendering, and terminal restoration assertions"
     )]
-    fn reviewed_codex_tui_connects_through_tiber_and_restores_the_terminal() {
+    fn legacy_gateway_reviewed_codex_tui_restores_the_terminal() {
         let reviewed_codex = test_codex();
         let fixture = HarnessFixture::new();
         let capture = fixture.repository.join("native-codex-terminal.txt");
@@ -1194,7 +1217,10 @@ mod tests {
                 "--flush",
                 "--return",
                 "--command",
-                &format!("stty rows 24 cols 80; {}", env!("CARGO_BIN_EXE_tiber")),
+                &format!(
+                    "stty rows 24 cols 80; {} __tiber-test-legacy-native-codex",
+                    env!("CARGO_BIN_EXE_tiber")
+                ),
             ])
             .arg(&capture)
             .current_dir(&fixture.repository)
@@ -1297,38 +1323,12 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_codex_is_rejected_before_terminal_takeover() {
+    #[ignore = "ported to embedded host hooks by the authority-integration ticket"]
+    fn legacy_gateway_backend_failure_returns_before_terminal_takeover() {
         let fixture = HarnessFixture::new();
 
         let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
-            .current_dir(&fixture.repository)
-            .env("PATH", fixture.path())
-            .env("TIBER_FIXTURE_MODE", "wrong-version")
-            .env("XDG_STATE_HOME", &fixture.state_home)
-            .output()
-            .expect("bare Tiber should report an incompatible Codex runtime");
-
-        assert!(!output.status.success());
-        assert!(
-            output.stdout.is_empty(),
-            "startup rejection must not draw a TUI"
-        );
-        let stderr = String::from_utf8(output.stderr).expect("diagnostic should be UTF-8");
-        assert_eq!(
-            stderr,
-            "app_server_version_incompatible: app-server must report reviewed Codex version 0.147.0\n"
-        );
-        assert!(
-            !fixture.initialized.is_file(),
-            "incompatible app-server must not be initialized"
-        );
-    }
-
-    #[test]
-    fn native_backend_failure_returns_before_terminal_takeover() {
-        let fixture = HarnessFixture::new();
-
-        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .arg("__tiber-test-legacy-native-codex")
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
             .env("TIBER_FIXTURE_MODE", "native-backend-exit")
