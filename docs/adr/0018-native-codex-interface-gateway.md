@@ -47,9 +47,16 @@ request or fabricates assistant output.
 
 The reviewed Codex executable is a fixed-output Nix input used by the package
 and development shell. Startup checks its exact version before terminal
-takeover. The first native dynamic tool is `tiber_tasks`, which accepts only the
-existing bounded task CLI grammar and executes through signed task authority.
-The former projection TUI remains only as a debug-only integration-test driver.
+takeover. Native dynamic tools expose `tiber_tasks`,
+`tiber_repository_read`, `tiber_repository_proposal`, and `tiber_effect`. Tasks
+accept only the existing bounded task CLI grammar. Repository reads return one
+bounded UTF-8 regular-file preimage beneath the repository without granting
+shell or effect authority. Repository proposals publish signed inert intent and
+return an owner-decision requirement; only a later exact `approve` or `deny`
+composer turn can mint the corresponding signed decision. Configured processes
+accept only a semantic command ID resolved from the trusted repository catalog,
+and native-client shutdown cancels the active process tree. The former
+projection TUI remains only as a debug-only integration-test driver.
 
 ## Consequences
 
@@ -58,11 +65,12 @@ workflow and effect authority. Upgrading Codex requires a new reviewed binary,
 schema/effective-authority evidence, and native PTY compatibility test.
 
 Tiber must continue to interpret protocol evolution at the gateway; a
-transparent byte proxy is insufficient. Repository, process, delivery, and
-other mutation tools remain unavailable in the native interface until their
-existing typed durable boundaries are explicitly connected. No model-supplied
-shell, executable, environment, working directory, network policy, or generic
-EventCore append is introduced by this decision.
+transparent byte proxy is insufficient. Repository and configured-process
+tools reuse their existing typed durable boundaries rather than granting Codex
+filesystem or process authority. Delivery and other mutation tools remain
+unavailable until their own boundaries are explicitly connected. No
+model-supplied shell, executable, environment, working directory, network
+policy, or generic EventCore append is introduced by this decision.
 
 Subscription refresh frames are transient transport data: the gateway bounds
 and parses their JSON-RPC envelope for correlation, but never sends token fields

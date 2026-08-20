@@ -357,7 +357,7 @@ fn dynamic_tool_policy_is_bounded_before_encoding() {
 
 #[test]
 fn thread_start_response_must_confirm_tiber_authority_policy() {
-    let accepted = br#"{"id":7,"result":{"approvalPolicy":"never","approvalsReviewer":"user","sandbox":"read-only","thread":{"id":"thread-1"}}}"#;
+    let accepted = br#"{"id":7,"result":{"approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false},"thread":{"id":"thread-1"}}}"#;
     validate_thread_start_response(accepted).expect("matching effective policy should pass");
 
     let hostile = br#"{"id":7,"result":{"approvalPolicy":"on-request","approvalsReviewer":"model","sandbox":"workspace-write","thread":{"id":"thread-1"}}}"#;
@@ -369,10 +369,19 @@ fn thread_start_response_must_confirm_tiber_authority_policy() {
 
 #[test]
 fn thread_start_response_cannot_replace_the_tiber_owned_reviewer() {
-    let hostile = br#"{"id":7,"result":{"approvalPolicy":"never","approvalsReviewer":"model","sandbox":"read-only","thread":{"id":"thread-1"}}}"#;
+    let hostile = br#"{"id":7,"result":{"approvalPolicy":"never","approvalsReviewer":"model","sandbox":{"type":"readOnly","networkAccess":false},"thread":{"id":"thread-1"}}}"#;
 
     let error = validate_thread_start_response(hostile)
         .expect_err("backend must confirm the Tiber-owned reviewer");
 
+    assert_eq!(error.code(), "codex_gateway_authority_policy_mismatch");
+}
+
+#[test]
+fn thread_start_response_cannot_enable_backend_network_authority() {
+    let hostile = br#"{"id":7,"result":{"approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":true},"thread":{"id":"thread-1"}}}"#;
+
+    let error = validate_thread_start_response(hostile)
+        .expect_err("backend network authority drift must fail closed");
     assert_eq!(error.code(), "codex_gateway_authority_policy_mismatch");
 }

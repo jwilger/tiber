@@ -13,7 +13,11 @@ look-alike UI. Tiber supervises the Codex TUI and app-server processes,
 rewrites the inference permission profile, and intercepts effect-bearing
 requests before they can reach either client. Native task operations live under
 `tiber tasks …` and are also declared to Codex as the bounded `tiber_tasks`
-dynamic tool. The shipped `list`, `show`, `search`, and `next` commands
+dynamic tool. The same native interface exposes bounded UTF-8 repository-file
+reads, exact repository proposals, and trusted configured commands; reads grant
+no shell or effect authority, proposals require a later exact owner
+`approve` or `deny` turn, and command IDs resolve only through
+`.tiber/commands.toml`. The shipped `list`, `show`, `search`, and `next` commands
 are read-only queries over `EventCore` task history preserved on the signed
 `tiber` authority branch. When an `origin` remote exists, they resolve its
 currently advertised `tiber` commit and fetch that exact object without moving
@@ -57,7 +61,8 @@ closed `Infer` effect through app-server, durably records observations and the
 terminal advance, and restores the projection on relaunch. The former
 projection TUI remains only as a debug-only integration-test driver; the public
 no-argument interface is native Codex. App-server tool requests remain inert
-until a Tiber-owned typed boundary handles them; broader
+until a Tiber-owned typed boundary handles them. Native task, repository, and
+configured-process requests now reuse their signed durable boundaries; broader
 scheduling and operator-directed uncertain-effect resolution remain later
 slices.
 

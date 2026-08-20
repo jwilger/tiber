@@ -49,8 +49,12 @@ transaction; only a later advance decision may call `step` to request, complete,
 or stop. The service exposes neither a generic workflow append nor an effect
 executor. The CLI interprets only its closed `Infer` effect through app-server,
 records the observation and terminal advance durably, and restores the TUI
-projection on relaunch. App-server tools remain inert; broader scheduling and
-operator-directed resolution of uncertain effects remain later native slices.
+projection on relaunch. Effect-bearing app-server requests remain inert until a
+Tiber-owned handler accepts them. The native Codex surface can read one bounded
+UTF-8 regular-file preimage without shell or effect authority, then submit an
+exact repository proposal for a later owner decision or request a trusted
+configured command by semantic ID. Broader scheduling and operator-directed
+resolution of uncertain effects remain later native slices.
 
 The native task surface also has one explicit legacy-data repair, not a general
 write: `subtask repair-duplicate`. It requires a one-based occurrence and a new
@@ -337,6 +341,12 @@ Codex client never grant authority.
   workflow admission. A terminal notification must match the admitted thread
   and turn, and reaches the TUI only after durable success or sanitized
   interruption. Restart resolves an unobserved admitted turn without replay.
+- The native Codex tool contract exposes bounded task operations, exact
+  repository-write proposals, and configured-command requests. A repository
+  proposal produces no mutation authority until the owner submits an exact
+  later `approve` turn; a configured command can name only a trusted semantic
+  catalog entry. Native-client cancellation kills and reaps an active command
+  tree and records its typed terminal fact.
 - Reproducible x86_64 Linux packaging and clean-machine installation.
 
 ## Acceptance criteria
@@ -348,6 +358,10 @@ Codex client never grant authority.
   remain in the protocol; explicitly permitted read-only, non-shell repository
   observation remains untrusted inference context; and Tiber-declared dynamic
   tools remain inert until the harness authorizes and executes them.
+- A real reviewed Codex TUI fixture submits its first composer prompt through
+  the private gateway and renders the correlated answer. Separate public
+  black-box scenarios prove configured-command execution, no repository write
+  before owner approval, and native-client process cancellation.
 - Native tasks, workflow, repository, process, verification, and delivery
   services operate without MCP or shell loopback into Tiber.
 - MCP denial, cancellation, ambiguous-write, hostile-input, and capability

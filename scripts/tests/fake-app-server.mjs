@@ -150,11 +150,47 @@ if (remoteIndex >= 0 && process.env.TIBER_FIXTURE_CODEX_TUI_INVOCATION) {
       true,
     ),
   );
+  if (fixtureMode === "native-process-cancel") {
+    const started = process.env.TIBER_FIXTURE_NATIVE_PROCESS_STARTED;
+    if (!started) process.exit(2);
+    while (!fs.existsSync(started)) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    peer.socket.write(Buffer.from([0x88, 0x80, 0x11, 0x22, 0x33, 0x44]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    peer.socket.end();
+    process.exit(0);
+  }
   const response = JSON.parse(await peer.next());
   const completed = JSON.parse(await peer.next());
+  let ownerDecision;
+  if (fixtureMode === "native-repository") {
+    if (process.env.TIBER_FIXTURE_NATIVE_OWNER_RELEASE) {
+      while (!fs.existsSync(process.env.TIBER_FIXTURE_NATIVE_OWNER_RELEASE)) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    peer.socket.write(
+      websocketFrame(
+        JSON.stringify({
+          id: 18,
+          method: "turn/start",
+          params: {
+            input: [{ text: "approve", type: "text" }],
+            threadId: "thread-1",
+          },
+        }),
+        true,
+      ),
+    );
+    ownerDecision = {
+      response: JSON.parse(await peer.next()),
+      completed: JSON.parse(await peer.next()),
+    };
+  }
   fs.writeFileSync(
     process.env.TIBER_FIXTURE_NATIVE_TURN_RESULT,
-    JSON.stringify({ completed, response }),
+    JSON.stringify({ completed, ownerDecision, response }),
   );
   peer.socket.write(Buffer.from([0x88, 0x80, 0x11, 0x22, 0x33, 0x44]));
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -163,11 +199,211 @@ if (remoteIndex >= 0 && process.env.TIBER_FIXTURE_CODEX_TUI_INVOCATION) {
 }
 const listenIndex = process.argv.indexOf("--listen");
 if (process.argv.includes("app-server") && listenIndex >= 0) {
+  if (fixtureMode === "native-backend-exit") process.exit(3);
   const endpoint = process.argv.at(listenIndex + 1);
   if (!endpoint?.startsWith("unix://")) process.exit(2);
   const server = net.createServer(async (socket) => {
     if (!process.env.TIBER_FIXTURE_NATIVE_TURN_RESULT) return;
     const next = await acceptWebsocket(socket);
+    if (fixtureMode === "native-real-tui") {
+      const nativeThreadId = "019c0132-1111-7111-8111-111111111111";
+      const nativeTurnId = "019c0132-2222-7222-8222-222222222222";
+      while (true) {
+        const message = JSON.parse(await next());
+        if (process.env.TIBER_FIXTURE_NATIVE_BACKEND_MESSAGES) {
+          fs.appendFileSync(
+            process.env.TIBER_FIXTURE_NATIVE_BACKEND_MESSAGES,
+            `${JSON.stringify(message)}\n`,
+          );
+        }
+        const reply = (value) => {
+          socket.write(websocketFrame(JSON.stringify(value), false));
+        };
+        if (message.method === "initialize") {
+          reply({
+            id: message.id,
+            result: {
+              codexHome: process.env.CODEX_HOME,
+              platformFamily: "unix",
+              platformOs: "linux",
+              userAgent: "fixture/0.147.0",
+            },
+          });
+        } else if (message.method === "account/read") {
+          reply({
+            id: message.id,
+            result: {
+              account: {
+                email: "fixture@example.invalid",
+                planType: "plus",
+                type: "chatgpt",
+              },
+              requiresOpenaiAuth: true,
+            },
+          });
+        } else if (message.method === "model/list") {
+          reply({
+            id: message.id,
+            result: {
+              data: [
+                {
+                  additionalSpeedTiers: [],
+                  availabilityNux: null,
+                  defaultReasoningEffort: "medium",
+                  defaultServiceTier: null,
+                  description: "Fixture model for the reviewed native TUI boundary.",
+                  displayName: "Fixture Model",
+                  hidden: false,
+                  id: "fixture-model",
+                  inputModalities: ["text"],
+                  isDefault: true,
+                  model: "fixture-model",
+                  modelSpecialty: null,
+                  multiAgentVersion: null,
+                  serviceTiers: [],
+                  supportedReasoningEfforts: [
+                    { description: "Fixture reasoning", reasoningEffort: "medium" },
+                  ],
+                  supportsPersonality: false,
+                  upgrade: null,
+                  upgradeInfo: null,
+                },
+              ],
+              nextCursor: null,
+            },
+          });
+        } else if (message.method === "configRequirements/read") {
+          reply({ id: message.id, result: { requirements: null } });
+        } else if (message.method === "hooks/list") {
+          reply({
+            id: message.id,
+            result: {
+              data: (message.params?.cwds ?? []).map((cwd) => ({
+                cwd,
+                errors: [],
+                hooks: [],
+                warnings: [],
+              })),
+            },
+          });
+        } else if (message.method === "skills/list") {
+          reply({
+            id: message.id,
+            result: {
+              data: (message.params?.cwds ?? []).map((cwd) => ({
+                cwd,
+                errors: [],
+                skills: [],
+              })),
+            },
+          });
+        } else if (message.method === "plugin/list") {
+          reply({
+            id: message.id,
+            result: {
+              featuredPluginIds: [],
+              marketplaceLoadErrors: [],
+              marketplaces: [],
+            },
+          });
+        } else if (message.method === "account/rateLimits/read") {
+          reply({
+            id: message.id,
+            result: {
+              rateLimitResetCredits: null,
+              rateLimits: null,
+              rateLimitsByLimitId: {},
+            },
+          });
+        } else if (message.method === "thread/start") {
+          const now = Math.floor(Date.now() / 1000);
+          reply({
+            id: message.id,
+            result: {
+              activePermissionProfile: null,
+              approvalPolicy: "never",
+              approvalsReviewer: "user",
+              cwd: process.cwd(),
+              instructionSources: [],
+              model: "fixture-model",
+              modelProvider: "fixture",
+              multiAgentMode: "explicitRequestOnly",
+              reasoningEffort: "medium",
+              runtimeWorkspaceRoots: [process.cwd()],
+              sandbox: { networkAccess: false, type: "readOnly" },
+              serviceTier: "default",
+              thread: {
+                agentNickname: null,
+                agentRole: null,
+                canAcceptDirectInput: true,
+                cliVersion: "0.147.0",
+                createdAt: now,
+                cwd: process.cwd(),
+                ephemeral: false,
+                extra: null,
+                forkedFromId: null,
+                gitInfo: null,
+                historyMode: "paginated",
+                id: nativeThreadId,
+                modelProvider: "fixture",
+                name: null,
+                parentThreadId: null,
+                path: null,
+                preview: "",
+                recencyAt: now,
+                section: null,
+                sectionEnteredAt: null,
+                sessionId: nativeThreadId,
+                source: "vscode",
+                status: { type: "idle" },
+                threadSource: "user",
+                turns: [],
+                updatedAt: now,
+              },
+            },
+          });
+        } else if (message.method === "turn/start") {
+          const prompt = message.params?.input?.[0]?.text ?? "missing";
+          if (process.env.TIBER_FIXTURE_NATIVE_BACKEND_TURNS) {
+            fs.appendFileSync(
+              process.env.TIBER_FIXTURE_NATIVE_BACKEND_TURNS,
+              `${prompt}\n`,
+            );
+          }
+          reply({
+            id: message.id,
+            result: { turn: { id: nativeTurnId, items: [], status: "inProgress" } },
+          });
+          reply({
+            method: "item/agentMessage/delta",
+            params: {
+              delta: "native real TUI answer",
+              itemId: "message-1",
+              threadId: nativeThreadId,
+              turnId: nativeTurnId,
+            },
+          });
+          reply({
+            method: "turn/completed",
+            params: {
+              threadId: nativeThreadId,
+              turn: {
+                id: nativeTurnId,
+                items: [
+                  { id: "message-1", text: "native real TUI answer", type: "agentMessage" },
+                ],
+                status: "completed",
+              },
+            },
+          });
+        } else if (message.id !== undefined) {
+          reply({
+            error: { code: -32601, message: `unsupported fixture method: ${message.method}` },
+            id: message.id,
+          });
+        }
+      }
+    }
     const request = JSON.parse(await next());
     if (process.env.TIBER_FIXTURE_NATIVE_BACKEND_TURNS) {
       fs.appendFileSync(
@@ -178,6 +414,116 @@ if (process.argv.includes("app-server") && listenIndex >= 0) {
     socket.write(
       websocketFrame(JSON.stringify({ id: 17, result: { turn: { id: "turn-1" } } }), false),
     );
+    if (fixtureMode === "native-process" || fixtureMode === "native-process-cancel") {
+      socket.write(
+        websocketFrame(
+          JSON.stringify({
+            id: "native-process-request",
+            method: "item/tool/call",
+            params: {
+              arguments: {
+                command: "focused-test",
+                operation: "run_configured_command",
+              },
+              callId: "native-process-call",
+              threadId: "thread-1",
+              tool: "tiber_effect",
+              turnId: "turn-1",
+            },
+          }),
+          false,
+        ),
+      );
+      const effectResult = JSON.parse(await next());
+      if (process.env.TIBER_FIXTURE_NATIVE_EFFECT_RESULT) {
+        fs.writeFileSync(
+          process.env.TIBER_FIXTURE_NATIVE_EFFECT_RESULT,
+          JSON.stringify(effectResult),
+        );
+      }
+    }
+    if (fixtureMode === "native-task") {
+      socket.write(
+        websocketFrame(
+          JSON.stringify({
+            id: "native-task-request",
+            method: "item/tool/call",
+            params: {
+              arguments: { arguments: ["list"] },
+              callId: "native-task-call",
+              threadId: "thread-1",
+              tool: "tiber_tasks",
+              turnId: "turn-1",
+            },
+          }),
+          false,
+        ),
+      );
+      const effectResult = JSON.parse(await next());
+      if (process.env.TIBER_FIXTURE_NATIVE_EFFECT_RESULT) {
+        fs.writeFileSync(
+          process.env.TIBER_FIXTURE_NATIVE_EFFECT_RESULT,
+          JSON.stringify(effectResult),
+        );
+      }
+    }
+    if (
+      fixtureMode === "native-repository" ||
+      fixtureMode === "native-repository-crash"
+    ) {
+      socket.write(
+        websocketFrame(
+          JSON.stringify({
+            id: "native-repository-read-request",
+            method: "item/tool/call",
+            params: {
+              arguments: { operation: "read_file", path: "README.md" },
+              callId: "native-repository-read-call",
+              threadId: "thread-1",
+              tool: "tiber_repository_read",
+              turnId: "turn-1",
+            },
+          }),
+          false,
+        ),
+      );
+      const readResult = JSON.parse(await next());
+      if (process.env.TIBER_FIXTURE_NATIVE_READ_RESULT) {
+        fs.writeFileSync(
+          process.env.TIBER_FIXTURE_NATIVE_READ_RESULT,
+          JSON.stringify(readResult),
+        );
+      }
+      const observed = JSON.parse(readResult.result.contentItems[0].text).content;
+      socket.write(
+        websocketFrame(
+          JSON.stringify({
+            id: "native-repository-request",
+            method: "item/tool/call",
+            params: {
+              arguments: {
+                action: "write",
+                expected: observed,
+                path: "README.md",
+                replacement: "after\n",
+              },
+              callId: "native-repository-call",
+              threadId: "thread-1",
+              tool: "tiber_repository_proposal",
+              turnId: "turn-1",
+            },
+          }),
+          false,
+        ),
+      );
+      const effectResult = JSON.parse(await next());
+      if (process.env.TIBER_FIXTURE_NATIVE_EFFECT_RESULT) {
+        fs.writeFileSync(
+          process.env.TIBER_FIXTURE_NATIVE_EFFECT_RESULT,
+          JSON.stringify(effectResult),
+        );
+      }
+    }
     socket.write(
       websocketFrame(
         JSON.stringify({
@@ -197,6 +543,59 @@ if (process.argv.includes("app-server") && listenIndex >= 0) {
         false,
       ),
     );
+    if (fixtureMode === "native-repository") {
+      const ownerRequest = JSON.parse(await next());
+      socket.write(
+        websocketFrame(
+          JSON.stringify({ id: ownerRequest.id, result: { turn: { id: "turn-2" } } }),
+          false,
+        ),
+      );
+      socket.write(
+        websocketFrame(
+          JSON.stringify({
+            id: "native-repository-verification-request",
+            method: "item/tool/call",
+            params: {
+              arguments: {
+                command: "focused-test",
+                operation: "run_configured_command",
+              },
+              callId: "native-repository-verification-call",
+              threadId: "thread-1",
+              tool: "tiber_effect",
+              turnId: "turn-2",
+            },
+          }),
+          false,
+        ),
+      );
+      const verificationResult = JSON.parse(await next());
+      if (process.env.TIBER_FIXTURE_NATIVE_VERIFICATION_RESULT) {
+        fs.writeFileSync(
+          process.env.TIBER_FIXTURE_NATIVE_VERIFICATION_RESULT,
+          JSON.stringify(verificationResult),
+        );
+      }
+      socket.write(
+        websocketFrame(
+          JSON.stringify({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: {
+                id: "turn-2",
+                items: [
+                  { id: "message-2", text: "approved native repository change", type: "agentMessage" },
+                ],
+                status: "completed",
+              },
+            },
+          }),
+          false,
+        ),
+      );
+    }
   });
   server.listen(endpoint.slice("unix://".length));
   setInterval(() => {}, 1000);

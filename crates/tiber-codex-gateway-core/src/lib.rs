@@ -758,7 +758,8 @@ pub fn validate_thread_start_response(input: &[u8]) -> Result<(), GatewayError> 
     let message = parse_message(input)?;
     let matches = message.pointer("/result/approvalPolicy") == Some(&json!("never"))
         && message.pointer("/result/approvalsReviewer") == Some(&json!("user"))
-        && message.pointer("/result/sandbox") == Some(&json!("read-only"));
+        && message.pointer("/result/sandbox/type") == Some(&json!("readOnly"))
+        && message.pointer("/result/sandbox/networkAccess") == Some(&json!(false));
     if !matches {
         return Err(GatewayError::new(
             "codex_gateway_authority_policy_mismatch",

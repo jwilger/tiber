@@ -615,6 +615,434 @@ mod tests {
     }
 
     #[test]
+    fn native_codex_uses_the_signed_tiber_task_surface() {
+        let fixture = HarnessFixture::new();
+        let effect_result = fixture.repository.join("native-task-effect-result.json");
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env(
+                "TIBER_FIXTURE_CODEX_TUI_INVOCATION",
+                fixture.repository.join("task.json"),
+            )
+            .env("TIBER_FIXTURE_MODE", "native-task")
+            .env("TIBER_FIXTURE_NATIVE_EFFECT_RESULT", &effect_result)
+            .env(
+                "TIBER_FIXTURE_NATIVE_TURN_RESULT",
+                fixture.repository.join("task-turn.json"),
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("bare Tiber should complete the native task turn");
+        assert_success(&output);
+        let response: Value = serde_json::from_slice(
+            &fs::read(effect_result).expect("native task result should be captured"),
+        )
+        .expect("native task result should remain JSON");
+        assert_eq!(
+            response.pointer("/result/success"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(
+            response
+                .pointer("/result/contentItems/0/text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains(&fixture.task_id))
+        );
+    }
+
+    #[test]
+    fn native_codex_runs_only_a_trusted_configured_command_through_tiber() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("native-focused-test");
+        let invocations = fixture.repository.join("native-focused-test-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/native-focused-test-invocations\nprintf 'native focused success\\n'\n",
+        )
+        .expect("native configured command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("native configured command should be executable");
+        install_process_configuration(&fixture.repository, "focused-test", &command, 5_000);
+        let invocation = fixture.repository.join("native-process-invocation.json");
+        let turn_result = fixture.repository.join("native-process-turn-result.json");
+        let effect_result = fixture.repository.join("native-process-effect-result.json");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("TIBER_FIXTURE_MODE", "native-process")
+            .env("TIBER_FIXTURE_NATIVE_EFFECT_RESULT", &effect_result)
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &turn_result)
+            .env(
+                "TIBER_TEST_PROCESS_LAUNCHER",
+                fixture.repository.join("process-launcher"),
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("bare Tiber should complete the configured native process turn");
+
+        assert!(
+            output.status.success(),
+            "native process turn failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(invocations)
+                .expect("configured native invocation should be recorded"),
+            "invoked\n"
+        );
+        let response: Value = serde_json::from_slice(
+            &fs::read(effect_result).expect("native process result should be captured"),
+        )
+        .expect("native process result should remain JSON");
+        assert_eq!(
+            response.pointer("/result/success"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(
+            response
+                .pointer("/result/contentItems/0/text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("native focused success"))
+        );
+    }
+
+    #[test]
+    fn closing_native_codex_cancels_and_reaps_the_active_configured_process() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("native-cancel-test");
+        let started = fixture.repository.join("native-process-started");
+        let survivor = fixture.repository.join("native-process-survivor");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'started\\n' > /workspace/native-process-started\nwhile :; do :; done\nprintf 'survived\\n' > /workspace/native-process-survivor\n",
+        )
+        .expect("native cancellation command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("native cancellation command should be executable");
+        install_process_configuration(&fixture.repository, "focused-test", &command, 30_000);
+        let invocation = fixture.repository.join("native-cancel-invocation.json");
+        let turn_result = fixture.repository.join("native-cancel-turn-result.json");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("TIBER_FIXTURE_MODE", "native-process-cancel")
+            .env("TIBER_FIXTURE_NATIVE_PROCESS_STARTED", &started)
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &turn_result)
+            .env(
+                "TIBER_TEST_PROCESS_LAUNCHER",
+                fixture.repository.join("process-launcher"),
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("native cancellation scenario should start");
+        wait_for_file_or_exit(&mut child, &started, &fixture.terminal_capture);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .expect("native cancellation status should remain readable")
+            {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Tiber did not stop after the native Codex client closed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(status.success());
+        assert!(durable_eventstore_text(&fixture.repository).contains("Cancelled"));
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            !survivor.exists(),
+            "the configured process survived native Codex cancellation"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::unseparated_literal_suffix,
+        reason = "the crash fixture uses a typed i8 exit code before lossless conversion to i32"
+    )]
+    fn native_process_crash_reconciles_once_without_redispatch() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        let command = fixture.repository.join("native-crash-test");
+        let invocations = fixture.repository.join("native-crash-invocations");
+        let crash = fixture.repository.join("native-process-crash");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'invoked\\n' >> /workspace/native-crash-invocations\nprintf 'completed before crash\\n'\n",
+        )
+        .expect("native crash command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("native crash command should be executable");
+        install_process_configuration(&fixture.repository, "focused-test", &command, 5_000);
+
+        let first = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env(
+                "TIBER_FIXTURE_CODEX_TUI_INVOCATION",
+                fixture.repository.join("first.json"),
+            )
+            .env("TIBER_FIXTURE_MODE", "native-process")
+            .env(
+                "TIBER_FIXTURE_NATIVE_TURN_RESULT",
+                fixture.repository.join("first-turn.json"),
+            )
+            .env("TIBER_TEST_CRASH_AFTER_PROCESS_DISPATCH_SENTINEL", &crash)
+            .env(
+                "TIBER_TEST_PROCESS_LAUNCHER",
+                fixture.repository.join("process-launcher"),
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("native process crash boundary should run");
+        assert_eq!(first.status.code(), Some(i32::from(87i8)));
+        assert!(crash.exists());
+
+        let second = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env(
+                "TIBER_FIXTURE_CODEX_TUI_INVOCATION",
+                fixture.repository.join("second.json"),
+            )
+            .env("TIBER_FIXTURE_MODE", "native-turn")
+            .env(
+                "TIBER_FIXTURE_NATIVE_TURN_RESULT",
+                fixture.repository.join("second-turn.json"),
+            )
+            .env(
+                "TIBER_TEST_PROCESS_LAUNCHER",
+                fixture.repository.join("process-launcher"),
+            )
+            .env(
+                "TIBER_TEST_PROCESS_RECONCILIATIONS",
+                &fixture.process_reconciliations,
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("native restart should reconcile and admit one fresh turn");
+        assert_success(&second);
+        assert_eq!(
+            fs::read_to_string(invocations).expect("native invocation count should be readable"),
+            "invoked\n",
+            "restart must not redispatch the configured command"
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.process_reconciliations)
+                .expect("native reconciliation count should be readable"),
+            "reconcile\n"
+        );
+        let active_output = fixture.tiber(&["session", "active"]);
+        assert_success(&active_output);
+        let active_text = String::from_utf8_lossy(&active_output.stdout);
+        assert!(active_text.contains("inference interrupted: native_codex_restart_interrupted"));
+        assert!(active_text.contains("assistant: native fixture answer"));
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the public native coding fixture owns the causal read, proposal, owner decision, application, and configured verification sequence"
+    )]
+    fn native_codex_applies_a_repository_proposal_only_after_owner_approval() {
+        let fixture = HarnessFixture::new();
+        install_test_process_launcher(&fixture.repository);
+        fs::write(fixture.repository.join("README.md"), "before\n")
+            .expect("repository preimage should be written");
+        let command = fixture.repository.join("native-repository-verification");
+        let verification_invocations = fixture
+            .repository
+            .join("native-repository-verification-invocations");
+        fs::write(
+            &command,
+            "#!/bin/sh\nIFS= read -r line < /workspace/README.md\n[ \"$line\" = after ] || exit 1\nprintf 'verified\\n' >> /workspace/native-repository-verification-invocations\nprintf 'repository verification passed\\n'\n",
+        )
+        .expect("native repository verification command should be written");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+            .expect("native repository verification command should be executable");
+        install_process_configuration(&fixture.repository, "focused-test", &command, 5_000);
+        let invocation = fixture.repository.join("native-repository-invocation.json");
+        let turn_result = fixture
+            .repository
+            .join("native-repository-turn-result.json");
+        let effect_result = fixture
+            .repository
+            .join("native-repository-effect-result.json");
+        let read_result = fixture
+            .repository
+            .join("native-repository-read-result.json");
+        let owner_release = fixture.repository.join("native-repository-owner-release");
+        let verification_result = fixture
+            .repository
+            .join("native-repository-verification-result.json");
+
+        let child = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("TIBER_FIXTURE_MODE", "native-repository")
+            .env("TIBER_FIXTURE_NATIVE_EFFECT_RESULT", &effect_result)
+            .env("TIBER_FIXTURE_NATIVE_READ_RESULT", &read_result)
+            .env("TIBER_FIXTURE_NATIVE_OWNER_RELEASE", &owner_release)
+            .env(
+                "TIBER_FIXTURE_NATIVE_VERIFICATION_RESULT",
+                &verification_result,
+            )
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &turn_result)
+            .env(
+                "TIBER_TEST_PROCESS_LAUNCHER",
+                fixture.repository.join("process-launcher"),
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("bare Tiber should start the owner-approved native repository turn");
+        wait_for_file(&effect_result);
+        assert_eq!(
+            fs::read_to_string(fixture.repository.join("README.md"))
+                .expect("unapproved repository target should remain readable"),
+            "before\n",
+            "a model proposal must not mint repository mutation authority"
+        );
+        fs::write(&owner_release, b"approve\n")
+            .expect("native owner-decision fixture should be released");
+        let output = child
+            .wait_with_output()
+            .expect("bare Tiber should complete the owner-approved native repository turn");
+
+        assert!(
+            output.status.success(),
+            "native repository turn failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let proposal_response: Value = serde_json::from_slice(
+            &fs::read(effect_result).expect("native repository result should be captured"),
+        )
+        .expect("native repository result should remain JSON");
+        assert_eq!(
+            proposal_response.pointer("/result/success"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(
+            proposal_response
+                .pointer("/result/contentItems/0/text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("awaiting_owner"))
+        );
+        let read_response: Value = serde_json::from_slice(
+            &fs::read(read_result).expect("native repository read result should be captured"),
+        )
+        .expect("native repository read result should remain JSON");
+        assert_eq!(
+            read_response.pointer("/result/success"),
+            Some(&serde_json::json!(true))
+        );
+        let observed: Value = serde_json::from_str(
+            read_response
+                .pointer("/result/contentItems/0/text")
+                .and_then(Value::as_str)
+                .expect("native repository read should return bounded JSON text"),
+        )
+        .expect("native repository read content should remain JSON");
+        assert_eq!(
+            observed.get("content"),
+            Some(&serde_json::json!("before\n"))
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.repository.join("README.md"))
+                .expect("approved repository target should remain readable"),
+            "after\n"
+        );
+        assert_eq!(
+            fs::read_to_string(verification_invocations)
+                .expect("native repository verification invocation should be recorded"),
+            "verified\n"
+        );
+        let verification: Value = serde_json::from_slice(
+            &fs::read(verification_result)
+                .expect("native repository verification result should be captured"),
+        )
+        .expect("native repository verification result should remain JSON");
+        assert_eq!(
+            verification.pointer("/result/success"),
+            Some(&serde_json::json!(true))
+        );
+        let turn: Value = serde_json::from_slice(
+            &fs::read(turn_result).expect("native owner-decision turn should be captured"),
+        )
+        .expect("native owner-decision turn should remain JSON");
+        assert_eq!(
+            turn.pointer("/ownerDecision/completed/params/turn/items/0/text"),
+            Some(&serde_json::json!("approved native repository change"))
+        );
+    }
+
+    #[test]
+    fn native_restart_cancels_a_lost_unapproved_repository_proposal() {
+        let fixture = HarnessFixture::new();
+        fs::write(fixture.repository.join("README.md"), "before\n")
+            .expect("repository preimage should be written");
+        let first_result = fixture.repository.join("native-lost-proposal-turn.json");
+        let proposal_result = fixture.repository.join("native-lost-proposal-effect.json");
+        let first = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env(
+                "TIBER_FIXTURE_CODEX_TUI_INVOCATION",
+                fixture.repository.join("first.json"),
+            )
+            .env("TIBER_FIXTURE_MODE", "native-repository-crash")
+            .env("TIBER_FIXTURE_NATIVE_EFFECT_RESULT", &proposal_result)
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &first_result)
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("native proposal turn should finish without an owner decision");
+        assert_success(&first);
+        assert_eq!(
+            fs::read_to_string(fixture.repository.join("README.md"))
+                .expect("unapproved repository target should remain readable"),
+            "before\n"
+        );
+
+        let second = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env(
+                "TIBER_FIXTURE_CODEX_TUI_INVOCATION",
+                fixture.repository.join("second.json"),
+            )
+            .env("TIBER_FIXTURE_MODE", "native-turn")
+            .env(
+                "TIBER_FIXTURE_NATIVE_TURN_RESULT",
+                fixture.repository.join("second-turn.json"),
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("native restart should cancel the lost owner decision and continue");
+        assert_success(&second);
+        assert!(durable_eventstore_text(&fixture.repository).contains("Cancelled"));
+        assert_eq!(
+            fs::read_to_string(fixture.repository.join("README.md"))
+                .expect("cancelled repository target should remain readable"),
+            "before\n"
+        );
+    }
+
+    #[test]
     fn native_turn_restart_interrupts_the_unforwarded_request_and_resumes_once() {
         let fixture = HarnessFixture::new();
         let invocation = fixture.repository.join("native-restart-invocation.json");
@@ -741,28 +1169,59 @@ mod tests {
     #[test]
     #[expect(
         clippy::panic,
-        reason = "the bounded real-PTY compatibility fixture polls the reviewed Codex startup"
+        clippy::too_many_lines,
+        reason = "the bounded real-PTY fixture deliberately fails fast on early exit and owns setup, prompt submission, rendering, and terminal restoration assertions"
     )]
     fn reviewed_codex_tui_connects_through_tiber_and_restores_the_terminal() {
-        let temporary = TempDir::new().expect("native Codex fixture should isolate state");
-        let capture = temporary.path().join("native-codex-terminal.txt");
-        let state_home = temporary.path().join("state");
+        let reviewed_codex = test_codex();
+        let fixture = HarnessFixture::new();
+        let capture = fixture.repository.join("native-codex-terminal.txt");
+        let backend_messages = fixture.repository.join("native-real-backend-messages");
+        let backend_turns = fixture.repository.join("native-real-backend-turns");
+        let native_result = fixture.repository.join("native-real-result");
+        let fake_server = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/tests/fake-app-server.mjs")
+            .canonicalize()
+            .expect("workspace fake app-server should exist");
+        let wrapper = fixture.codex_directory.join("codex");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = '--remote' ]; then exec '{}' \"$@\"; fi\nexec node '{}' \"$@\"\n",
+                reviewed_codex.display(),
+                fake_server.display()
+            ),
+        )
+        .expect("native Codex dispatch wrapper should be written");
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
+            .expect("native Codex dispatch wrapper should be executable");
         let mut child = Command::new("script")
             .args([
                 "--quiet",
+                "--flush",
                 "--return",
                 "--command",
                 &format!("stty rows 24 cols 80; {}", env!("CARGO_BIN_EXE_tiber")),
             ])
             .arg(&capture)
-            .current_dir(temporary.path())
-            .env("XDG_STATE_HOME", state_home)
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_MODE", "native-real-tui")
+            .env("TIBER_FIXTURE_NATIVE_BACKEND_MESSAGES", &backend_messages)
+            .env("TIBER_FIXTURE_NATIVE_BACKEND_TURNS", &backend_turns)
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &native_result)
+            .env("XDG_STATE_HOME", &fixture.state_home)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("reviewed native Codex should start in a PTY");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut backend_ready_at = None;
+        let mut prompt_sent = false;
+        let mut prompt_submitted = false;
+        let mut prompt_typed_at = None;
+        let mut answer_rendered = false;
         while Instant::now() < deadline {
             if child
                 .try_wait()
@@ -770,10 +1229,58 @@ mod tests {
                 .is_some()
             {
                 let rendered = fs::read_to_string(&capture).unwrap_or_default();
-                panic!("native Codex exited before the PTY boundary: {rendered}");
+                let messages = fs::read_to_string(&backend_messages).unwrap_or_default();
+                panic!(
+                    "native Codex exited before the PTY boundary: {rendered}\nbackend messages:\n{messages}"
+                );
+            }
+            let rendered = fs::read_to_string(&capture).unwrap_or_default();
+            let backend_ready = fs::read_to_string(&backend_messages)
+                .unwrap_or_default()
+                .contains("\"method\":\"thread/start\"");
+            if backend_ready && backend_ready_at.is_none() {
+                backend_ready_at = Some(Instant::now());
+            }
+            let composer_settled = backend_ready_at
+                .is_some_and(|ready_at| ready_at.elapsed() >= Duration::from_millis(500));
+            if !prompt_sent && (rendered.contains("Welcome") || composer_settled) {
+                child
+                    .stdin
+                    .as_mut()
+                    .expect("native Codex PTY stdin should remain open")
+                    .write_all(b"native real prompt")
+                    .expect("the first prompt should reach the real Codex composer");
+                prompt_sent = true;
+                prompt_typed_at = Some(Instant::now());
+            }
+            if !prompt_submitted
+                && prompt_typed_at
+                    .is_some_and(|typed_at| typed_at.elapsed() >= Duration::from_millis(100))
+            {
+                child
+                    .stdin
+                    .as_mut()
+                    .expect("native Codex PTY stdin should remain open")
+                    .write_all(b"\r")
+                    .expect("Enter should submit the first real Codex prompt");
+                prompt_submitted = true;
+            }
+            if rendered.contains("native real TUI answer") {
+                answer_rendered = true;
+                break;
             }
             thread::sleep(Duration::from_millis(10));
         }
+        assert!(
+            prompt_sent,
+            "the reviewed Codex composer never became ready"
+        );
+        assert!(
+            answer_rendered,
+            "the reviewed Codex TUI did not render the gateway-mediated answer; terminal: {}; backend messages: {}",
+            fs::read_to_string(&capture).unwrap_or_default(),
+            fs::read_to_string(&backend_messages).unwrap_or_default(),
+        );
         child
             .stdin
             .as_mut()
@@ -785,10 +1292,15 @@ mod tests {
         assert!(status.success());
         let rendered =
             fs::read_to_string(capture).expect("terminal capture should remain readable");
-        assert!(rendered.contains("Welcome"));
-        assert!(rendered.contains("OpenAI's"));
+        assert!(rendered.contains("v0.147.0"));
+        assert!(rendered.contains("native real prompt"));
+        assert!(rendered.contains("native real TUI answer"));
         assert!(!rendered.contains("app_server_version_incompatible"));
         assert!(!rendered.contains("failed to connect to remote app server"));
+        assert_eq!(
+            fs::read_to_string(backend_turns).expect("native prompt should reach the backend"),
+            "native real prompt\n"
+        );
     }
 
     #[test]
@@ -816,6 +1328,30 @@ mod tests {
         assert!(
             !fixture.initialized.is_file(),
             "incompatible app-server must not be initialized"
+        );
+    }
+
+    #[test]
+    fn native_backend_failure_returns_before_terminal_takeover() {
+        let fixture = HarnessFixture::new();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_MODE", "native-backend-exit")
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("bare Tiber should report native backend startup failure");
+
+        assert!(!output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "backend startup failure must not draw a TUI"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("diagnostic should be UTF-8");
+        assert!(
+            stderr.starts_with("app_server_start_failed:"),
+            "backend failure should retain a stable pre-terminal code: {stderr}"
         );
     }
 
@@ -4726,6 +5262,18 @@ mod tests {
             .map(|directory| directory.join("sh"))
             .find(|candidate| candidate.is_file())
             .expect("the pinned test shell should be available")
+    }
+
+    #[expect(
+        clippy::single_call_fn,
+        reason = "one real-PTY compatibility scenario resolves the reviewed Codex before replacing the fixture PATH"
+    )]
+    fn test_codex() -> PathBuf {
+        let path = env::var_os("PATH").expect("test PATH should be available");
+        env::split_paths(&path)
+            .map(|directory| directory.join("codex"))
+            .find(|candidate| candidate.is_file())
+            .expect("the reviewed Codex executable should be available")
     }
 
     fn install_process_configuration(

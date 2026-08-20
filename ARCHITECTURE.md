@@ -32,7 +32,14 @@ reconciliation, and terminal workflow outcome.
   the prompt/workflow request is signed; terminal presentation is suspended
   until the exact correlated observation or interruption is signed and the
   workflow advances. Restart closes an admitted but unresolved turn without
-  redispatching it.
+  redispatching it. Native dynamic tools reuse the existing task, repository,
+  and configured-process boundaries: a bounded non-shell read returns one
+  exact UTF-8 regular-file preimage without minting authority, repository
+  proposals remain inert until a later exact owner `approve` or `deny` turn,
+  and configured commands resolve only semantic IDs from trusted repository
+  configuration.
+  Closing the native client cancels and reaps an active configured process
+  before the gateway runtime is released.
 - **Application core:** explicit state machines for conversations,
   assignments, effects, verification, delivery, recovery, and cancellation.
 - **EventCore domains:** authoritative facts for sessions, agents, tasks,

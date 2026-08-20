@@ -15,7 +15,7 @@ mod tasks;
 
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, string::FromUtf8Error};
+use alloc::{collections::BTreeMap, string::FromUtf8Error, sync::Arc};
 use std::{
     collections::HashSet,
     env, fs,
@@ -23,7 +23,10 @@ use std::{
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{self, Stdio},
-    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
+    sync::{
+        Mutex,
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -39,7 +42,7 @@ use tiber_app_server::{
     TiberEffectRequestId, TiberEffectResult, TurnEvent, inspect_protocol_schema,
 };
 use tiber_codex_gateway::{EffectResponse, Gateway, GatewayConfig};
-use tiber_codex_gateway_core::{EffectKind, EffectRequest, GatewayPolicy, TurnOutcome};
+use tiber_codex_gateway_core::{EffectKind, EffectRequest, GatewayPolicy, RequestId, TurnOutcome};
 use tiber_process_core::{
     AssignmentWorkflowProvenance, ConfiguredCommand, ConfiguredCommandCatalog, ConfiguredCommandId,
     FixedEnvironment, LiteralArgument, MAX_TIMEOUT, OutputBounds, ProcessInvocationId,
@@ -404,36 +407,107 @@ fn start_native_gateway(
         })
     };
     let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
+    let active_process = NativeProcessCancellation::default();
+    let application_process = active_process.clone();
     let gateway_thread = thread::spawn(move || {
         runtime.block_on(async move {
             let application_task = tokio::spawn(async move {
                 let mut first_turn = true;
+                let mut pending_repository = None;
                 loop {
                     tokio::select! {
                         Some(call) = effects.recv() => {
                             let effect_repository = repository.clone();
                             let request = call.request().clone();
+                            let repository_proposal_pending = pending_repository.is_some();
+                            let process_cancellation = ProcessCancellation::default();
+                            let is_process = request
+                                .params()
+                                .get("tool")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("tiber_effect");
+                            if is_process {
+                                application_process.install(process_cancellation.clone());
+                            }
                             let response = tokio::task::spawn_blocking(move || {
-                                native_effect_response(&effect_repository, &request)
+                                native_effect_response(
+                                    &effect_repository,
+                                    &request,
+                                    repository_proposal_pending,
+                                    &process_cancellation,
+                                )
                             })
                             .await
                             .map_err(|_error| "codex_gateway_effect_worker_failed".to_owned())?
                             .map_err(|_error| "codex_gateway_effect_response_failed".to_owned())?;
-                            call.complete(response)
+                            if is_process {
+                                application_process.clear();
+                            }
+                            if let Some(proposal) = response.pending_repository {
+                                pending_repository = Some(proposal);
+                            }
+                            call.complete(response.response)
                                 .map_err(|_response| "codex_gateway_effect_completion_failed".to_owned())?;
                         }
                         Some(call) = turns.recv() => {
                             let recover = first_turn;
                             first_turn = false;
                             let prompt = call.request().prompt().to_owned();
+                            let repository_decision = match (prompt.as_str(), pending_repository.take()) {
+                                ("approve", Some(pending)) => {
+                                    Some(NativeRepositoryDecision::Approve(pending))
+                                }
+                                ("deny", Some(pending)) => {
+                                    Some(NativeRepositoryDecision::Deny(pending))
+                                }
+                                (_, Some(_pending)) => {
+                                    return Err("repository_owner_decision_required".to_owned());
+                                }
+                                (_, None) => None,
+                            };
                             let turn_repository = repository.clone();
                             tokio::task::spawn_blocking(move || {
+                                let (_initial_binding, initial_session_events) =
+                                    ensure_started_session(&turn_repository)
+                                        .map_err(|error| error.code().to_owned())?;
                                 if recover {
+                                    let mut recovery_projection = ConversationProjection::new();
+                                    apply_process_restart_receipts(
+                                        &turn_repository,
+                                        &initial_session_events,
+                                        &mut recovery_projection,
+                                    )
+                                    .map_err(|error| error.code().to_owned())?;
                                     resolve_interrupted_native_inference(&turn_repository)
                                         .map_err(|error| error.code().to_owned())?;
                                 }
-                                ensure_started_session(&turn_repository)
+                                let (_current_binding, session_events) =
+                                    ensure_started_session(&turn_repository)
+                                        .map_err(|error| error.code().to_owned())?;
+                                if recover {
+                                    cancel_lost_repository_proposal(
+                                        &turn_repository,
+                                        &session_events,
+                                    )
                                     .map_err(|error| error.code().to_owned())?;
+                                }
+                                match repository_decision {
+                                    Some(NativeRepositoryDecision::Approve(pending)) => {
+                                        let _result = publish_approved_repository_change(
+                                            &turn_repository,
+                                            pending,
+                                        )
+                                        .map_err(|error| error.code().to_owned())?;
+                                    }
+                                    Some(NativeRepositoryDecision::Deny(pending)) => {
+                                        publish_denied_repository_change(
+                                            &turn_repository,
+                                            pending,
+                                        )
+                                        .map_err(|error| error.code().to_owned())?;
+                                    }
+                                    None => {}
+                                }
                                 publish_prompt_request(&turn_repository, &prompt)
                                     .map_err(|error| error.code().to_owned())?;
                                 if cfg!(debug_assertions)
@@ -498,6 +572,7 @@ fn start_native_gateway(
                 .serve_one(shutdown_receiver)
                 .await
                 .map_err(|error| error.code().to_owned());
+            active_process.cancel();
             application_task.abort();
             drop(application_task.await);
             gateway_result
@@ -508,41 +583,360 @@ fn start_native_gateway(
 
 /// Declares the bounded signed task-board surface visible to native Codex.
 fn native_dynamic_tools() -> Vec<serde_json::Value> {
-    vec![serde_json::json!({
-        "description": "Runs one bounded Tiber task-board operation through signed task authority.",
-        "inputSchema": {
-            "additionalProperties": false,
-            "properties": {
-                "arguments": {
-                    "items": { "maxLength": 4096, "type": "string" },
-                    "maxItems": 32,
-                    "minItems": 1,
-                    "type": "array"
-                }
+    vec![
+        serde_json::json!({
+            "description": "Runs one bounded Tiber task-board operation through signed task authority.",
+            "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                    "arguments": {
+                        "items": { "maxLength": 4096, "type": "string" },
+                        "maxItems": 32,
+                        "minItems": 1,
+                        "type": "array"
+                    }
+                },
+                "required": ["arguments"],
+                "type": "object"
             },
-            "required": ["arguments"],
-            "type": "object"
-        },
-        "name": "tiber_tasks",
-        "type": "function"
-    })]
+            "name": "tiber_tasks",
+            "type": "function"
+        }),
+        serde_json::json!({
+            "description": "Reads one bounded UTF-8 regular file beneath the repository without granting shell or mutation authority.",
+            "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                    "operation": { "const": "read_file", "type": "string" },
+                    "path": { "maxLength": 4096, "minLength": 1, "type": "string" }
+                },
+                "required": ["operation", "path"],
+                "type": "object"
+            },
+            "name": "tiber_repository_read",
+            "type": "function"
+        }),
+        serde_json::json!({
+            "description": "Proposes one exact repository write for a later owner decision. This never applies the change by itself.",
+            "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                    "action": { "const": "write", "type": "string" },
+                    "expected": { "type": "string" },
+                    "path": { "type": "string" },
+                    "replacement": { "type": "string" }
+                },
+                "required": ["action", "expected", "path", "replacement"],
+                "type": "object"
+            },
+            "name": "tiber_repository_proposal",
+            "type": "function"
+        }),
+        serde_json::json!({
+            "description": "Runs one trusted configured command by semantic identifier through Tiber process authority.",
+            "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                    "command": { "maxLength": 128, "minLength": 1, "type": "string" },
+                    "operation": { "const": "run_configured_command", "type": "string" }
+                },
+                "required": ["operation", "command"],
+                "type": "object"
+            },
+            "name": "tiber_effect",
+            "type": "function"
+        }),
+    ]
+}
+
+/// Application-owned completion for one intercepted native Codex effect.
+struct NativeEffectCompletion {
+    /// Optional repository proposal retained until an exact later owner decision.
+    pending_repository: Option<PendingRepositoryChange>,
+    /// Exact bounded response returned to Codex after Tiber policy completes.
+    response: EffectResponse,
+}
+
+/// Shared cancellation for the single configured process active behind one native gateway.
+#[derive(Clone, Default)]
+struct NativeProcessCancellation(Arc<Mutex<Option<ProcessCancellation>>>);
+
+impl NativeProcessCancellation {
+    /// Cancels the active process tree, if one has crossed the dispatch boundary.
+    fn cancel(&self) {
+        let active = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cancellation) = active.as_ref() {
+            cancellation.cancel();
+        }
+    }
+
+    /// Clears the completed process cancellation without affecting later invocations.
+    fn clear(&self) {
+        let mut active = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = None;
+    }
+
+    /// Installs the exact cancellation paired with the next process dispatch.
+    fn install(&self, cancellation: ProcessCancellation) {
+        let mut active = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = Some(cancellation);
+    }
+}
+
+/// Exact owner decision parsed from a native Codex turn while a proposal is pending.
+enum NativeRepositoryDecision {
+    /// Apply the retained exact proposal through signed repository authority.
+    Approve(PendingRepositoryChange),
+    /// Retain a durable denial without dispatching repository mutation authority.
+    Deny(PendingRepositoryChange),
 }
 
 /// Applies application policy to one intercepted native Codex effect.
 fn native_effect_response(
     repository: &Path,
     request: &EffectRequest,
-) -> Result<EffectResponse, tiber_codex_gateway::TransportError> {
-    if request.kind() != EffectKind::DynamicToolCall
-        || request
-            .params()
-            .get("tool")
-            .and_then(serde_json::Value::as_str)
-            != Some("tiber_tasks")
-    {
-        return EffectResponse::failure(-32601, "Tiber has not authorized this effect", None);
+    repository_proposal_pending: bool,
+    process_cancellation: &ProcessCancellation,
+) -> Result<NativeEffectCompletion, tiber_codex_gateway::TransportError> {
+    if request.kind() != EffectKind::DynamicToolCall {
+        return EffectResponse::failure(-32601, "Tiber has not authorized this effect", None).map(
+            |response| NativeEffectCompletion {
+                pending_repository: None,
+                response,
+            },
+        );
     }
-    EffectResponse::dynamic_tool_call(native_task_result(repository, request.params()))
+    let (result, pending_repository) = match request
+        .params()
+        .get("tool")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("tiber_tasks") => (native_task_result(repository, request.params()), None),
+        Some("tiber_repository_read") => (
+            native_repository_read_result(repository, request.params()),
+            None,
+        ),
+        Some("tiber_effect") => (
+            native_process_result(repository, request, process_cancellation),
+            None,
+        ),
+        Some("tiber_repository_proposal") if !repository_proposal_pending => {
+            native_repository_result(repository, request.params())
+        }
+        Some("tiber_repository_proposal") => (
+            native_effect_failure("repository_proposal_pending", false),
+            None,
+        ),
+        _ => {
+            return EffectResponse::failure(-32601, "Tiber has not authorized this effect", None)
+                .map(|response| NativeEffectCompletion {
+                    pending_repository: None,
+                    response,
+                });
+        }
+    };
+    EffectResponse::dynamic_tool_call(result).map(|response| NativeEffectCompletion {
+        pending_repository,
+        response,
+    })
+}
+
+/// Reads one exact bounded repository preimage without minting effect authority.
+fn native_repository_read_result(
+    repository: &Path,
+    params: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(arguments) = params
+        .get("arguments")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return native_effect_failure("repository_read_invalid", false);
+    };
+    if arguments.len() != 2
+        || arguments
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            != Some("read_file")
+    {
+        return native_effect_failure("repository_read_invalid", false);
+    }
+    let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
+        return native_effect_failure("repository_read_invalid", false);
+    };
+    if path.is_empty() || path.len() > 4096 {
+        return native_effect_failure("repository_read_invalid", false);
+    }
+    match read_bounded_repository_preimage(repository, path) {
+        Ok(bytes) => {
+            let Ok(content) = String::from_utf8(bytes) else {
+                return native_effect_failure(
+                    "repository_mutation_preimage_unsupported_encoding",
+                    false,
+                );
+            };
+            serde_json::json!({
+                "contentItems": [{
+                    "text": serde_json::json!({ "content": content, "path": path }).to_string(),
+                    "type": "inputText"
+                }],
+                "success": true
+            })
+        }
+        Err(error) => native_effect_failure(error.code(), false),
+    }
+}
+
+/// Persists one exact repository proposal without minting owner approval.
+fn native_repository_result(
+    repository: &Path,
+    params: &serde_json::Value,
+) -> (serde_json::Value, Option<PendingRepositoryChange>) {
+    let Some(arguments) = params
+        .get("arguments")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return (
+            native_effect_failure("repository_proposal_invalid", false),
+            None,
+        );
+    };
+    if arguments.len() != 4
+        || arguments.get("action").and_then(serde_json::Value::as_str) != Some("write")
+    {
+        return (
+            native_effect_failure("repository_proposal_invalid", false),
+            None,
+        );
+    }
+    let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
+        return (
+            native_effect_failure("repository_proposal_invalid", false),
+            None,
+        );
+    };
+    let Some(expected) = arguments
+        .get("expected")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return (
+            native_effect_failure("repository_proposal_invalid", false),
+            None,
+        );
+    };
+    let Some(replacement) = arguments
+        .get("replacement")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return (
+            native_effect_failure("repository_proposal_invalid", false),
+            None,
+        );
+    };
+    match publish_repository_proposal(
+        repository,
+        path,
+        expected.as_bytes(),
+        replacement.as_bytes(),
+    ) {
+        Ok((pending, _diff)) => (
+            serde_json::json!({
+                "contentItems": [{
+                    "text": serde_json::json!({
+                        "instruction": "Ask the owner to type approve or deny in the next Codex turn.",
+                        "path": path,
+                        "status": "awaiting_owner"
+                    }).to_string(),
+                    "type": "inputText"
+                }],
+                "success": true
+            }),
+            Some(pending),
+        ),
+        Err(error) => (native_effect_failure(error.code(), false), None),
+    }
+}
+
+/// Runs one native configured-command request through the same signed process boundary.
+#[expect(
+    clippy::pattern_type_mismatch,
+    reason = "the gateway request identifier is borrowed while its bounded semantic value is formatted into process provenance"
+)]
+fn native_process_result(
+    repository: &Path,
+    request: &EffectRequest,
+    cancellation: &ProcessCancellation,
+) -> serde_json::Value {
+    let Some(arguments) = request
+        .params()
+        .get("arguments")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return native_effect_failure("process_request_invalid", false);
+    };
+    let invocation = match request.id() {
+        RequestId::Number(value) => format!("json-number:{value}"),
+        RequestId::String(value) => format!("json-string:{value}"),
+        _ => return native_effect_failure("process_request_invalid", false),
+    };
+    let catalog = match load_configured_process_catalog(repository) {
+        Ok(catalog) => catalog,
+        Err(error) => return native_effect_failure(error.code(), false),
+    };
+    match try_execute_configured_process_request(
+        repository,
+        catalog.as_ref(),
+        arguments,
+        &invocation,
+        cancellation,
+    ) {
+        Ok(result) => native_tiber_effect_result(result),
+        Err(error) => native_effect_failure(error.code(), false),
+    }
+}
+
+/// Projects one typed Tiber effect result into Codex's bounded dynamic-tool result envelope.
+fn native_tiber_effect_result(result: TiberEffectResult) -> serde_json::Value {
+    match result {
+        TiberEffectResult::Success { output } => serde_json::json!({
+            "contentItems": [{ "text": output, "type": "inputText" }],
+            "success": true
+        }),
+        TiberEffectResult::Failure {
+            code,
+            message,
+            retryable,
+        } => serde_json::json!({
+            "contentItems": [{
+                "text": serde_json::json!({
+                    "code": code,
+                    "message": message,
+                    "retryable": retryable
+                }).to_string(),
+                "type": "inputText"
+            }],
+            "success": false
+        }),
+    }
+}
+
+/// Returns one content-free native effect failure.
+fn native_effect_failure(code: &str, retryable: bool) -> serde_json::Value {
+    serde_json::json!({
+        "contentItems": [{
+            "text": serde_json::json!({ "code": code, "retryable": retryable }).to_string(),
+            "type": "inputText"
+        }],
+        "success": false
+    })
 }
 
 /// Parses and executes one bounded native task call through existing signed authority.
@@ -3390,22 +3784,43 @@ fn execute_configured_process(
     }
 }
 
-/// Runs signed preparation, authorization, dispatch, and terminal publication in order.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one imperative process shell visibly orders signed preparation, authority, dispatch, and terminal publication"
-)]
+/// Adapts one app-server pending effect into the shared configured-process request boundary.
 fn try_execute_configured_process(
     repository: &Path,
     catalog: Option<&ConfiguredCommandCatalog>,
     pending: &PendingTiberEffect,
     cancellation: &ProcessCancellation,
 ) -> Result<TiberEffectResult, ProcessEffectError> {
-    let catalog = catalog.ok_or(ProcessEffectError::MissingCatalog)?;
     let arguments = pending
         .arguments()
         .as_object()
         .ok_or(ProcessEffectError::InvalidRequest)?;
+    let invocation = match pending.request_id().clone() {
+        TiberEffectRequestId::Number(value) => format!("json-number:{value}"),
+        TiberEffectRequestId::String(value) => format!("json-string:{value}"),
+    };
+    try_execute_configured_process_request(
+        repository,
+        catalog,
+        arguments,
+        &invocation,
+        cancellation,
+    )
+}
+
+/// Executes one already-bounded configured-process request through durable Tiber authority.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one imperative process shell visibly orders signed preparation, authority, dispatch, and terminal publication"
+)]
+fn try_execute_configured_process_request(
+    repository: &Path,
+    catalog: Option<&ConfiguredCommandCatalog>,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    invocation: &str,
+    cancellation: &ProcessCancellation,
+) -> Result<TiberEffectResult, ProcessEffectError> {
+    let catalog = catalog.ok_or(ProcessEffectError::MissingCatalog)?;
     if arguments.len() != 2
         || arguments
             .get("operation")
@@ -3429,13 +3844,9 @@ fn try_execute_configured_process(
         effect.assignment_id().clone(),
         effect.effect_id().clone(),
     );
-    let invocation = match pending.request_id().clone() {
-        TiberEffectRequestId::Number(value) => format!("json-number:{value}"),
-        TiberEffectRequestId::String(value) => format!("json-string:{value}"),
-    };
     let request = ProcessRequest::for_invocation(
         command_id,
-        ProcessInvocationId::parse(&invocation)
+        ProcessInvocationId::parse(invocation)
             .map_err(|_error| ProcessEffectError::InvalidRequest)?,
         provenance,
     );
@@ -4338,31 +4749,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_codex_receives_only_the_signed_bounded_task_surface() {
+    fn native_codex_receives_only_tiber_owned_coding_surfaces() {
         let declarations = native_dynamic_tools();
-        assert_eq!(declarations.len(), 1);
-        let declaration = declarations
-            .first()
-            .expect("one native task declaration should exist");
+        assert_eq!(declarations.len(), 4);
         assert_eq!(
-            declaration.get("name"),
-            Some(&serde_json::json!("tiber_tasks"))
+            declarations
+                .iter()
+                .filter_map(|declaration| declaration.get("name"))
+                .collect::<Vec<_>>(),
+            vec![
+                &serde_json::json!("tiber_tasks"),
+                &serde_json::json!("tiber_repository_read"),
+                &serde_json::json!("tiber_repository_proposal"),
+                &serde_json::json!("tiber_effect"),
+            ]
         );
-        assert!(
-            declaration
-                .pointer("/inputSchema/properties/program")
-                .is_none()
-        );
-        assert!(
-            declaration
-                .pointer("/inputSchema/properties/environment")
-                .is_none()
-        );
-        assert!(
-            declaration
-                .pointer("/inputSchema/properties/shell")
-                .is_none()
-        );
+        for declaration in &declarations {
+            assert!(
+                declaration
+                    .pointer("/inputSchema/properties/program")
+                    .is_none()
+            );
+            assert!(
+                declaration
+                    .pointer("/inputSchema/properties/environment")
+                    .is_none()
+            );
+            assert!(
+                declaration
+                    .pointer("/inputSchema/properties/shell")
+                    .is_none()
+            );
+        }
 
         let result = native_task_result(
             Path::new("."),
@@ -4378,6 +4796,32 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|text| text.contains("tiber tasks"))
         );
+    }
+
+    #[test]
+    fn native_repository_read_returns_the_exact_bounded_preimage() {
+        let directory = tempfile::TempDir::new().expect("repository fixture should initialize");
+        fs::write(directory.path().join("README.md"), "before\n")
+            .expect("repository fixture should be writable");
+
+        let result = native_repository_read_result(
+            directory.path(),
+            &serde_json::json!({
+                "arguments": { "operation": "read_file", "path": "README.md" },
+                "tool": "tiber_repository_read"
+            }),
+        );
+
+        assert_eq!(result.get("success"), Some(&serde_json::json!(true)));
+        let content: serde_json::Value = serde_json::from_str(
+            result
+                .pointer("/contentItems/0/text")
+                .and_then(serde_json::Value::as_str)
+                .expect("repository read result should contain bounded JSON text"),
+        )
+        .expect("repository read result should remain JSON");
+        assert_eq!(content.get("path"), Some(&serde_json::json!("README.md")));
+        assert_eq!(content.get("content"), Some(&serde_json::json!("before\n")));
     }
 
     #[test]

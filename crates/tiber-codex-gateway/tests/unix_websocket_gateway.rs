@@ -58,7 +58,7 @@ async fn real_unix_websocket_peers_receive_rewritten_authority_and_exact_present
             request.pointer("/params/sandbox"),
             Some(&json!("read-only"))
         );
-        peer.send(Message::Text(r#"{"id":7,"result":{"approvalPolicy":"never","approvalsReviewer":"user","sandbox":"read-only","thread":{"id":"thread-1"}}}"#.into())).await.expect("response should send");
+        peer.send(Message::Text(r#"{"id":7,"result":{"approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false},"thread":{"id":"thread-1"}}}"#.into())).await.expect("response should send");
         let presentation =
             r#"{"jsonrpc":"2.0", "method":"item/agentMessage/delta", "params":{"delta":"hello"}}"#;
         peer.send(Message::Text(presentation.into()))
