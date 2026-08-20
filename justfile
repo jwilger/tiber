@@ -26,6 +26,9 @@ authority-fixture:
     node scripts/tests/probe-app-server-effective-authority.test.mjs
 
 package:
+    # The all-feature Cargo gate and Nix package compile the same large graph.
+    # Release Cargo artifacts before Nix starts so both copies do not exhaust CI disk.
+    cargo clean --target-dir target/tiber
     nix build --no-link .#tiber
     nix build --no-link .#checks.x86_64-linux.package-smoke
 
