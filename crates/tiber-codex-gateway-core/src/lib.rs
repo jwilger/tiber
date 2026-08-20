@@ -17,7 +17,8 @@ const MAX_NESTING_DEPTH: usize = 64;
 /// Maximum UTF-8 byte length of one method.
 const MAX_METHOD_BYTES: usize = 256;
 /// Maximum UTF-8 byte length of one string request identity.
-const MAX_ID_BYTES: usize = 256;
+/// Maximum reviewed JSON-RPC and thread/turn identity byte length.
+pub const MAX_PROTOCOL_ID_BYTES: usize = 256;
 /// Maximum UTF-8 byte length of each Tiber instruction field.
 const MAX_INSTRUCTION_BYTES: usize = 0x0001_0000;
 /// Maximum number of Tiber-owned dynamic-tool declarations.
@@ -114,6 +115,54 @@ pub enum TuiAction {
         /// Exact bounded transport bytes.
         BoundedMessage,
     ),
+    /// Suspend a user turn until Tiber durably admits its exact prompt.
+    TurnStart(
+        /// Parsed prompt intent plus the rewritten transport message.
+        TurnStartRequest,
+    ),
+}
+
+/// One inert native Codex turn awaiting application-owned durable admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnStartRequest {
+    /// Exact native client request identity.
+    id: RequestId,
+    /// Exact rewritten message forwarded only after durable admission.
+    message: BoundedMessage,
+    /// Bounded text prompt represented by the reviewed Codex input schema.
+    prompt: String,
+    /// Reviewed Codex thread identity owning the turn.
+    thread_id: String,
+}
+
+impl TurnStartRequest {
+    /// Returns the native client request identity.
+    #[must_use]
+    #[inline]
+    pub const fn id(&self) -> &RequestId {
+        &self.id
+    }
+
+    /// Returns the rewritten bounded transport message.
+    #[must_use]
+    #[inline]
+    pub const fn message(&self) -> &BoundedMessage {
+        &self.message
+    }
+
+    /// Returns the exact bounded user prompt.
+    #[must_use]
+    #[inline]
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    /// Returns the reviewed Codex thread identity.
+    #[must_use]
+    #[inline]
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
 }
 
 /// Result of routing a backend message toward the native TUI.
@@ -135,6 +184,75 @@ pub enum BackendAction {
         /// Exact bounded transport bytes.
         BoundedMessage,
     ),
+    /// Suspend terminal presentation until Tiber records the observation.
+    TurnCompleted(
+        /// Bounded assistant text plus the exact presentation message.
+        TurnCompleted,
+    ),
+}
+
+/// One completed native Codex turn awaiting durable observation publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnCompleted {
+    /// Bounded final assistant text for a successful turn.
+    assistant: Option<String>,
+    /// Exact terminal transport message.
+    message: BoundedMessage,
+    /// Closed reviewed terminal status.
+    outcome: TurnOutcome,
+    /// Reviewed Codex thread identity owning the terminal turn.
+    thread_id: String,
+    /// Reviewed Codex terminal turn identity.
+    turn_id: String,
+}
+
+impl TurnCompleted {
+    /// Returns the bounded assistant observation for a successful turn.
+    #[must_use]
+    #[inline]
+    pub fn assistant(&self) -> Option<&str> {
+        self.assistant.as_deref()
+    }
+
+    /// Returns the exact terminal presentation message.
+    #[must_use]
+    #[inline]
+    pub const fn message(&self) -> &BoundedMessage {
+        &self.message
+    }
+
+    /// Returns the closed reviewed terminal outcome.
+    #[must_use]
+    #[inline]
+    pub const fn outcome(&self) -> TurnOutcome {
+        self.outcome
+    }
+
+    /// Returns the reviewed Codex thread identity.
+    #[must_use]
+    #[inline]
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    /// Returns the reviewed Codex turn identity.
+    #[must_use]
+    #[inline]
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+}
+
+/// Closed terminal outcome vocabulary from the reviewed Codex protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TurnOutcome {
+    /// The turn completed with one bounded assistant observation.
+    Completed,
+    /// The backend failed the turn without a successful observation.
+    Failed,
+    /// The backend interrupted the turn without a successful observation.
+    Interrupted,
 }
 
 /// Closed effect-bearing backend request vocabulary.
@@ -337,6 +455,9 @@ pub fn route_tui_message(input: &[u8], policy: &GatewayPolicy) -> Result<TuiActi
     if !is_thread_authority && !is_turn_authority {
         return Ok(TuiAction::Forward(BoundedMessage(input.to_vec())));
     }
+    let turn_request_id = is_turn_authority
+        .then(|| parse_request_id(message.get("id")))
+        .transpose()?;
     let object = message.as_object_mut().ok_or_else(invalid_message)?;
     let params = object
         .entry("params")
@@ -373,6 +494,12 @@ pub fn route_tui_message(input: &[u8], policy: &GatewayPolicy) -> Result<TuiActi
             json!({"type": "readOnly", "networkAccess": false}),
         );
     }
+    let turn_prompt = (method == "turn/start")
+        .then(|| turn_prompt(params))
+        .transpose()?;
+    let turn_thread_id = is_turn_authority
+        .then(|| bounded_identity(params.get("threadId"), "turn thread identity"))
+        .transpose()?;
     let encoded = serde_json::to_vec(&message).map_err(|source| {
         GatewayError::with_source(
             "codex_gateway_encode_failed",
@@ -388,7 +515,109 @@ pub fn route_tui_message(input: &[u8], policy: &GatewayPolicy) -> Result<TuiActi
             false,
         ));
     }
-    Ok(TuiAction::Forward(BoundedMessage(encoded)))
+    let encoded_message = BoundedMessage(encoded);
+    if let Some(prompt) = turn_prompt {
+        return Ok(TuiAction::TurnStart(TurnStartRequest {
+            id: turn_request_id.ok_or_else(invalid_message)?,
+            message: encoded_message,
+            prompt,
+            thread_id: turn_thread_id.ok_or_else(invalid_message)?,
+        }));
+    }
+    Ok(TuiAction::Forward(encoded_message))
+}
+
+/// Parses one bounded JSON-RPC identity.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::single_call_fn,
+    reason = "the reviewed request-id parser keeps borrowed wire matching separate from turn authority routing"
+)]
+fn parse_request_id(value: Option<&Value>) -> Result<RequestId, GatewayError> {
+    match value {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(RequestId::Number)
+            .ok_or_else(invalid_request_id),
+        Some(Value::String(text)) if is_bounded_identity(text) => {
+            Ok(RequestId::String(text.clone()))
+        }
+        _ => Err(invalid_request_id()),
+    }
+}
+
+/// Parses one bounded protocol identity string.
+fn bounded_identity(value: Option<&Value>, label: &'static str) -> Result<String, GatewayError> {
+    value
+        .and_then(Value::as_str)
+        .filter(|text| is_bounded_identity(text))
+        .map(str::to_owned)
+        .ok_or_else(|| GatewayError::new("codex_gateway_identity_invalid", label, false))
+}
+
+/// Returns whether a protocol identity is safe to retain for correlation.
+fn is_bounded_identity(text: &str) -> bool {
+    !text.is_empty() && text.len() <= MAX_PROTOCOL_ID_BYTES && !text.chars().any(char::is_control)
+}
+
+/// Constructs the stable invalid-request-identity diagnostic.
+fn invalid_request_id() -> GatewayError {
+    GatewayError::new(
+        "codex_gateway_request_id_invalid",
+        "request identity must be a bounded string or non-negative integer",
+        false,
+    )
+}
+
+/// Extracts the reviewed text-only prompt without admitting attachment authority.
+#[expect(
+    clippy::single_call_fn,
+    reason = "keeps the reviewed turn-input parser separate from authority rewriting"
+)]
+fn turn_prompt(params: &Map<String, Value>) -> Result<String, GatewayError> {
+    let inputs = params
+        .get("input")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            GatewayError::new(
+                "codex_gateway_turn_input_invalid",
+                "turn input must be a bounded text array",
+                false,
+            )
+        })?;
+    let mut prompt = String::new();
+    for input in inputs {
+        let Some(text) = input.as_object().and_then(|value| {
+            (value.get("type").and_then(Value::as_str) == Some("text"))
+                .then(|| value.get("text").and_then(Value::as_str))
+                .flatten()
+        }) else {
+            return Err(GatewayError::new(
+                "codex_gateway_turn_input_unsupported",
+                "native Tiber currently admits only text turn input",
+                false,
+            ));
+        };
+        if !prompt.is_empty() {
+            prompt.push('\n');
+        }
+        prompt.push_str(text);
+        if prompt.len() > MAX_INSTRUCTION_BYTES {
+            return Err(GatewayError::new(
+                "codex_gateway_turn_input_too_large",
+                "turn text exceeds the durable prompt bound",
+                false,
+            ));
+        }
+    }
+    if prompt.trim().is_empty() {
+        return Err(GatewayError::new(
+            "codex_gateway_turn_input_invalid",
+            "turn text must not be empty",
+            false,
+        ));
+    }
+    Ok(prompt)
 }
 
 /// Parses and routes one message from the backend.
@@ -407,6 +636,11 @@ pub fn route_backend_message(input: &[u8]) -> Result<BackendAction, GatewayError
     let Some(method) = method(&message)? else {
         return Ok(BackendAction::Forward(BoundedMessage(input.to_vec())));
     };
+    if method == "turn/completed" {
+        return Ok(BackendAction::TurnCompleted(completed_turn(
+            &message, input,
+        )?));
+    }
     let Some(id) = message.get("id") else {
         return Ok(BackendAction::Forward(BoundedMessage(input.to_vec())));
     };
@@ -414,7 +648,7 @@ pub fn route_backend_message(input: &[u8]) -> Result<BackendAction, GatewayError
         RequestId::Number(number)
     } else if let Some(text) = id.as_str()
         && !text.is_empty()
-        && text.len() <= MAX_ID_BYTES
+        && text.len() <= MAX_PROTOCOL_ID_BYTES
         && !text.chars().any(char::is_control)
     {
         RequestId::String(text.to_owned())
@@ -449,6 +683,68 @@ pub fn route_backend_message(input: &[u8]) -> Result<BackendAction, GatewayError
         kind,
         params: message.get("params").cloned().unwrap_or(Value::Null),
     }))
+}
+
+/// Extracts one reviewed terminal turn and any successful assistant message.
+#[expect(
+    clippy::single_call_fn,
+    reason = "keeps terminal observation parsing separate from backend request routing"
+)]
+fn completed_turn(message: &Value, input: &[u8]) -> Result<TurnCompleted, GatewayError> {
+    let thread_id = bounded_identity(
+        message.pointer("/params/threadId"),
+        "turn completion thread identity is invalid",
+    )?;
+    let turn = message
+        .pointer("/params/turn")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            GatewayError::new(
+                "codex_gateway_turn_completion_invalid",
+                "turn completion must contain a turn object",
+                false,
+            )
+        })?;
+    let (assistant, outcome) = match turn.get("status").and_then(Value::as_str) {
+        Some("completed") => {
+            let assistant = turn
+                .get("items")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items.iter().rev().find(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("agentMessage")
+                    })
+                })
+                .and_then(|item| item.get("text"))
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty() && text.len() <= MAX_INSTRUCTION_BYTES)
+                .ok_or_else(|| {
+                    GatewayError::new(
+                        "codex_gateway_turn_observation_invalid",
+                        "completed turn must contain one bounded assistant message",
+                        false,
+                    )
+                })?;
+            (Some(assistant.to_owned()), TurnOutcome::Completed)
+        }
+        Some("failed") => (None, TurnOutcome::Failed),
+        Some("interrupted") => (None, TurnOutcome::Interrupted),
+        _ => {
+            return Err(GatewayError::new(
+                "codex_gateway_turn_completion_invalid",
+                "turn completion must contain a reviewed terminal status",
+                false,
+            ));
+        }
+    };
+    let turn_id = bounded_identity(turn.get("id"), "turn completion identity is invalid")?;
+    Ok(TurnCompleted {
+        assistant,
+        message: BoundedMessage(input.to_vec()),
+        outcome,
+        thread_id,
+        turn_id,
+    })
 }
 
 /// Validates effective authority reported by a thread start/resume/fork response.

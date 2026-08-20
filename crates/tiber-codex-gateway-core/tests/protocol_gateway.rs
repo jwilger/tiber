@@ -7,8 +7,8 @@
 
 use serde_json::{Value, json};
 use tiber_codex_gateway_core::{
-    BackendAction, EffectKind, GatewayPolicy, TuiAction, route_backend_message, route_tui_message,
-    validate_thread_start_response,
+    BackendAction, EffectKind, GatewayPolicy, TuiAction, TurnOutcome, route_backend_message,
+    route_tui_message, validate_thread_start_response,
 };
 
 #[test]
@@ -123,19 +123,19 @@ fn every_reviewed_authority_request_is_rewritten_or_rejected() {
         "params": {
             "approvalPolicy": "on-request",
             "approvalsReviewer": "model",
-            "input": [],
+            "input": [{"type": "text", "text": "hello"}],
             "sandboxPolicy": {"type": "dangerFullAccess"},
             "threadId": "thread-1"
         }
     }))
     .expect("fixture should serialize");
-    let TuiAction::Forward(rewritten_turn) =
+    let TuiAction::TurnStart(parsed_turn) =
         route_tui_message(&turn_request, &policy).expect("turn authority should rewrite")
     else {
         panic!("turn authority should remain forwardable")
     };
     let turn: Value =
-        serde_json::from_slice(rewritten_turn.as_bytes()).expect("turn should remain JSON");
+        serde_json::from_slice(parsed_turn.message().as_bytes()).expect("turn should remain JSON");
     assert_eq!(
         turn.pointer("/params/approvalPolicy"),
         Some(&json!("never"))
@@ -153,6 +153,34 @@ fn every_reviewed_authority_request_is_rewritten_or_rejected() {
     let error = route_tui_message(settings, &policy)
         .expect_err("mutable settings are absent from reviewed Codex and must fail closed");
     assert_eq!(error.code(), "codex_gateway_authority_request_unsupported");
+}
+
+#[test]
+fn turn_start_is_an_inert_application_admission_before_backend_dispatch() {
+    let policy = GatewayPolicy::new("developer", Vec::new()).expect("policy should be valid");
+    let request = serde_json::to_vec(&json!({
+        "id": 10,
+        "method": "turn/start",
+        "params": {
+            "input": [{"type": "text", "text": "inspect the active task"}],
+            "threadId": "thread-1"
+        }
+    }))
+    .expect("fixture should serialize");
+
+    let TuiAction::TurnStart(turn) =
+        route_tui_message(&request, &policy).expect("turn should parse")
+    else {
+        panic!("turn/start must wait for application admission")
+    };
+
+    assert_eq!(turn.prompt(), "inspect the active task");
+    let rewritten: Value =
+        serde_json::from_slice(turn.message().as_bytes()).expect("turn should remain JSON");
+    assert_eq!(
+        rewritten.pointer("/params/sandboxPolicy"),
+        Some(&json!({"type": "readOnly", "networkAccess": false}))
+    );
 }
 
 #[test]
@@ -228,6 +256,63 @@ fn reviewed_authentication_refresh_is_explicitly_forwarded_without_decoding() {
     };
 
     assert_eq!(forwarded.as_bytes(), request);
+}
+
+#[test]
+fn completed_turn_exposes_one_bounded_assistant_observation_before_presentation() {
+    let notification = serde_json::to_vec(&json!({
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turn": {
+                "id": "turn-1",
+                "items": [
+                    {"id": "reasoning-1", "type": "reasoning", "summary": [], "content": []},
+                    {"id": "message-1", "type": "agentMessage", "text": "done"}
+                ],
+                "status": "completed"
+            }
+        }
+    }))
+    .expect("fixture should serialize");
+
+    let BackendAction::TurnCompleted(completed) =
+        route_backend_message(&notification).expect("completion should parse")
+    else {
+        panic!("completion must wait for durable observation")
+    };
+
+    assert_eq!(completed.assistant(), Some("done"));
+    assert_eq!(completed.message().as_bytes(), notification);
+    assert_eq!(completed.outcome(), TurnOutcome::Completed);
+    assert_eq!(completed.thread_id(), "thread-1");
+    assert_eq!(completed.turn_id(), "turn-1");
+}
+
+#[test]
+fn interrupted_and_failed_turns_are_typed_terminal_observations() {
+    for (status, expected) in [
+        ("interrupted", TurnOutcome::Interrupted),
+        ("failed", TurnOutcome::Failed),
+    ] {
+        let notification = serde_json::to_vec(&json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {"id": "turn-1", "items": [], "status": status}
+            }
+        }))
+        .expect("fixture should serialize");
+        let BackendAction::TurnCompleted(completed) =
+            route_backend_message(&notification).expect("terminal outcome should parse")
+        else {
+            panic!("terminal outcome must await durable observation")
+        };
+        assert_eq!(completed.assistant(), None);
+        assert_eq!(completed.outcome(), expected);
+        assert_eq!(completed.thread_id(), "thread-1");
+        assert_eq!(completed.turn_id(), "turn-1");
+    }
 }
 
 #[test]

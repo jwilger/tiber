@@ -39,7 +39,7 @@ use tiber_app_server::{
     TiberEffectRequestId, TiberEffectResult, TurnEvent, inspect_protocol_schema,
 };
 use tiber_codex_gateway::{EffectResponse, Gateway, GatewayConfig};
-use tiber_codex_gateway_core::{EffectKind, EffectRequest, GatewayPolicy};
+use tiber_codex_gateway_core::{EffectKind, EffectRequest, GatewayPolicy, TurnOutcome};
 use tiber_process_core::{
     AssignmentWorkflowProvenance, ConfiguredCommand, ConfiguredCommandCatalog, ConfiguredCommandId,
     FixedEnvironment, LiteralArgument, MAX_TIMEOUT, OutputBounds, ProcessInvocationId,
@@ -354,19 +354,21 @@ fn run_native_codex_tui() {
 fn stop_native_gateway(
     shutdown_sender: &tokio::sync::watch::Sender<bool>,
     gateway_thread: JoinHandle<Result<(), String>>,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     let _shutdown_result = shutdown_sender.send(true);
     match gateway_thread.join() {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) => Err("codex_gateway_stopped"),
-        Err(_) => Err("codex_gateway_thread_failed"),
+        Ok(Err(code)) => Err(code),
+        Err(_) => Err("codex_gateway_thread_failed".to_owned()),
     }
 }
 
 /// Starts the bounded gateway runtime and fail-closed effect responder.
 #[expect(
+    clippy::integer_division_remainder_used,
     clippy::print_stderr,
-    reason = "gateway setup failures occur before native terminal takeover"
+    clippy::too_many_lines,
+    reason = "gateway setup failures occur before native terminal takeover; tokio select internals use remainder arithmetic"
 )]
 fn start_native_gateway(
     gateway_socket: &Path,
@@ -379,6 +381,8 @@ fn start_native_gateway(
 ) {
     let repository = repository.to_owned();
     let (effect_sender, mut effects) = tokio::sync::mpsc::channel(8);
+    let (turn_sender, mut turns) = tokio::sync::mpsc::channel(1);
+    let (observation_sender, mut observations) = tokio::sync::mpsc::channel(1);
     let runtime = RuntimeBuilder::new_multi_thread()
         .enable_all()
         .build()
@@ -388,9 +392,11 @@ fn start_native_gateway(
         });
     let gateway = {
         let _runtime_guard = runtime.enter();
-        Gateway::bind(
+        Gateway::bind_with_turns(
             GatewayConfig::new(gateway_socket, upstream_socket, policy),
             effect_sender,
+            turn_sender,
+            observation_sender,
         )
         .unwrap_or_else(|error| {
             eprintln!("{}: {error}", error.code());
@@ -400,12 +406,91 @@ fn start_native_gateway(
     let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
     let gateway_thread = thread::spawn(move || {
         runtime.block_on(async move {
-            let effect_task = tokio::spawn(async move {
-                while let Some(call) = effects.recv().await {
-                    let response = native_effect_response(&repository, call.request())
-                        .map_err(|_error| "codex_gateway_effect_response_failed".to_owned())?;
-                    call.complete(response)
-                        .map_err(|_response| "codex_gateway_effect_completion_failed".to_owned())?;
+            let application_task = tokio::spawn(async move {
+                let mut first_turn = true;
+                loop {
+                    tokio::select! {
+                        Some(call) = effects.recv() => {
+                            let effect_repository = repository.clone();
+                            let request = call.request().clone();
+                            let response = tokio::task::spawn_blocking(move || {
+                                native_effect_response(&effect_repository, &request)
+                            })
+                            .await
+                            .map_err(|_error| "codex_gateway_effect_worker_failed".to_owned())?
+                            .map_err(|_error| "codex_gateway_effect_response_failed".to_owned())?;
+                            call.complete(response)
+                                .map_err(|_response| "codex_gateway_effect_completion_failed".to_owned())?;
+                        }
+                        Some(call) = turns.recv() => {
+                            let recover = first_turn;
+                            first_turn = false;
+                            let prompt = call.request().prompt().to_owned();
+                            let turn_repository = repository.clone();
+                            tokio::task::spawn_blocking(move || {
+                                if recover {
+                                    resolve_interrupted_native_inference(&turn_repository)
+                                        .map_err(|error| error.code().to_owned())?;
+                                }
+                                ensure_started_session(&turn_repository)
+                                    .map_err(|error| error.code().to_owned())?;
+                                publish_prompt_request(&turn_repository, &prompt)
+                                    .map_err(|error| error.code().to_owned())?;
+                                if cfg!(debug_assertions)
+                                    && let Some(path) = env::var_os(
+                                        "TIBER_TEST_CRASH_AFTER_NATIVE_TURN_ADMISSION_SENTINEL",
+                                    )
+                                {
+                                    fs::write(path, b"crash\n").map_err(|_error| {
+                                        "codex_gateway_debug_sentinel_failed".to_owned()
+                                    })?;
+                                    return Err(
+                                        "codex_gateway_debug_crash_after_admission".to_owned(),
+                                    );
+                                }
+                                Ok::<(), String>(())
+                            })
+                            .await
+                            .map_err(|_error| "codex_gateway_turn_worker_failed".to_owned())??;
+                            if !call.admit() {
+                                return Err("codex_gateway_turn_admission_failed".to_owned());
+                            }
+                        }
+                        Some(call) = observations.recv() => {
+                            let assistant = call.observation().assistant().map(str::to_owned);
+                            let outcome = call.observation().outcome();
+                            let observation_repository = repository.clone();
+                            tokio::task::spawn_blocking(move || match outcome {
+                                TurnOutcome::Completed => {
+                                    let assistant = assistant.as_deref().ok_or_else(|| {
+                                        "codex_gateway_turn_observation_invalid".to_owned()
+                                    })?;
+                                    publish_inference_observation(
+                                        &observation_repository,
+                                        assistant,
+                                    )
+                                    .map_err(|error| error.code().to_owned())
+                                }
+                                TurnOutcome::Failed => publish_inference_interruption(
+                                    &observation_repository,
+                                    "native_codex_turn_failed",
+                                )
+                                .map_err(|error| error.code().to_owned()),
+                                TurnOutcome::Interrupted => publish_inference_interruption(
+                                    &observation_repository,
+                                    "native_codex_turn_interrupted",
+                                )
+                                .map_err(|error| error.code().to_owned()),
+                                _ => Err("codex_gateway_turn_outcome_invalid".to_owned()),
+                            })
+                            .await
+                            .map_err(|_error| "codex_gateway_observation_worker_failed".to_owned())??;
+                            if !call.recorded() {
+                                return Err("codex_gateway_turn_observation_failed".to_owned());
+                            }
+                        }
+                        else => break,
+                    }
                 }
                 Ok::<(), String>(())
             });
@@ -413,8 +498,8 @@ fn start_native_gateway(
                 .serve_one(shutdown_receiver)
                 .await
                 .map_err(|error| error.code().to_owned());
-            effect_task.abort();
-            drop(effect_task.await);
+            application_task.abort();
+            drop(application_task.await);
             gateway_result
         })
     });
@@ -2150,6 +2235,107 @@ fn publish_inference_observation(
     let advance = decide_advance_workflow(&observed_history, workflow_stream)?;
     let mut publisher = TiberEventPublisher::open_at(repository, observed_revision.revision())?;
     let _completed = runtime.block_on(publisher.publish_workflow_advance(advance))?;
+    Ok(())
+}
+
+/// Durably records one unsuccessful native turn and advances its stopped workflow.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::wildcard_enum_match_arm,
+    reason = "the interruption publisher selects only the latest borrowed inference request from a non-exhaustive session vocabulary"
+)]
+fn publish_inference_interruption(
+    repository: &Path,
+    code: &str,
+) -> Result<(), PromptPublicationError> {
+    let store = TiberEventStore::open(repository)?;
+    let revision = store.revision().clone();
+    let all_events = read_session_events(&store).map_err(PromptPublicationError::Query)?;
+    let events = active_session_events(&all_events);
+    let effect = events
+        .iter()
+        .rev()
+        .find_map(|event| match event.fact() {
+            SessionFact::InferenceRequested { effect, .. } => Some(effect.clone()),
+            _ => None,
+        })
+        .ok_or(PromptPublicationError::MissingSession)?;
+    let workflow_stream = WorkflowStream::for_effect(&effect)?;
+    let workflow_history = read_workflow_events_query(&store, &workflow_stream)
+        .map_err(PromptPublicationError::Query)?;
+    let observation = EffectObservation::Failed {
+        code: EffectFailureCode::parse(code)?,
+        effect_id: effect.effect_id().clone(),
+        retryability: Retryability::NotRetryable,
+    };
+    let session = decide_interrupt_inference(&all_events, observation.clone())?;
+    let workflow =
+        decide_record_observation(&workflow_history, workflow_stream.clone(), observation)?;
+    let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+    let runtime = RuntimeBuilder::new_current_thread().build()?;
+    let observed_revision = runtime
+        .block_on(publisher.publish_inference_observation_with_workflow(session, workflow))?;
+    if cfg!(debug_assertions)
+        && let Some(path) = env::var_os("TIBER_TEST_CRASH_AFTER_NATIVE_TURN_INTERRUPTION_SENTINEL")
+    {
+        fs::write(path, b"crash\n")?;
+        return Err(std::io::Error::other("debug crash after native turn interruption").into());
+    }
+    let observed_store = TiberEventStore::open(repository)?;
+    let observed_history = read_workflow_events_query(&observed_store, &workflow_stream)
+        .map_err(PromptPublicationError::Query)?;
+    let advance = decide_advance_workflow(&observed_history, workflow_stream)?;
+    let mut terminal_publisher =
+        TiberEventPublisher::open_at(repository, observed_revision.revision())?;
+    let _stopped = runtime.block_on(terminal_publisher.publish_workflow_advance(advance))?;
+    Ok(())
+}
+
+/// Resolves one retained native turn without replaying inference or fabricating success.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::wildcard_enum_match_arm,
+    reason = "startup recovery folds only the latest borrowed session and workflow lifecycle facts"
+)]
+fn resolve_interrupted_native_inference(repository: &Path) -> Result<(), PromptPublicationError> {
+    let store = TiberEventStore::open(repository)?;
+    let all_events = read_session_events(&store).map_err(PromptPublicationError::Query)?;
+    let events = active_session_events(&all_events);
+    let Some(effect) = events.iter().rev().find_map(|event| match event.fact() {
+        SessionFact::InferenceRequested { effect, .. } => Some(effect.clone()),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    let terminal = events.iter().any(|event| match event.fact() {
+        SessionFact::InferenceObserved { effect_id, .. } => effect_id == effect.effect_id(),
+        SessionFact::InferenceInterrupted { observation } => {
+            observation.effect_id() == effect.effect_id()
+        }
+        _ => false,
+    });
+    let workflow_stream = WorkflowStream::for_effect(&effect)?;
+    let workflow_history = read_workflow_events_query(&store, &workflow_stream)
+        .map_err(PromptPublicationError::Query)?;
+    match workflow_history.last().map(WorkflowEvent::fact) {
+        Some(tiber_workflow_service::WorkflowFact::EffectRequested { .. }) if !terminal => {
+            drop(store);
+            publish_inference_interruption(repository, "native_codex_restart_interrupted")?;
+        }
+        Some(tiber_workflow_service::WorkflowFact::EffectObserved { .. }) if terminal => {
+            let revision = store.revision().clone();
+            let advance = decide_advance_workflow(&workflow_history, workflow_stream)?;
+            drop(store);
+            let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+            let runtime = RuntimeBuilder::new_current_thread().build()?;
+            let _terminal = runtime.block_on(publisher.publish_workflow_advance(advance))?;
+        }
+        Some(
+            tiber_workflow_service::WorkflowFact::WorkflowCompleted { .. }
+            | tiber_workflow_service::WorkflowFact::WorkflowStopped { .. },
+        ) => {}
+        Some(_) | None => return Err(PromptPublicationError::MissingSession),
+    }
     Ok(())
 }
 

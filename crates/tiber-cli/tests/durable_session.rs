@@ -23,6 +23,7 @@ mod tests {
     use eventcore_types::{
         BatchSize, EventStore as _, StreamId, StreamPattern, StreamVersion, StreamWrites,
     };
+    use serde_json::Value;
     use tempfile::TempDir;
     use tiber_repository_core::Sha256Digest;
     use tiber_repository_service::{RepositoryMutationEvent, RepositoryMutationFact};
@@ -569,6 +570,172 @@ mod tests {
             !fixture.initialized.is_file(),
             "the legacy direct app-server client must not initialize"
         );
+    }
+
+    #[test]
+    fn native_codex_turn_is_durably_admitted_and_observed_through_bare_tiber() {
+        let fixture = HarnessFixture::new();
+        let invocation = fixture.repository.join("native-turn-invocation.json");
+        let result_path = fixture.repository.join("native-turn-result.json");
+        let backend_turns = fixture.repository.join("native-backend-turns.txt");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("TIBER_FIXTURE_MODE", "native-turn")
+            .env("TIBER_FIXTURE_NATIVE_BACKEND_TURNS", &backend_turns)
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &result_path)
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("bare Tiber should complete one native turn");
+
+        assert!(
+            output.status.success(),
+            "native turn failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(
+            &fs::read(result_path).expect("native TUI should receive the terminal observation"),
+        )
+        .expect("native turn result should remain JSON");
+        assert_eq!(
+            result.pointer("/completed/params/turn/items/0/text"),
+            Some(&serde_json::json!("native fixture answer"))
+        );
+        assert_eq!(
+            fs::read_to_string(backend_turns).expect("backend turn log should remain readable"),
+            "native fixture prompt\n"
+        );
+        let active_output = fixture.tiber(&["session", "active"]);
+        assert_success(&active_output);
+        let active_text = String::from_utf8_lossy(&active_output.stdout);
+        assert!(active_text.contains("user: native fixture prompt"));
+        assert!(active_text.contains("assistant: native fixture answer"));
+    }
+
+    #[test]
+    fn native_turn_restart_interrupts_the_unforwarded_request_and_resumes_once() {
+        let fixture = HarnessFixture::new();
+        let invocation = fixture.repository.join("native-restart-invocation.json");
+        let result_path = fixture.repository.join("native-restart-result.json");
+        let backend_turns = fixture.repository.join("native-restart-backend-turns.txt");
+        let admission_crash = fixture.repository.join("native-admission-crash");
+        let interruption_crash = fixture.repository.join("native-interruption-crash");
+
+        let first = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("TIBER_FIXTURE_MODE", "native-turn")
+            .env("TIBER_FIXTURE_NATIVE_BACKEND_TURNS", &backend_turns)
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &result_path)
+            .env(
+                "TIBER_TEST_CRASH_AFTER_NATIVE_TURN_ADMISSION_SENTINEL",
+                &admission_crash,
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("first native turn should reach the durable crash boundary");
+        assert!(!first.status.success());
+        assert!(admission_crash.is_file());
+        assert!(
+            !backend_turns.exists(),
+            "unadmitted turn must not reach Codex"
+        );
+        assert!(
+            !result_path.exists(),
+            "unadmitted turn has no terminal result"
+        );
+
+        let second = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("TIBER_FIXTURE_MODE", "native-turn")
+            .env("TIBER_FIXTURE_NATIVE_BACKEND_TURNS", &backend_turns)
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &result_path)
+            .env(
+                "TIBER_TEST_CRASH_AFTER_NATIVE_TURN_INTERRUPTION_SENTINEL",
+                &interruption_crash,
+            )
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("restart should reach the atomic interruption boundary");
+        assert!(!second.status.success());
+        assert!(interruption_crash.is_file());
+        assert!(
+            !backend_turns.exists(),
+            "recovery must not replay inference"
+        );
+        assert!(
+            !result_path.exists(),
+            "interrupted recovery has no fabricated result"
+        );
+
+        let third = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("TIBER_FIXTURE_MODE", "native-turn")
+            .env("TIBER_FIXTURE_NATIVE_BACKEND_TURNS", &backend_turns)
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &result_path)
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("second restart should resume with one fresh native turn");
+        assert!(
+            third.status.success(),
+            "recovered native turn failed: {}",
+            String::from_utf8_lossy(&third.stderr)
+        );
+        assert!(result_path.is_file());
+        assert_eq!(
+            fs::read_to_string(backend_turns).expect("backend turn log should remain readable"),
+            "native fixture prompt\n",
+            "only the fresh post-recovery request may reach Codex"
+        );
+        let active_output = fixture.tiber(&["session", "active"]);
+        assert_success(&active_output);
+        let active_text = String::from_utf8_lossy(&active_output.stdout);
+        assert!(active_text.contains("inference interrupted: native_codex_restart_interrupted"));
+        assert!(active_text.contains("assistant: native fixture answer"));
+    }
+
+    #[test]
+    fn failed_native_turn_is_durably_interrupted_before_terminal_presentation() {
+        let fixture = HarnessFixture::new();
+        let invocation = fixture.repository.join("native-failed-invocation.json");
+        let result_path = fixture.repository.join("native-failed-result.json");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
+            .env("TIBER_FIXTURE_MODE", "native-turn")
+            .env("TIBER_FIXTURE_NATIVE_TURN_RESULT", &result_path)
+            .env("TIBER_FIXTURE_NATIVE_TURN_STATUS", "failed")
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .output()
+            .expect("bare Tiber should close a failed native turn");
+
+        assert!(
+            output.status.success(),
+            "failed-turn recording failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(
+            &fs::read(result_path).expect("native TUI should receive the failed terminal status"),
+        )
+        .expect("failed turn result should remain JSON");
+        assert_eq!(
+            result.pointer("/completed/params/turn/status"),
+            Some(&serde_json::json!("failed"))
+        );
+        let active_output = fixture.tiber(&["session", "active"]);
+        assert_success(&active_output);
+        let active_text = String::from_utf8_lossy(&active_output.stdout);
+        assert!(active_text.contains("inference interrupted: native_codex_turn_failed"));
+        assert!(!active_text.contains("assistant: native fixture answer"));
     }
 
     #[test]

@@ -333,6 +333,10 @@ Codex client never grant authority.
   persists them, or converts them into workflow or effect authority.
 - Observable model, context, policy, tool, memory, and delivery decisions with
   sensitive data redacted.
+- Native Codex turns cross the private gateway only after durable prompt and
+  workflow admission. A terminal notification must match the admitted thread
+  and turn, and reaches the TUI only after durable success or sanitized
+  interruption. Restart resolves an unobserved admitted turn without replay.
 - Reproducible x86_64 Linux packaging and clean-machine installation.
 
 ## Acceptance criteria

@@ -5,6 +5,116 @@ import fs from "node:fs";
 import net from "node:net";
 import readline from "node:readline";
 
+function websocketFrame(payload, masked) {
+  const bytes = Buffer.from(payload);
+  const extended = bytes.length >= 126;
+  const header = Buffer.alloc(extended ? 4 : 2);
+  header[0] = 0x81;
+  header[1] = (masked ? 0x80 : 0) | (extended ? 126 : bytes.length);
+  if (extended) header.writeUInt16BE(bytes.length, 2);
+  if (!masked) return Buffer.concat([header, bytes]);
+  const mask = Buffer.from([0x11, 0x22, 0x33, 0x44]);
+  const encoded = Buffer.from(bytes);
+  for (let index = 0; index < encoded.length; index += 1) {
+    encoded[index] ^= mask[index % mask.length];
+  }
+  return Buffer.concat([header, mask, encoded]);
+}
+
+function websocketReader(socket, initial = Buffer.alloc(0)) {
+  let buffered = initial;
+  const waiting = [];
+  const frames = [];
+  function drain() {
+    while (buffered.length >= 2) {
+      const masked = (buffered[1] & 0x80) !== 0;
+      let length = buffered[1] & 0x7f;
+      let offset = 2;
+      if (length === 126) {
+        if (buffered.length < 4) return;
+        length = buffered.readUInt16BE(2);
+        offset = 4;
+      }
+      const maskLength = masked ? 4 : 0;
+      if (buffered.length < offset + maskLength + length) return;
+      const mask = masked ? buffered.subarray(offset, offset + 4) : null;
+      offset += maskLength;
+      const payload = Buffer.from(buffered.subarray(offset, offset + length));
+      if (mask) {
+        for (let index = 0; index < payload.length; index += 1) {
+          payload[index] ^= mask[index % mask.length];
+        }
+      }
+      buffered = buffered.subarray(offset + length);
+      const waiter = waiting.shift();
+      if (waiter) waiter.resolve(payload.toString("utf8"));
+      else frames.push(payload.toString("utf8"));
+    }
+  }
+  socket.on("data", (chunk) => {
+    buffered = Buffer.concat([buffered, chunk]);
+    drain();
+  });
+  socket.on("error", (error) => {
+    while (waiting.length > 0) waiting.shift().reject(error);
+  });
+  socket.on("end", () => {
+    while (waiting.length > 0) waiting.shift().reject(new Error("websocket closed"));
+  });
+  drain();
+  return () => {
+    const frame = frames.shift();
+    if (frame !== undefined) return Promise.resolve(frame);
+    return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+  };
+}
+
+function readUpgrade(socket) {
+  return new Promise((resolve, reject) => {
+    let buffered = Buffer.alloc(0);
+    function onData(chunk) {
+      buffered = Buffer.concat([buffered, chunk]);
+      const boundary = buffered.indexOf("\r\n\r\n");
+      if (boundary < 0) return;
+      socket.off("data", onData);
+      resolve({
+        head: buffered.subarray(0, boundary + 4).toString("utf8"),
+        remainder: buffered.subarray(boundary + 4),
+      });
+    }
+    socket.on("data", onData);
+    socket.once("error", reject);
+  });
+}
+
+async function connectWebsocket(path) {
+  const socket = net.createConnection(path);
+  await new Promise((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  const key = Buffer.from("tiber-native-fixture").toString("base64");
+  socket.write(
+    `GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+  );
+  const upgrade = await readUpgrade(socket);
+  if (!upgrade.head.startsWith("HTTP/1.1 101")) throw new Error("websocket upgrade failed");
+  return { next: websocketReader(socket, upgrade.remainder), socket };
+}
+
+async function acceptWebsocket(socket) {
+  const upgrade = await readUpgrade(socket);
+  const key = upgrade.head.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i)?.[1];
+  if (!key) throw new Error("websocket key missing");
+  const accept = createHash("sha1")
+    .update(`${key.trim()}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest("base64");
+  socket.write(
+    `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+  );
+  return websocketReader(socket, upgrade.remainder);
+}
+
 const fixtureMode =
   process.env.TIBER_FIXTURE_MODE ??
   process.argv.find((argument) => argument.startsWith("--mode="))?.slice(7) ??
@@ -23,13 +133,71 @@ if (remoteIndex >= 0 && process.env.TIBER_FIXTURE_CODEX_TUI_INVOCATION) {
     process.env.TIBER_FIXTURE_CODEX_TUI_INVOCATION,
     JSON.stringify(process.argv.slice(2)),
   );
+  if (!process.env.TIBER_FIXTURE_NATIVE_TURN_RESULT) process.exit(0);
+  const endpoint = process.argv.at(remoteIndex + 1);
+  if (!endpoint?.startsWith("unix://")) process.exit(2);
+  const peer = await connectWebsocket(endpoint.slice("unix://".length));
+  peer.socket.write(
+    websocketFrame(
+      JSON.stringify({
+        id: 17,
+        method: "turn/start",
+        params: {
+          input: [{ text: "native fixture prompt", type: "text" }],
+          threadId: "thread-1",
+        },
+      }),
+      true,
+    ),
+  );
+  const response = JSON.parse(await peer.next());
+  const completed = JSON.parse(await peer.next());
+  fs.writeFileSync(
+    process.env.TIBER_FIXTURE_NATIVE_TURN_RESULT,
+    JSON.stringify({ completed, response }),
+  );
+  peer.socket.write(Buffer.from([0x88, 0x80, 0x11, 0x22, 0x33, 0x44]));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  peer.socket.end();
   process.exit(0);
 }
 const listenIndex = process.argv.indexOf("--listen");
 if (process.argv.includes("app-server") && listenIndex >= 0) {
   const endpoint = process.argv.at(listenIndex + 1);
   if (!endpoint?.startsWith("unix://")) process.exit(2);
-  const server = net.createServer(() => {});
+  const server = net.createServer(async (socket) => {
+    if (!process.env.TIBER_FIXTURE_NATIVE_TURN_RESULT) return;
+    const next = await acceptWebsocket(socket);
+    const request = JSON.parse(await next());
+    if (process.env.TIBER_FIXTURE_NATIVE_BACKEND_TURNS) {
+      fs.appendFileSync(
+        process.env.TIBER_FIXTURE_NATIVE_BACKEND_TURNS,
+        `${request.params?.input?.[0]?.text ?? "missing"}\n`,
+      );
+    }
+    socket.write(
+      websocketFrame(JSON.stringify({ id: 17, result: { turn: { id: "turn-1" } } }), false),
+    );
+    socket.write(
+      websocketFrame(
+        JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: {
+              id: "turn-1",
+              items:
+                process.env.TIBER_FIXTURE_NATIVE_TURN_STATUS === "failed"
+                  ? []
+                  : [{ id: "message-1", text: "native fixture answer", type: "agentMessage" }],
+              status: process.env.TIBER_FIXTURE_NATIVE_TURN_STATUS ?? "completed",
+            },
+          },
+        }),
+        false,
+      ),
+    );
+  });
   server.listen(endpoint.slice("unix://".length));
   setInterval(() => {}, 1000);
 }

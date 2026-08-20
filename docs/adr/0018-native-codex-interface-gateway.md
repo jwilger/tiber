@@ -30,10 +30,20 @@ The gateway:
 - intercepts approvals and dynamic-tool calls for application policy, while
   explicitly brokering the reviewed Codex authentication-refresh exchange only
   between the bounded TUI and app-server transports;
+- holds each text-only `turn/start` until its exact prompt and workflow request
+  are durably published, then binds the response's thread and turn identities;
+- holds the matching terminal notification until a successful observation or
+  sanitized failed/interrupted outcome and workflow advance are durable;
 - requires one application-owned, kind-matched completion for each intercepted
   request; and
 - fails closed on unknown effect-bearing server requests or effective-policy
-  drift.
+drift.
+
+If Tiber stops after durable turn admission but before backend dispatch or
+terminal observation, the next native turn first records a content-free
+interruption and advances the stopped workflow. Recovery is idempotent across
+the atomic observation/advance boundary and never replays the abandoned model
+request or fabricates assistant output.
 
 The reviewed Codex executable is a fixed-output Nix input used by the package
 and development shell. Startup checks its exact version before terminal

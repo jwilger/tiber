@@ -21,8 +21,9 @@ use std::{
 use futures::{Sink, SinkExt as _, StreamExt as _};
 use serde_json::Value;
 use tiber_codex_gateway_core::{
-    BackendAction, EffectKind, EffectRequest, GatewayPolicy, RequestId, TuiAction,
-    route_backend_message, route_tui_message, validate_thread_start_response,
+    BackendAction, EffectKind, EffectRequest, GatewayPolicy, MAX_PROTOCOL_ID_BYTES, RequestId,
+    TuiAction, TurnCompleted, TurnStartRequest, route_backend_message, route_tui_message,
+    validate_thread_start_response,
 };
 use tokio::{
     net::{UnixListener, UnixStream},
@@ -56,8 +57,62 @@ pub struct Gateway {
     effects: mpsc::Sender<EffectCall>,
     /// Bound readiness boundary.
     listener: UnixListener,
+    /// Optional bounded application turn-observation channel.
+    observations: Option<mpsc::Sender<TurnCompletedCall>>,
     /// Removes the owned socket pathname on drop.
     socket_guard: SocketGuard,
+    /// Optional bounded application turn-admission channel.
+    turns: Option<mpsc::Sender<TurnStartCall>>,
+}
+
+/// One inert user turn plus its single-use durable-admission capability.
+#[derive(Debug)]
+pub struct TurnStartCall {
+    /// Single-use admission capability.
+    completion: oneshot::Sender<()>,
+    /// Parsed inert turn request.
+    request: TurnStartRequest,
+}
+
+/// One terminal turn plus its single-use durable-observation capability.
+#[derive(Debug)]
+pub struct TurnCompletedCall {
+    /// Single-use observation capability.
+    completion: oneshot::Sender<()>,
+    /// Parsed terminal observation.
+    observation: TurnCompleted,
+}
+
+impl TurnCompletedCall {
+    /// Returns the terminal observation inspected by application policy.
+    #[must_use]
+    #[inline]
+    pub const fn observation(&self) -> &TurnCompleted {
+        &self.observation
+    }
+
+    /// Confirms the assistant observation was durably published.
+    #[must_use]
+    #[inline]
+    pub fn recorded(self) -> bool {
+        self.completion.send(()).is_ok()
+    }
+}
+
+impl TurnStartCall {
+    /// Admits the turn after its prompt is durably published.
+    #[must_use]
+    #[inline]
+    pub fn admit(self) -> bool {
+        self.completion.send(()).is_ok()
+    }
+
+    /// Returns the parsed inert turn inspected by application policy.
+    #[must_use]
+    #[inline]
+    pub const fn request(&self) -> &TurnStartRequest {
+        &self.request
+    }
 }
 
 /// One inert backend effect plus its application-owned completion capability.
@@ -294,8 +349,28 @@ impl Gateway {
             config,
             effects,
             listener,
+            observations: None,
             socket_guard,
+            turns: None,
         })
+    }
+
+    /// Binds the private socket with an application-owned turn-admission channel.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the path is occupied or private permissions cannot be set.
+    #[inline]
+    pub fn bind_with_turns(
+        config: GatewayConfig,
+        effects: mpsc::Sender<EffectCall>,
+        turns: mpsc::Sender<TurnStartCall>,
+        observations: mpsc::Sender<TurnCompletedCall>,
+    ) -> Result<Self, TransportError> {
+        let mut gateway = Self::bind(config, effects)?;
+        gateway.turns = Some(turns);
+        gateway.observations = Some(observations);
+        Ok(gateway)
     }
 
     /// Accepts one TUI connection and bridges until close or cancellation.
@@ -339,6 +414,8 @@ impl Gateway {
             upstream,
             &self.config.policy,
             self.effects,
+            self.turns,
+            self.observations,
             &mut shutdown,
         )
         .await
@@ -410,6 +487,7 @@ fn bind_private(path: &Path) -> Result<UnixListener, TransportError> {
     clippy::cognitive_complexity,
     clippy::integer_division_remainder_used,
     clippy::single_call_fn,
+    clippy::too_many_lines,
     reason = "one select loop visibly owns the closed bidirectional authority boundary; tokio macro internals use remainder arithmetic"
 )]
 async fn bridge(
@@ -417,11 +495,15 @@ async fn bridge(
     upstream: tokio_tungstenite::WebSocketStream<UnixStream>,
     policy: &GatewayPolicy,
     effects: mpsc::Sender<EffectCall>,
+    turns: Option<mpsc::Sender<TurnStartCall>>,
+    observations: Option<mpsc::Sender<TurnCompletedCall>>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(), TransportError> {
     let (mut tui_sink, mut tui_stream) = tui.split();
     let (mut upstream_sink, mut upstream_stream) = upstream.split();
+    let mut active_turn: Option<(String, String)> = None;
     let mut pending_thread_authority: Option<Value> = None;
+    let mut pending_turn_start: Option<(Value, String)> = None;
     loop {
         tokio::select! {
             () = cancelled(shutdown) => break,
@@ -446,10 +528,34 @@ async fn bridge(
                     }
                     pending_thread_authority = Some(thread_start_id(&parsed)?);
                 }
-                let TuiAction::Forward(message) = route_tui_message(bytes, policy)
-                    .map_err(|source| TransportError::with_source(source.code(), source))?
-                else {
-                    return Err(TransportError::new("codex_gateway_unknown_tui_action"));
+                let message = match route_tui_message(bytes, policy)
+                    .map_err(|source| TransportError::with_source(source.code(), source))? {
+                    TuiAction::Forward(message) => message,
+                    TuiAction::TurnStart(request) => {
+                        if pending_turn_start.is_some() || active_turn.is_some() {
+                            return Err(TransportError::new("codex_gateway_turn_already_active"));
+                        }
+                        let Some(turn_sender) = turns.as_ref() else {
+                            return Err(TransportError::new("codex_gateway_turn_admission_unavailable"));
+                        };
+                        let message = request.message().clone();
+                        let request_identity = request_id_value(request.id());
+                        let thread_identity = request.thread_id().to_owned();
+                        let (completion, admitted) = oneshot::channel();
+                        let delivery = tokio::select! {
+                            result = turn_sender.send(TurnStartCall { completion, request }) => Some(result),
+                            () = cancelled(shutdown) => None,
+                        };
+                        let Some(delivery_result) = delivery else { break };
+                        delivery_result.map_err(|_closed| TransportError::new("codex_gateway_turn_receiver_closed"))?;
+                        tokio::select! {
+                            result = admitted => result.map_err(|_closed| TransportError::new("codex_gateway_turn_admission_dropped"))?,
+                            () = cancelled(shutdown) => break,
+                        }
+                        pending_turn_start = Some((request_identity, thread_identity));
+                        message
+                    }
+                    _ => return Err(TransportError::new("codex_gateway_unknown_tui_action")),
                 };
                 if !send_frame(&mut upstream_sink, Message::Text(text(message.as_bytes())?.into()), shutdown, "codex_gateway_upstream_write_failed").await? { break; }
             }
@@ -497,11 +603,47 @@ async fn bridge(
                         }
                         if !send_frame(&mut upstream_sink, Message::Text(text(&encoded)?.into()), shutdown, "codex_gateway_upstream_write_failed").await? { break; }
                     }
+                    BackendAction::TurnCompleted(observation) => {
+                        let expected = (
+                            observation.thread_id().to_owned(),
+                            observation.turn_id().to_owned(),
+                        );
+                        if active_turn.as_ref() != Some(&expected) {
+                            return Err(TransportError::new("codex_gateway_turn_completion_mismatch"));
+                        }
+                        let Some(observation_sender) = observations.as_ref() else {
+                            return Err(TransportError::new("codex_gateway_turn_observation_unavailable"));
+                        };
+                        let message = observation.message().clone();
+                        let (completion, recorded) = oneshot::channel();
+                        let delivery = tokio::select! {
+                            result = observation_sender.send(TurnCompletedCall { completion, observation }) => Some(result),
+                            () = cancelled(shutdown) => None,
+                        };
+                        let Some(delivery_result) = delivery else { break };
+                        delivery_result.map_err(|_closed| TransportError::new("codex_gateway_turn_observation_receiver_closed"))?;
+                        tokio::select! {
+                            result = recorded => result.map_err(|_closed| TransportError::new("codex_gateway_turn_observation_dropped"))?,
+                            () = cancelled(shutdown) => break,
+                        }
+                        active_turn = None;
+                        if !send_frame(&mut tui_sink, Message::Text(text(message.as_bytes())?.into()), shutdown, "codex_gateway_tui_write_failed").await? { break; }
+                    }
                     BackendAction::Forward(message) => {
                         if response_matches(message.as_bytes(), pending_thread_authority.as_ref())? {
                             validate_thread_start_response(message.as_bytes())
                                 .map_err(|source| TransportError::with_source(source.code(), source))?;
                             pending_thread_authority = None;
+                        }
+                        if response_matches(
+                            message.as_bytes(),
+                            pending_turn_start.as_ref().map(|entry| &entry.0),
+                        )? {
+                            let (_id, thread_id) = pending_turn_start
+                                .take()
+                                .ok_or_else(|| TransportError::new("codex_gateway_turn_start_missing"))?;
+                            let turn_id = turn_start_response_id(message.as_bytes())?;
+                            active_turn = Some((thread_id, turn_id));
                         }
                         if !send_frame(&mut tui_sink, Message::Text(text(message.as_bytes())?.into()), shutdown, "codex_gateway_tui_write_failed").await? { break; }
                     }
@@ -525,7 +667,6 @@ async fn cancelled(shutdown: &mut watch::Receiver<bool>) {
 /// Converts a core-owned request identity into an application response identity.
 #[expect(
     clippy::pattern_type_mismatch,
-    clippy::single_call_fn,
     reason = "keeps non-exhaustive identity handling fail closed"
 )]
 fn request_id_value(id: &RequestId) -> Value {
@@ -534,6 +675,27 @@ fn request_id_value(id: &RequestId) -> Value {
         RequestId::String(text) => Value::String(text.clone()),
         _ => Value::Null,
     }
+}
+
+/// Extracts the reviewed backend turn identity from a correlated start response.
+#[expect(
+    clippy::single_call_fn,
+    reason = "keeps correlated turn-start response validation separate from bridge state mutation"
+)]
+fn turn_start_response_id(message: &[u8]) -> Result<String, TransportError> {
+    let value: Value = serde_json::from_slice(message).map_err(|source| {
+        TransportError::with_source("codex_gateway_turn_start_response_invalid", source)
+    })?;
+    value
+        .pointer("/result/turn/id")
+        .and_then(Value::as_str)
+        .filter(|identity| {
+            !identity.is_empty()
+                && identity.len() <= MAX_PROTOCOL_ID_BYTES
+                && !identity.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| TransportError::new("codex_gateway_turn_start_response_invalid"))
 }
 
 /// Preflights one application result without recursive traversal.
@@ -587,7 +749,7 @@ fn thread_start_id(message: &Value) -> Result<Value, TransportError> {
     let Some(text) = id.as_str() else {
         return Err(TransportError::new("codex_gateway_thread_start_id_invalid"));
     };
-    if text.is_empty() || text.len() > 256 || text.chars().any(char::is_control) {
+    if text.is_empty() || text.len() > MAX_PROTOCOL_ID_BYTES || text.chars().any(char::is_control) {
         return Err(TransportError::new("codex_gateway_thread_start_id_invalid"));
     }
     Ok(id.clone())
@@ -625,10 +787,6 @@ fn text(bytes: &[u8]) -> Result<&str, TransportError> {
 }
 
 /// Identifies the response to the outstanding rewritten thread start.
-#[expect(
-    clippy::single_call_fn,
-    reason = "keeps authority-response correlation explicit"
-)]
 fn response_matches(bytes: &[u8], pending_id: Option<&Value>) -> Result<bool, TransportError> {
     let Some(expected_id) = pending_id else {
         return Ok(false);

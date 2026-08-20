@@ -28,7 +28,11 @@ reconciliation, and terminal workflow outcome.
 - **Codex gateway:** terminates both protocol connections, rewrites effective
   inference policy, intercepts every effect-bearing server request, and returns
   only application-created bounded completions. The native Codex client and
-  app-server never form a direct authority path.
+  app-server never form a direct authority path. User turns are suspended until
+  the prompt/workflow request is signed; terminal presentation is suspended
+  until the exact correlated observation or interruption is signed and the
+  workflow advances. Restart closes an admitted but unresolved turn without
+  redispatching it.
 - **Application core:** explicit state machines for conversations,
   assignments, effects, verification, delivery, recovery, and cancellation.
 - **EventCore domains:** authoritative facts for sessions, agents, tasks,
