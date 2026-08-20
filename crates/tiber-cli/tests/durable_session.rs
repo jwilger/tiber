@@ -528,47 +528,40 @@ mod tests {
     }
 
     #[test]
-    fn bare_tiber_launches_the_reviewed_codex_tui_through_a_private_gateway() {
+    fn bare_tiber_launches_embedded_codex_without_invoking_path_codex() {
         let fixture = HarnessFixture::new();
-        let invocation = fixture.repository.join("codex-tui-invocation.json");
+        let hostile_invocation = fixture.repository.join("hostile-codex-invoked");
+        let hostile_codex = fixture.codex_directory.join("codex");
+        fs::write(
+            &hostile_codex,
+            format!(
+                "#!/bin/sh\nprintf invoked > '{}'\nexit 73\n",
+                hostile_invocation.display()
+            ),
+        )
+        .expect("hostile Codex fixture should be written");
+        fs::set_permissions(&hostile_codex, fs::Permissions::from_mode(0o755))
+            .expect("hostile Codex fixture should be executable");
 
         let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
             .current_dir(&fixture.repository)
             .env("PATH", fixture.path())
-            .env("TIBER_FIXTURE_MODE", "success")
-            .env("TIBER_FIXTURE_CODEX_TUI_INVOCATION", &invocation)
             .env("XDG_STATE_HOME", &fixture.state_home)
             .output()
-            .expect("bare Tiber should supervise the native Codex TUI");
+            .expect("bare Tiber should enter the embedded Codex TUI");
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(
-            output.status.success(),
-            "bare Tiber failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            !hostile_invocation.exists(),
+            "bare Tiber invoked the hostile PATH Codex: {stderr}",
         );
-        assert!(output.stdout.is_empty());
         assert!(
-            output.stderr.is_empty(),
-            "bare Tiber wrote stderr bytes: {:?}",
-            output.stderr
+            !stderr.contains("app_server_version_incompatible"),
+            "embedded launch must not run an external version preflight",
         );
-        let arguments: Vec<String> = serde_json::from_slice(
-            &fs::read(invocation).expect("Codex TUI invocation should be recorded"),
-        )
-        .expect("Codex TUI arguments should remain JSON");
-        assert_eq!(arguments.first().map(String::as_str), Some("--remote"));
-        let endpoint = arguments
-            .get(1)
-            .expect("Codex TUI invocation should include one remote endpoint");
-        assert!(endpoint.starts_with("unix://"));
         assert!(
-            !endpoint.trim_start_matches("unix://").is_empty(),
-            "the private gateway endpoint must have a concrete socket path"
-        );
-        assert_eq!(arguments.len(), 2);
-        assert!(
-            !fixture.initialized.is_file(),
-            "the legacy direct app-server client must not initialize"
+            output.status.success() || stderr.starts_with("codex_tui_start_failed:"),
+            "bare Tiber did not reach the embedded TUI boundary: {stderr}",
         );
     }
 

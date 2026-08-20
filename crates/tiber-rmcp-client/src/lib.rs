@@ -1291,9 +1291,15 @@ impl ClientHandler for RestrictedClientHandler {
 
     fn on_custom_notification(
         &self,
-        _notification: CustomNotification,
+        notification: CustomNotification,
         _context: NotificationContext<RoleClient>,
     ) -> impl future::Future<Output = ()> + Send + '_ {
+        if notification.method == "notifications/progress"
+            && let Ok(Some(params)) = notification.params_as::<ProgressNotificationParam>()
+        {
+            self.observe_progress(&params);
+            return future::ready(());
+        }
         self.refuse();
         future::ready(())
     }
@@ -4356,7 +4362,7 @@ mod tests {
                     &initialize,
                     json!({
                         "protocolVersion":"2025-11-25",
-                        "capabilities":{"tools":{}},
+                        "capabilities":{"tools":{"listChanged":true}},
                         "serverInfo":{"name":"fixture","version":"0.0.0"}
                     }),
                 ),

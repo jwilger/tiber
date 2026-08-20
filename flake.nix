@@ -163,6 +163,8 @@
           just
           lefthook
           nodejs_22
+          openssl
+          pkg-config
           prettier
           util-linux
           rust-analyzer
@@ -176,6 +178,7 @@
           export CARGO_INSTALL_ROOT="$TIBER_DEPENDENCIES_DIR/cargo-install"
           export TIBER_TEST_BASH="${pkgs.bash}/bin/bash"
           export TIBER_TEST_BWRAP="${pkgs.bubblewrap}/bin/bwrap"
+          export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig"
           mkdir -p "$CARGO_HOME" "$CARGO_INSTALL_ROOT"
           export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
 

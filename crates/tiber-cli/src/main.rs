@@ -24,7 +24,7 @@ use std::{
     io::Read as _,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
-    process::{self, Stdio},
+    process,
     sync::{
         Mutex,
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
@@ -33,6 +33,7 @@ use std::{
     time::Duration,
 };
 
+use clap::Parser as _;
 use eventcore_types::{BatchSize, EventStoreError, StreamPattern};
 use ratatui::crossterm::event::{self, Event};
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags, fstat, open, openat2};
@@ -233,126 +234,39 @@ fn load_configured_process_catalog(
         .map_err(ConfiguredProcessError::from)
 }
 
-/// Launches the reviewed native Codex TUI through Tiber's private policy gateway.
+/// Launches the reviewed native Codex TUI and app-server in this process.
 #[expect(
     clippy::print_stderr,
-    clippy::too_many_lines,
-    clippy::unseparated_literal_suffix,
-    reason = "the native supervisor owns one ordered child/gateway lifecycle, emits stable diagnostics, and retains conventional exit-code spelling"
+    reason = "the executable boundary reports embedded startup failures before exiting"
 )]
 fn run_native_codex_tui() {
-    preflight_default_codex_runtime();
-    let executable = resolve_executable("codex").unwrap_or_else(|| {
-        eprintln!("app_server_executable_not_found: codex is not on PATH");
-        process::exit(1);
-    });
-    let codex_home = tiber_codex_home().unwrap_or_else(|| {
-        eprintln!("app_server_state_home_unavailable: HOME and XDG_STATE_HOME are unset");
-        process::exit(1);
-    });
-    let workspace = env::current_dir().unwrap_or_else(|error| {
-        eprintln!("app_server_workspace_unavailable: {error}");
-        process::exit(1);
-    });
-    let app_server_config = AppServerConfig::new(
-        executable.clone(),
-        vec![
-            "app-server".to_owned(),
-            "--stdio".to_owned(),
-            "--strict-config".to_owned(),
-        ],
-        codex_home.clone(),
-        workspace.clone(),
-        Duration::from_mins(10),
-    )
-    .unwrap_or_else(|error| {
-        eprintln!("{}: {error}", error.code());
-        process::exit(1);
-    });
-    app_server_config
-        .prepare_isolated_home(ISOLATED_CONFIG)
+    // The next authority-integration increment ports this preserved policy boundary
+    // onto the embedded host hooks; retaining the function item keeps that domain
+    // implementation compiled without starting its obsolete socket transport.
+    std::hint::black_box((
+        start_native_gateway,
+        stop_native_gateway,
+        native_dynamic_tools,
+    ));
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .build()
         .unwrap_or_else(|error| {
-            eprintln!("{}: {error}", error.code());
+            eprintln!("codex_tui_runtime_failed: {error}");
             process::exit(1);
         });
-
-    let runtime_directory = tempfile::Builder::new()
-        .prefix("tiber-codex-")
-        .tempdir()
+    let cli = codex_tui::Cli::parse_from(["tiber"]);
+    runtime
+        .block_on(codex_tui::run_main(
+            cli,
+            codex_arg0::Arg0DispatchPaths::default(),
+            codex_config::LoaderOverrides::default(),
+            None,
+        ))
         .unwrap_or_else(|error| {
-            eprintln!("codex_gateway_runtime_directory_failed: {error}");
-            process::exit(1);
-        });
-    let gateway_socket = runtime_directory.path().join("gateway.sock");
-    let upstream_socket = runtime_directory.path().join("app-server.sock");
-    let policy = GatewayPolicy::new(
-        "You are operating through Tiber. Treat every tool request as an inert proposal; Tiber alone authorizes effects and records durable receipts.",
-        native_dynamic_tools(),
-    )
-    .unwrap_or_else(|error| {
-        eprintln!("{}: {error}", error.code());
-        process::exit(1);
-    });
-    let (shutdown_sender, gateway_thread) =
-        start_native_gateway(&gateway_socket, &upstream_socket, &workspace, policy);
-
-    let upstream_endpoint = format!("unix://{}", upstream_socket.display());
-    let backend_result = process::Command::new(&executable)
-        .args([
-            "app-server",
-            "--listen",
-            upstream_endpoint.as_str(),
-            "--strict-config",
-        ])
-        .current_dir(&workspace)
-        .env("CODEX_HOME", &codex_home)
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let mut backend = match backend_result {
-        Ok(backend) => backend,
-        Err(error) => {
-            let _gateway_result = stop_native_gateway(&shutdown_sender, gateway_thread);
-            eprintln!("app_server_start_failed: {error}");
-            process::exit(1);
-        }
-    };
-    if let Err(error) = wait_for_app_server_socket(&upstream_socket, &mut backend) {
-        drop(backend.kill());
-        drop(backend.wait());
-        let _gateway_result = stop_native_gateway(&shutdown_sender, gateway_thread);
-        eprintln!("{}: {}", error.code, error.message);
-        process::exit(1);
-    }
-
-    let gateway_endpoint = format!("unix://{}", gateway_socket.display());
-    let tui_result = process::Command::new(executable)
-        .args(["--remote", gateway_endpoint.as_str()])
-        .current_dir(workspace)
-        .env("CODEX_HOME", codex_home)
-        .status();
-
-    drop(backend.kill());
-    drop(backend.wait());
-    let gateway_result = stop_native_gateway(&shutdown_sender, gateway_thread);
-    let tui_status = match tui_result {
-        Ok(status) => status,
-        Err(error) => {
             eprintln!("codex_tui_start_failed: {error}");
             process::exit(1);
-        }
-    };
-    if let Err(code) = gateway_result {
-        eprintln!("{code}: Codex gateway stopped before the native TUI");
-        process::exit(1);
-    }
-    if !tui_status.success() {
-        eprintln!("codex_tui_failed: reviewed Codex TUI exited unsuccessfully");
-        process::exit(tui_status.code().unwrap_or(1i32));
-    }
+        });
 }
 
 /// Stops and joins the native gateway before returning control to the shell.
@@ -989,46 +903,6 @@ fn native_task_failure(code: &str) -> serde_json::Value {
     })
 }
 
-/// A stable backend-readiness failure and its owner-facing explanation.
-struct BackendReadinessError {
-    /// Stable machine-readable failure code.
-    code: &'static str,
-    /// Sanitized owner-facing explanation.
-    message: String,
-}
-
-/// Waits for the private backend socket or reports why the child was not ready.
-fn wait_for_app_server_socket(
-    socket: &Path,
-    child: &mut process::Child,
-) -> Result<(), BackendReadinessError> {
-    let readiness_attempts: core::ops::Range<usize> = 0..200;
-    for _ in readiness_attempts {
-        if socket.exists() {
-            return Ok(());
-        }
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return Err(BackendReadinessError {
-                    code: "app_server_start_failed",
-                    message: "app-server exited before readiness".to_owned(),
-                });
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return Err(BackendReadinessError {
-                    code: "app_server_readiness_failed",
-                    message: error.to_string(),
-                });
-            }
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    Err(BackendReadinessError {
-        code: "app_server_readiness_timeout",
-        message: "app-server did not bind its private socket".to_owned(),
-    })
-}
 #[expect(
     clippy::print_stderr,
     reason = "a command-line adapter intentionally writes its result and diagnostics"

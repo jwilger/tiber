@@ -7,6 +7,10 @@ version.workspace = true
 
 [dependencies]
 chrono = "=0.4.45"
+clap = "=4.5.58"
+codex-arg0 = { git = "https://github.com/jwilger/codex.git", rev = "ee7e1dc764fc030d0b810576a349e9b3e465847d" }
+codex-config = { git = "https://github.com/jwilger/codex.git", rev = "ee7e1dc764fc030d0b810576a349e9b3e465847d" }
+codex-tui = { git = "https://github.com/jwilger/codex.git", rev = "ee7e1dc764fc030d0b810576a349e9b3e465847d" }
 uuid = { version = "=1.24.0", features = ["v4"] }
 eventcore-types.workspace = true
 eventcore.workspace = true
