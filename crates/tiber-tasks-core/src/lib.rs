@@ -254,6 +254,30 @@ pub enum ValidationRepair {
     },
 }
 
+impl ValidationRepair {
+    /// Records one deterministic reciprocal dependency-link repair.
+    #[must_use]
+    pub fn reciprocal_link_added(task: TaskId, field: String, target: TaskId) -> Self {
+        Self::ReciprocalLinkAdded {
+            task,
+            field,
+            target,
+        }
+    }
+
+    /// Records one deterministic open-board membership addition.
+    #[must_use]
+    pub const fn board_entry_added(task: TaskId) -> Self {
+        Self::BoardEntryAdded { task }
+    }
+
+    /// Records one deterministic stale open-board membership removal.
+    #[must_use]
+    pub const fn board_entry_removed(task: TaskId) -> Self {
+        Self::BoardEntryRemoved { task }
+    }
+}
+
 /// Authoritative durable state established by task facts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -683,6 +707,24 @@ pub struct TaskValidationRepaired {
     pub order_change: Option<TaskOrder>,
     /// Deterministic repair observations.
     pub repairs: Vec<ValidationRepair>,
+}
+
+impl TaskValidationRepaired {
+    /// Creates one complete deterministic validation-repair fact.
+    #[must_use]
+    pub fn new(
+        stream_id: StreamId,
+        link_changes: Vec<TaskLinksChanged>,
+        order_change: Option<TaskOrder>,
+        repairs: Vec<ValidationRepair>,
+    ) -> Self {
+        Self {
+            stream_id,
+            link_changes,
+            order_change,
+            repairs,
+        }
+    }
 }
 
 /// Durable source-event payload for closing tasks from an accepted commit.

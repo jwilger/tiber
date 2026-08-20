@@ -3,7 +3,10 @@
 //! This module owns CLI parsing and rendering only. The Git-backed store owns
 //! source selection, while the task service owns the immutable history replay.
 
-use core::{error::Error, fmt};
+use core::{
+    error::Error,
+    fmt::{self, Write as _},
+};
 use std::{ffi::OsString, io, path::Path};
 
 use chrono::{SecondsFormat, Utc};
@@ -15,13 +18,14 @@ use tiber_store_git::{
 use tiber_tasks_core::{Subtask, Task, TaskCoreError, TaskEvent, TaskId, TaskStatus, TaskTitle};
 use tiber_tasks_service::command::{
     AbandonTask, AcceptanceIndex, AddAcceptance, CheckAcceptance, CheckSubtaskOccurrence,
-    CompleteTask, CreateTask, LinkBlockedBy, PrioritizeTask, RepairDuplicateSubtaskId, StartTask,
-    SubtaskOccurrence, SubtaskReplacementId, TaskCommandError, TaskCreationDecision,
+    CompleteTask, CreateTask, LinkBlockedBy, PrioritizeTask, ReopenTask, RepairDuplicateSubtaskId,
+    StartTask, SubtaskOccurrence, SubtaskReplacementId, TaskCommandError, TaskCreationDecision,
     UpdateTaskDetails, decide_abandon_task, decide_add_acceptance, decide_check_acceptance,
     decide_check_subtask_occurrence, decide_complete_task, decide_create_task,
-    decide_link_blocked_by, decide_prioritize_task, decide_repair_duplicate_subtask_id,
-    decide_start_task, decide_update_task_details,
+    decide_link_blocked_by, decide_prioritize_task, decide_reopen_task,
+    decide_repair_duplicate_subtask_id, decide_start_task, decide_update_task_details,
 };
+use tiber_tasks_service::validation::decide as decide_validation;
 use tiber_tasks_service::{TaskBoardProjection, TaskHistory, TaskProjectionError, TaskReference};
 use tokio::runtime::Builder as RuntimeBuilder;
 use uuid::Uuid;
@@ -34,7 +38,7 @@ const TASK_HISTORY_PAGE_SIZE: usize = 64;
     clippy::pub_with_shorthand,
     reason = "the parent command shell consumes the one canonical task grammar without widening it to the crate"
 )]
-pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> <done|abandoned>";
+pub(super) const TASKS_COMMAND_GRAMMAR: &str = "create [--id <stable-prefix>] <title> | update <ref> --title <title> --summary <summary> --context <context> | prioritize <ref> --before <ref> | link blocked-by <ref> <blocker-ref> | list [--status <backlog|in-progress|done|abandoned>] | show <ref> | search <query> | next | start <ref> | reopen <ref> | acceptance add <ref> <criterion> | acceptance check <ref> <one-based-index> | subtask check <ref> <one-based-occurrence> | subtask repair-duplicate <ref> <one-based-occurrence> <replacement-id> | transition <ref> <done|abandoned> | validate --fix";
 
 /// The exact durable stream patterns that comprise native Tiber Tasks history.
 ///
@@ -101,6 +105,8 @@ pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, Tas
         TaskCommand::Start { reference } => start_task(repository, &reference),
         TaskCommand::TransitionDone { reference } => complete_task(repository, &reference),
         TaskCommand::TransitionAbandoned { reference } => abandon_task(repository, &reference),
+        TaskCommand::Reopen { reference } => reopen_task(repository, &reference),
+        TaskCommand::ValidateFix => validate_fix(repository),
         TaskCommand::List(status) => {
             let projection = load_projection(repository)?;
             Ok(list_tasks(&projection, status))
@@ -128,6 +134,13 @@ pub(super) fn run(repository: &Path, command: TaskCommand) -> Result<String, Tas
 pub(super) enum TaskCommand {
     /// Renders the supported native task grammar without accessing repository state.
     Help,
+    /// Validates the board and publishes only deterministic safe repairs.
+    ValidateFix,
+    /// Reopens one abandoned task at the strict backlog tail.
+    Reopen {
+        /// Parsed task reference resolved after canonical history is read.
+        reference: TaskReference,
+    },
     /// Creates one new backlog task through the native signed authority.
     Create {
         /// Stable retry identity supplied by the caller when reconciling creation.
@@ -541,6 +554,14 @@ impl fmt::Display for TaskCliError {
                     status_name(*status)
                 );
             }
+            Self::Command(TaskCommandError::TaskReopeningNotAbandoned { task, status }) => {
+                return write!(
+                    f,
+                    "task `{}` is currently `{}`; reopening requires `abandoned`",
+                    task.as_str(),
+                    status_name(*status)
+                );
+            }
             Self::Command(TaskCommandError::SubtaskOccurrenceUnchecked { task, occurrence }) => {
                 let displayed_occurrence = occurrence.zero_based_value().saturating_add(1);
                 return write!(
@@ -854,6 +875,13 @@ fn parse_command(subcommand: &str, arguments: &[String]) -> Result<TaskCommand, 
             }),
             _ => Err(TaskCliError::InvalidArguments),
         },
+        "reopen" => match arguments {
+            [reference] => Ok(TaskCommand::Reopen {
+                reference: TaskReference::parse(reference).map_err(TaskCliError::Projection)?,
+            }),
+            _ => Err(TaskCliError::InvalidArguments),
+        },
+        "validate" if arguments == ["--fix"] => Ok(TaskCommand::ValidateFix),
         _ => Err(TaskCliError::UnknownSubcommand),
     }
 }
@@ -1027,6 +1055,77 @@ fn abandon_task(repository: &Path, reference: &TaskReference) -> Result<String, 
         request.task().as_str(),
         outcome.revision().as_str()
     ))
+}
+
+/// Decides and publishes one abandoned-to-backlog reopening.
+fn reopen_task(repository: &Path, reference: &TaskReference) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let projection = TaskBoardProjection::replay(&history).map_err(TaskCliError::Projection)?;
+    let task = projection
+        .resolve_task_reference(reference)
+        .map_err(TaskCliError::Projection)?;
+    let request = ReopenTask::new(task.clone());
+    let publication =
+        decide_reopen_task(history.events(), &request).map_err(TaskCliError::Command)?;
+    let mut publisher =
+        TiberEventPublisher::open_at(repository, &revision).map_err(TaskCliError::Publication)?;
+    let runtime = RuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(TaskCliError::Runtime)?;
+    let outcome = runtime
+        .block_on(publisher.publish_task_reopening(publication))
+        .map_err(TaskCliError::Publication)?;
+    Ok(format!(
+        "reopened {} at {}\n",
+        request.task().as_str(),
+        outcome.revision().as_str()
+    ))
+}
+
+/// Validates current task facts and publishes only checked deterministic repairs.
+fn validate_fix(repository: &Path) -> Result<String, TaskCliError> {
+    let (history, revision) = load_history_and_revision(repository)?;
+    let decision = decide_validation(history.events()).map_err(TaskCliError::Command)?;
+    let mut output = String::new();
+    let findings_are_empty =
+        decision.dangling_links.is_empty() && decision.dependency_cycles.is_empty();
+    match (decision.publication, findings_are_empty) {
+        (Some(publication), _) => {
+            let mut publisher = TiberEventPublisher::open_at(repository, &revision)
+                .map_err(TaskCliError::Publication)?;
+            let runtime = RuntimeBuilder::new_current_thread()
+                .build()
+                .map_err(TaskCliError::Runtime)?;
+            let outcome = runtime
+                .block_on(publisher.publish_task_validation(publication))
+                .map_err(TaskCliError::Publication)?;
+            let _infallible = writeln!(
+                &mut output,
+                "repaired task board at {}",
+                outcome.revision().as_str()
+            );
+        }
+        (None, true) => output.push_str("board is healthy\n"),
+        (None, false) => {}
+    }
+    for finding in decision.dangling_links {
+        let _infallible = writeln!(
+            &mut output,
+            "dangling link: {}.{} -> {}",
+            finding.task.as_str(),
+            finding.field,
+            finding.target.as_str()
+        );
+    }
+    for cycle in decision.dependency_cycles {
+        output.push_str("dependency cycle:");
+        for task in cycle {
+            output.push(' ');
+            output.push_str(task.as_str());
+        }
+        output.push('\n');
+    }
+    Ok(output)
 }
 
 /// Decides and publishes one native backlog task creation.

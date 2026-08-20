@@ -11,6 +11,7 @@ extern crate alloc;
 
 /// Pure native task-command decisions.
 pub mod command;
+pub mod validation;
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{error::Error, fmt};
@@ -59,6 +60,101 @@ pub struct TaskAbandonmentPublication {
     order: TaskOrder,
     /// Terminal task transition authorized for publication.
     transition: TaskTransitioned,
+}
+
+/// Opaque modeled task-board repair and the exact streams read to decide it.
+#[derive(Debug)]
+pub struct TaskValidationPublication {
+    /// Exact board and task streams read by validation.
+    consistency_streams: Vec<StreamId>,
+    /// Complete aggregate repair fact authorized by the checked model.
+    fact: tiber_tasks_core::TaskValidationRepaired,
+}
+
+/// Opaque modeled abandoned-to-backlog transition and strict board order.
+#[derive(Debug, Eq, PartialEq)]
+pub struct TaskReopeningPublication {
+    /// Exact board and target-task streams read by reopening.
+    consistency_streams: [StreamId; 2],
+    /// Resulting complete open-board order.
+    order: TaskOrder,
+    /// Abandoned-to-backlog lifecycle fact.
+    transition: TaskTransitioned,
+}
+
+impl TaskReopeningPublication {
+    /// Validates modeled reopening facts and closes them into one adapter token.
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the sole checked-model construction boundary intentionally has one command caller"
+    )]
+    pub(crate) fn from_modeled_facts(
+        transition: TaskTransitioned,
+        order: TaskOrder,
+        consistency_streams: [StreamId; 2],
+    ) -> Result<Self, command::TaskCommandError> {
+        if transition.stream_id != consistency_streams[1]
+            || transition.status != TaskStatus::Backlog
+            || transition.claim.is_some()
+            || order.stream_id != consistency_streams[0]
+            || order.order.last() != Some(&transition.stem)
+        {
+            return Err(command::TaskCommandError::InvalidModeledTaskReopeningPublication);
+        }
+        Ok(Self {
+            consistency_streams,
+            order,
+            transition,
+        })
+    }
+
+    /// Transfers the closed transition/order batch and exact stream fence once.
+    #[must_use]
+    #[inline]
+    pub fn into_events_and_consistency_streams(self) -> (Vec<TaskEvent>, [StreamId; 2]) {
+        (
+            vec![
+                TaskEvent::TaskTransitioned(self.transition),
+                TaskEvent::TaskPriorityChanged(self.order),
+            ],
+            self.consistency_streams,
+        )
+    }
+}
+
+impl TaskValidationPublication {
+    /// Validates a modeled repair fact and closes its complete consistency fence.
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the sole checked-model construction boundary intentionally has one command caller"
+    )]
+    pub(crate) fn from_modeled_fact(
+        fact: tiber_tasks_core::TaskValidationRepaired,
+        consistency_streams: Vec<StreamId>,
+    ) -> Result<Self, command::TaskCommandError> {
+        let board = StreamId::try_new(command::TASK_BOARD_STREAM.to_owned())
+            .map_err(|_invalid_stream| command::TaskCommandError::InvalidTaskStream)?;
+        if fact.stream_id != board
+            || consistency_streams.first() != Some(&board)
+            || fact.repairs.is_empty()
+        {
+            return Err(command::TaskCommandError::InvalidModeledTaskValidationPublication);
+        }
+        Ok(Self {
+            consistency_streams,
+            fact,
+        })
+    }
+
+    /// Transfers the checked repair fact and exact consistency fence once.
+    #[must_use]
+    #[inline]
+    pub fn into_event_and_consistency_streams(self) -> (TaskEvent, Vec<StreamId>) {
+        (
+            TaskEvent::TaskValidationRepaired(self.fact),
+            self.consistency_streams,
+        )
+    }
 }
 impl TaskAbandonmentPublication {
     /// Closes modeled abandonment facts and their exact consistency fence into

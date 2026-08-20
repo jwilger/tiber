@@ -10,6 +10,8 @@ mod abandonment;
 mod acceptance_add;
 #[path = "dependency_link.rs"]
 mod dependency_link;
+#[path = "reopening.rs"]
+mod reopening;
 #[path = "task_administration.rs"]
 mod task_administration;
 #[path = "task_details.rs"]
@@ -57,7 +59,8 @@ pub type AbandonTask = abandonment::AbandonTask;
 pub type LinkBlockedBy = dependency_link::LinkBlockedBy;
 /// Request to move one open task immediately before another in strict board order.
 pub type PrioritizeTask = task_priority::PrioritizeTask;
-
+/// Request to reopen one abandoned task into the backlog.
+pub type ReopenTask = reopening::ReopenTask;
 /// A zero-based durable acceptance-item position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AcceptanceIndex(usize);
@@ -781,10 +784,16 @@ pub enum TaskCommandError {
     TaskCreationMalformedHistory,
     /// An abandonment request addressed a task that is not currently open.
     TaskAbandonmentNotOpen { task: TaskId, status: TaskStatus },
+    /// A reopening request addressed a task that is not abandoned.
+    TaskReopeningNotAbandoned { task: TaskId, status: TaskStatus },
     /// The current strict board order cannot authorize the requested priority movement.
     TaskPriorityMalformedHistory,
     /// Board-wide facts needed for abandonment came from an unfenced stream.
     TaskAbandonmentMalformedHistory,
+    /// Board-wide facts needed for reopening cannot authorize the inverse transition.
+    TaskReopeningMalformedHistory,
+    /// Facts needed for validation came from an invalid stream or lifecycle.
+    TaskValidationMalformedHistory,
     /// A priority request named the same task as both movement endpoints.
     TaskPrioritySelfReference {
         /// Task supplied as both the moved task and its anchor.
@@ -956,6 +965,14 @@ pub enum TaskCommandError {
     ModeledTaskAbandonmentDecisionFailed,
     /// The checked model did not produce one valid abandonment.
     InvalidModeledTaskAbandonmentPublication,
+    /// The checked model could not decide task-board validation.
+    ModeledTaskValidationDecisionFailed,
+    /// The checked model did not produce one valid task-board repair.
+    InvalidModeledTaskValidationPublication,
+    /// The checked model could not decide reopening.
+    ModeledTaskReopeningDecisionFailed,
+    /// The checked model did not produce one valid reopening batch.
+    InvalidModeledTaskReopeningPublication,
 }
 
 impl TaskCommandError {
@@ -987,9 +1004,14 @@ impl TaskCommandError {
             }
             Self::TaskCreationMalformedHistory => "tasks_command_task_creation_malformed_history",
             Self::TaskAbandonmentNotOpen { .. } => "tasks_command_task_abandonment_not_backlog",
+            Self::TaskReopeningNotAbandoned { .. } => "tasks_command_task_reopening_not_abandoned",
             Self::TaskPriorityMalformedHistory => "tasks_command_task_priority_malformed_history",
             Self::TaskAbandonmentMalformedHistory => {
                 "tasks_command_task_abandonment_malformed_history"
+            }
+            Self::TaskReopeningMalformedHistory => "tasks_command_task_reopening_malformed_history",
+            Self::TaskValidationMalformedHistory => {
+                "tasks_command_task_validation_malformed_history"
             }
             Self::TaskPrioritySelfReference { .. } => "tasks_command_task_priority_self_reference",
             Self::TaskPriorityEndpointNotOpen { .. } => {
@@ -1092,6 +1114,18 @@ impl TaskCommandError {
             }
             Self::InvalidModeledTaskAbandonmentPublication => {
                 "tasks_command_invalid_modeled_task_abandonment_publication"
+            }
+            Self::ModeledTaskValidationDecisionFailed => {
+                "tasks_command_modeled_task_validation_decision_failed"
+            }
+            Self::InvalidModeledTaskValidationPublication => {
+                "tasks_command_invalid_modeled_task_validation_publication"
+            }
+            Self::ModeledTaskReopeningDecisionFailed => {
+                "tasks_command_modeled_task_reopening_decision_failed"
+            }
+            Self::InvalidModeledTaskReopeningPublication => {
+                "tasks_command_invalid_modeled_task_reopening_publication"
             }
         }
     }
@@ -4181,6 +4215,20 @@ pub fn acceptance_consistency_streams(task: &TaskId) -> Result<[StreamId; 2], Ta
     let task_stream = StreamId::try_new(format!("tiber:task:{}", task.as_str()))
         .map_err(|_source| TaskCommandError::InvalidTaskStream)?;
     Ok([board, task_stream])
+}
+
+/// Decides one abandoned-to-backlog reopening.
+///
+/// # Errors
+///
+/// Returns a typed command error when retained history is malformed or the
+/// addressed task is not currently abandoned.
+#[inline]
+pub fn decide_reopen_task(
+    events: &[TaskEvent],
+    request: &ReopenTask,
+) -> Result<crate::TaskReopeningPublication, TaskCommandError> {
+    reopening::decide(events, request)
 }
 
 /// Decides one exact replacement of a task's editable details.

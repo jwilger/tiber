@@ -18,7 +18,9 @@ extern crate alloc;
 use alloc::{collections::BTreeMap, string::FromUtf8Error, sync::Arc};
 use std::{
     collections::HashSet,
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     io::Read as _,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
@@ -1044,6 +1046,7 @@ fn main() {
         "converse" => run_conversation(arguments),
         "session" => run_session(arguments),
         "tasks" => run_tasks(arguments),
+        "validate" => run_tasks(core::iter::once(OsString::from("validate")).chain(arguments)),
         "__tiber-test-legacy-tui" if cfg!(debug_assertions) => run_tui(),
         "__tiber-process-launcher" => process::exit(run_private_launcher(arguments)),
         "-h" | "--help" => {
@@ -4709,7 +4712,7 @@ fn tiber_codex_home() -> Option<PathBuf> {
 /// Prints the supported command grammar.
 fn usage() {
     eprintln!(
-        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | session active | tasks <{}>]",
+        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | session active | validate --fix | tasks <{}>]",
         tasks::TASKS_COMMAND_GRAMMAR
     );
 }
@@ -4721,7 +4724,7 @@ fn usage() {
 /// Prints the supported command grammar for an explicit help request.
 fn print_help() {
     println!(
-        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | session active | tasks <{}>]",
+        "usage: tiber [app-server-probe <authority-surface.json> | auth <status|login|login-api-key|logout> | converse <prompt> | session active | validate --fix | tasks <{}>]",
         tasks::TASKS_COMMAND_GRAMMAR
     );
 }

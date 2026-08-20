@@ -26,7 +26,8 @@ use tiber_tasks_service::{
     AcceptanceAddPublication, AcceptanceCheckPublication, DependencyLinkPublication,
     SubtaskIdCorrectionPublication, SubtaskOccurrenceCheckPublication, TaskAbandonmentPublication,
     TaskActivationPublication, TaskCompletionPublication, TaskCreationPublication,
-    TaskDetailsPublication, TaskPriorityPublication,
+    TaskDetailsPublication, TaskPriorityPublication, TaskReopeningPublication,
+    TaskValidationPublication,
 };
 use tiber_workflow_core::TiberEffect;
 use tiber_workflow_service::{
@@ -483,6 +484,37 @@ impl TiberEventPublisher {
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (events, streams) = publication.into_events_and_consistency_streams();
         return self.append(&streams, events).await;
+    }
+
+    /// Publishes one checked deterministic task-board repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed publication error when the checked repair cannot be
+    /// appended, committed, pushed, or reconciled against task authority.
+    #[inline]
+    pub async fn publish_task_validation(
+        &mut self,
+        publication: TaskValidationPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = publication.into_event_and_consistency_streams();
+        self.append(&streams, vec![event]).await
+    }
+
+    /// Publishes one modeled abandoned-to-backlog reopening and board order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed publication error when the modeled transition/order
+    /// batch cannot be appended, committed, pushed, or reconciled against task
+    /// authority.
+    #[inline]
+    pub async fn publish_task_reopening(
+        &mut self,
+        publication: TaskReopeningPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (events, streams) = publication.into_events_and_consistency_streams();
+        self.append(&streams, events).await
     }
 
     /// Opens a publishable snapshot only if it still equals the already-read authority revision.
