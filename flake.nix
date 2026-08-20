@@ -51,12 +51,23 @@
         version = "0.1.0";
         src = source;
 
-        cargoLock.lockFile = ./Cargo.lock;
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes."codex-agent-extension-0.148.0" = "sha256-QgnN0Z2+CQweTMPH0MAUStTmlytwg9ov+ED1YPW6bVc=";
+          outputHashes."crossterm-0.29.0" = "sha256-cQxQQuV+YEutuQiPurXVISq6F/99vCEk8qe5PU8BCSo=";
+          outputHashes."nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
+          outputHashes."tokio-tungstenite-0.28.0" = "sha256-V1xmnrfRWOcZZogelZEA4vvyMj2awCfHVA5/glQ6KAI=";
+          outputHashes."tungstenite-0.27.0" = "sha256-VVHhk7l9J/sEmG3q/UuV/sQ3f+fGsmq5vumSy8vbMvw=";
+        };
         cargoBuildFlags = [
           "--workspace"
           "--bins"
         ];
-        nativeBuildInputs = [ pkgs.makeWrapper ];
+        nativeBuildInputs = [
+          pkgs.makeWrapper
+          pkgs.pkg-config
+        ];
+        buildInputs = [ pkgs.openssl ];
 
         # Canonical integration tests exercise real Bubblewrap in `just ci`.
         # Nested Nix sandboxes cannot provide that execution environment.
