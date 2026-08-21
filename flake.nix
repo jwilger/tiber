@@ -73,11 +73,16 @@
         # Nested Nix sandboxes cannot provide that execution environment.
         doCheck = false;
 
-        postInstall = ''
+        # Installing only the shipping binaries avoids buildRustPackage's default
+        # post-build copy of the entire (very large) embedded-Codex target tree.
+        installPhase = ''
+          runHook preInstall
+
+          release_dir="target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/$cargoBuildType"
           install -d "$out/libexec/tiber"
-          mv "$out/bin/tiber" "$out/libexec/tiber/tiber"
-          mv "$out/bin/tiber-process-launcher" "$out/libexec/tiber/tiber-process-launcher"
-          mv "$out/bin/tiber-repository-worker" "$out/libexec/tiber/tiber-repository-worker"
+          install -Dm755 "$release_dir/tiber" "$out/libexec/tiber/tiber"
+          install -Dm755 "$release_dir/tiber-process-launcher" "$out/libexec/tiber/tiber-process-launcher"
+          install -Dm755 "$release_dir/tiber-repository-worker" "$out/libexec/tiber/tiber-repository-worker"
           ln -s "${lib.getExe pkgs.bubblewrap}" "$out/libexec/tiber/bwrap"
 
           makeWrapper "$out/libexec/tiber/tiber" "$out/bin/tiber" \
@@ -88,6 +93,8 @@
                 pkgs.coreutils
               ]
             }"
+
+          runHook postInstall
         '';
 
         meta = {
