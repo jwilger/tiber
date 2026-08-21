@@ -1,5 +1,11 @@
 # App-server authority compatibility spike
 
+> **Status: superseded and non-runnable.** This historical spike tested the
+> removed external app-server transport for Codex 0.147.0. Tiber now embeds the
+> pinned Codex TUI and in-process backend and enforces authority through typed
+> host-policy hooks. The referenced probe command, scripts, configuration, and
+> fixture crate were intentionally deleted during that cutover.
+
 ## Question
 
 Can Tiber use `codex app-server` for inference while ensuring that no operation

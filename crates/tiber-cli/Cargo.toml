@@ -8,15 +8,15 @@ version.workspace = true
 [dependencies]
 chrono = "=0.4.45"
 clap = "=4.5.58"
-codex-arg0 = { git = "https://github.com/jwilger/codex.git", rev = "ee7e1dc764fc030d0b810576a349e9b3e465847d" }
-codex-config = { git = "https://github.com/jwilger/codex.git", rev = "ee7e1dc764fc030d0b810576a349e9b3e465847d" }
-codex-tui = { git = "https://github.com/jwilger/codex.git", rev = "ee7e1dc764fc030d0b810576a349e9b3e465847d" }
+codex-arg0 = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
+codex-app-server-client = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
+codex-app-server-protocol = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
+codex-config = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
+codex-core = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
+codex-tui = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
 uuid = { version = "=1.24.0", features = ["v4"] }
 eventcore-types.workspace = true
 eventcore.workspace = true
-tiber-app-server = { path = "../tiber-app-server" }
-tiber-codex-gateway = { path = "../tiber-codex-gateway" }
-tiber-codex-gateway-core = { path = "../tiber-codex-gateway-core" }
 tiber-repository-core = { path = "../tiber-repository-core" }
 tiber-repository-linux = { path = "../tiber-repository-linux" }
 tiber-repository-service = { path = "../tiber-repository-service" }

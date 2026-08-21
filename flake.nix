@@ -10,39 +10,12 @@
       pkgs = import nixpkgs { inherit system; };
       lib = pkgs.lib;
 
-      reviewedCodex = pkgs.stdenvNoCC.mkDerivation {
-        pname = "codex";
-        version = "0.147.0";
-
-        src = pkgs.fetchurl {
-          url = "https://registry.npmjs.org/@openai/codex/-/codex-0.147.0-linux-x64.tgz";
-          hash = "sha256-yWl0DPgpfkwxkFzVUe/rLJmvUIDBLCNr34JVmLJQE5o=";
-        };
-
-        sourceRoot = "package/vendor/x86_64-unknown-linux-musl";
-
-        installPhase = ''
-          runHook preInstall
-          mkdir -p "$out/bin" "$out/libexec/codex"
-          cp -R . "$out/libexec/codex"
-          ln -s ../libexec/codex/bin/codex "$out/bin/codex"
-          runHook postInstall
-        '';
-
-        meta = {
-          description = "Reviewed Codex CLI used by Tiber";
-          mainProgram = "codex";
-          platforms = [ "x86_64-linux" ];
-        };
-      };
-
       source = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
           ./Cargo.toml
           ./Cargo.lock
           ./crates
-          ./config
         ];
       };
 
@@ -53,7 +26,7 @@
 
         cargoLock = {
           lockFile = ./Cargo.lock;
-          outputHashes."codex-agent-extension-0.148.0" = "sha256-QgnN0Z2+CQweTMPH0MAUStTmlytwg9ov+ED1YPW6bVc=";
+          outputHashes."codex-agent-extension-0.148.0" = "sha256-NHw0VXzn99OOHspGXf/KL9syFlZa0+ueZ0xLMJOrLGU=";
           outputHashes."crossterm-0.29.0" = "sha256-cQxQQuV+YEutuQiPurXVISq6F/99vCEk8qe5PU8BCSo=";
           outputHashes."nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
           outputHashes."tokio-tungstenite-0.28.0" = "sha256-V1xmnrfRWOcZZogelZEA4vvyMj2awCfHVA5/glQ6KAI=";
@@ -88,7 +61,6 @@
           makeWrapper "$out/libexec/tiber/tiber" "$out/bin/tiber" \
             --prefix PATH : "${
               lib.makeBinPath [
-                reviewedCodex
                 pkgs.git
                 pkgs.coreutils
               ]
@@ -108,20 +80,13 @@
         empty_home="$TMPDIR/empty-home"
         mkdir -p "$empty_home"
 
-        codex_version="$(env -i HOME="$empty_home" PATH="" \
-          "${lib.getExe reviewedCodex}" --version)"
-        test "$codex_version" = "codex-cli 0.147.0"
-        env -i HOME="$empty_home" PATH="" \
-          "${lib.getExe reviewedCodex}" --help \
-          | "${lib.getExe pkgs.gnugrep}" --fixed-strings -- "--remote" >/dev/null
-
         ambient_bin="$TMPDIR/ambient-bin"
         mkdir -p "$ambient_bin"
         printf '%s\n' '#!${pkgs.runtimeShell}' 'exit 99' > "$ambient_bin/codex"
         chmod +x "$ambient_bin/codex"
         env -i HOME="$empty_home" PATH="$ambient_bin" \
-          "${tiber}/bin/tiber" auth status \
-          | "${lib.getExe pkgs.gnugrep}" --fixed-strings "signed out" >/dev/null
+          "${tiber}/bin/tiber" --help \
+          | "${lib.getExe pkgs.gnugrep}" --fixed-strings "tiber [session active" >/dev/null
 
         env -i HOME="$empty_home" PATH="" "${tiber}/bin/tiber" --help >/dev/null
 
@@ -188,7 +153,7 @@
           rust-analyzer
           rustc
           rustfmt
-        ] ++ [ reviewedCodex ];
+        ];
 
         shellHook = ''
           export TIBER_DEPENDENCIES_DIR="$PWD/.dependencies"

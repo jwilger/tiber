@@ -8,7 +8,7 @@ default: ci
 ci: code-quality package
 
 # Runs the source and behavior gates without constructing the Nix package.
-code-quality: actionlint lint-policy format clippy test authority-fixture
+code-quality: actionlint lint-policy format clippy test
 
 actionlint:
     actionlint
@@ -25,16 +25,9 @@ clippy:
 test:
     CARGO_TARGET_DIR=target/tiber cargo test --locked --workspace --all-features
 
-authority-fixture:
-    node scripts/tests/probe-app-server-effective-authority.test.mjs
-
 package:
     # The all-feature Cargo gate and Nix package compile the same large graph.
     # Release Cargo artifacts before Nix starts so both copies do not exhaust CI disk.
     cargo clean --target-dir target/tiber
     nix build --no-link .#tiber
     nix build --no-link .#checks.x86_64-linux.package-smoke
-
-# Manually compare a locally generated protocol schema to the reviewed fixture.
-app-server-authority-fixture schema:
-    bash scripts/check-app-server-authority-fixture.sh "{{schema}}"

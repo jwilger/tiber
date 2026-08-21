@@ -7,11 +7,11 @@ delivery. Inference is one bounded input to that authority, never the
 authority itself.
 
 Tiber v1 targets x86_64 Linux. The primary executable is `tiber`; running it
-without an argument launches the reviewed, pinned Codex TUI through a private
-Tiber policy gateway. This is the actual Codex terminal experience, not a
-look-alike UI. Tiber supervises the Codex TUI and app-server processes,
+without an argument launches the reviewed, pinned Codex TUI with an in-process
+Tiber host policy. This is the actual Codex terminal experience, not a
+look-alike UI. Tiber embeds Codex's TUI and backend in the same process,
 rewrites the inference permission profile, and intercepts effect-bearing
-requests before they can reach either client. Native task operations live under
+requests at typed Codex boundaries. Native task operations live under
 `tiber tasks …` and are also declared to Codex as the bounded `tiber_tasks`
 dynamic tool. The same native interface exposes bounded UTF-8 repository-file
 reads, exact repository proposals, and trusted configured commands; reads grant
@@ -57,10 +57,10 @@ initialize a workflow, request that effect, record its observation, and advance
 the trampoline. Recording an observation persists `EffectObserved` by itself;
 only a later advance decision may call `step` to request, complete, or stop.
 There is no generic workflow append or effect executor. The CLI interprets its
-closed `Infer` effect through app-server, durably records observations and the
+closed `Infer` effect through the embedded Codex backend, durably records observations and the
 terminal advance, and restores the projection on relaunch. The former
 projection TUI remains only as a debug-only integration-test driver; the public
-no-argument interface is native Codex. App-server tool requests remain inert
+no-argument interface is native Codex. Codex tool requests remain inert
 until a Tiber-owned typed boundary handles them. Native task, repository, and
 configured-process requests now reuse their signed durable boundaries; broader
 scheduling and operator-directed uncertain-effect resolution remain later
@@ -283,14 +283,13 @@ lefthook install
 
 Git runs the tracked Lefthook pre-commit gate for local formatting, strict
 Clippy, and unit tests. Do not run `just ci` locally; remote CI owns that entry
-point and adds actionlint, the Rust lint-policy audit, the full test suite, the
-app-server authority fixture, and packaging. Neither boundary requires provider
+point and adds actionlint, the Rust lint-policy audit, the full test suite, and
+packaging. Neither boundary requires provider
 credentials or starts a live inference session.
 
 For the current executable slice:
 
 ```shell
-cargo run --locked -p tiber -- app-server-probe path/to/protocol-schema.json
 cargo run --locked -p tiber -- tasks create "Task title"
 cargo run --locked -p tiber -- tasks list
 cargo run --locked -p tiber -- tasks show <task-ref>

@@ -1,9 +1,6 @@
 [workspace]
 members = [
-  "crates/tiber-app-server",
   "crates/tiber-cli",
-  "crates/tiber-codex-gateway",
-  "crates/tiber-codex-gateway-core",
   "crates/tiber-external-tools-core",
   "crates/tiber-hindsight-http",
   "crates/tiber-integration-audit",
