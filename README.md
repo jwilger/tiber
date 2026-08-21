@@ -23,6 +23,14 @@ are read-only queries over `EventCore` task history preserved on the signed
 currently advertised `tiber` commit and fetch that exact object without moving
 any caller Git ref.
 
+Native `/plan`, `/side`, and `/btw` retain Codex's presentation while crossing
+typed Tiber policy. Planning prompts and accept/cancel decisions are durable
+before their dependent action. Side and BTW turns have independently correlated
+child authority, preserve the parent turn, and recover interruption without
+replaying inference. The exact embedded source and Nix hash are recorded in
+`codex-source.toml`; `just update-codex` advances that provenance and the Cargo
+lock together without force-pushing.
+
 Tiber exposes command-specific native task creation, activation, and completion
 mutations: `create <title>`, `start <task-ref>`, `acceptance check`, `subtask check`, and
 `transition <task-ref> done`. Each starts with canonical history, makes one
@@ -57,11 +65,11 @@ initialize a workflow, request that effect, record its observation, and advance
 the trampoline. Recording an observation persists `EffectObserved` by itself;
 only a later advance decision may call `step` to request, complete, or stop.
 There is no generic workflow append or effect executor. The CLI interprets its
-closed `Infer` effect through the embedded Codex backend, durably records observations and the
-terminal advance, and restores the projection on relaunch. The former
-projection TUI remains only as a debug-only integration-test driver; the public
-no-argument interface is native Codex. Codex tool requests remain inert
-until a Tiber-owned typed boundary handles them. Native task, repository, and
+closed `Infer` effect through the embedded Codex backend, durably records
+observations and the terminal advance, and restores the projection on
+relaunch. The public no-argument interface is native Codex; Tiber does not ship
+a separate presentation TUI. Codex tool requests remain inert until a
+Tiber-owned typed boundary handles them. Native task, repository, and
 configured-process requests now reuse their signed durable boundaries; broader
 scheduling and operator-directed uncertain-effect resolution remain later
 slices.
@@ -162,7 +170,7 @@ startup. The model can select only a configured ID and cannot supply or change
 the program, arguments, paths, environment, network policy, timeout, or output
 bounds.
 
-Each app-server request identity receives a distinct signed process stream
+Each dynamic-tool call identity receives a distinct signed process stream
 under the active workflow effect. Checked EventCore models own atomic
 `Requested`/`Prepared` admission (or content-free `Refused`) followed by
 `Completed`, `SpawnFailed`, `TimedOut`, `Cancelled`, `Unknown`, or
@@ -171,7 +179,7 @@ required before opaque authority reaches `tiber-process-linux`.
 
 The Linux adapter uses fixed network-denied Bubblewrap containment and a
 private direct-argv launcher. Raw bounded stdout and stderr are returned only
-in the immediate sanitized app-server result; signed facts and the private
+in the immediate sanitized tool result; signed facts and the private
 full-fsync journal retain content-free byte counts and digests. The package
 keeps `tiber-process-launcher` and Bubblewrap private under `libexec`.
 

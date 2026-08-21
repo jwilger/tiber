@@ -4,10 +4,11 @@
 
 Tiber is a standalone, local-first development harness for one repository
 owner. Tiber owns the authoritative state and execution of development work.
-Its `codex app-server` inference design passed the corrected Phase 1
-effective-authority spike and is the accepted v1 transport. A source-level
-interactive transcript/composer now runs task-bound durable sessions through
-the checked workflow trampoline. Prompts, workflow effects, observations,
+Its exact pinned Codex fork provides the native TUI and in-process backend; a
+typed Tiber host/effect policy is the accepted v1 boundary. There is no runtime
+Codex executable, child app-server, private socket, or version preflight.
+Task-bound durable sessions run through the checked workflow trampoline.
+Prompts, workflow effects, observations,
 receipts, and transcript facts are published to signed authority before their
 dependent action; interrupted uncertain effects stop at an explicit reconcile
 next action rather than being replayed.
@@ -47,14 +48,20 @@ initialize a workflow, request the effect, record its observation, and advance
 the trampoline. Recording an observation persists `EffectObserved` in its own
 transaction; only a later advance decision may call `step` to request, complete,
 or stop. The service exposes neither a generic workflow append nor an effect
-executor. The CLI interprets only its closed `Infer` effect through app-server,
-records the observation and terminal advance durably, and restores the TUI
-projection on relaunch. Effect-bearing app-server requests remain inert until a
+executor. The CLI interprets only its closed `Infer` effect through embedded
+Codex, records the observation and terminal advance durably, and restores the
+native session on relaunch. Effect-bearing typed requests remain inert until a
 Tiber-owned handler accepts them. The native Codex surface can read one bounded
 UTF-8 regular-file preimage without shell or effect authority, then submit an
 exact repository proposal for a later owner decision or request a trusted
 configured command by semantic ID. Broader scheduling and operator-directed
 resolution of uncertain effects remain later native slices.
+
+Native `/plan`, `/side`, and `/btw` preserve their distinct Codex presentation
+while Tiber owns durable authority. Planning inference and its accept, accept-
+with-context-clear, or cancel decision are durable before dependent UI or
+coding action. Side and BTW turns use independent child streams, preserve the
+ordinary parent turn, and recover unfinished child work without replay.
 
 The native task surface also has one explicit legacy-data repair, not a general
 write: `subtask repair-duplicate`. It requires a one-based occurrence and a new
@@ -66,8 +73,8 @@ changing the first matching row.
 ### Current repository-mutation vertical slice
 
 The interactive harness now connects model-proposed repository writes to the
-existing assignment-bound authority and isolated Linux adapter. The app-server
-request remains inert structured input until Tiber rereads the exact target,
+existing assignment-bound authority and isolated Linux adapter. The dynamic-
+tool request remains inert structured input until Tiber rereads the exact target,
 constructs the diff, publishes the safe proposal identity to signed authority,
 and receives an explicit owner decision. Denial or cancellation is signed,
 performs no adapter dispatch, and returns the conversation to prompting. A
@@ -130,7 +137,7 @@ network access cannot be enabled. The model's `tiber_effect` request contains
 only `run_configured_command` and that semantic ID, never executable or
 containment details.
 
-The exact app-server request identity correlates each invocation to its own
+The exact dynamic-tool call identity correlates each invocation to its own
 signed process stream under the active workflow effect. Checked
 `tiber-process-service` models own atomic `Requested`/`Prepared` admission (or
 content-free `Refused`) and terminal `Completed`, `SpawnFailed`, `TimedOut`,
@@ -140,7 +147,7 @@ unchanged trusted configuration mint opaque dispatch authority.
 `tiber-process-linux` interprets that authority through fixed network-denied
 Bubblewrap containment and a private direct-argv launcher. The package keeps
 the launcher and pinned Bubblewrap helper under `libexec`. Bounded stdout and
-stderr are sanitized into the immediate app-server result, while signed facts
+stderr are sanitized into the immediate tool result, while signed facts
 and the private full-fsync journal retain only content-free byte counts,
 digests, exit status, and stable terminal categories.
 
@@ -173,7 +180,7 @@ automatic replay or reinitialization, SSE resumption, resource templates,
 subscriptions, cache directives, and interactive continuations. Mutating tool
 calls carry an idempotency identity and ambiguous outcomes enter
 reconciliation. Sampling, elicitation, and MCP tasks are explicit refusals.
-This slice adds no `TiberEffect`, EventCore, CLI, TUI, app-server, scheduler,
+This slice adds no `TiberEffect`, EventCore, CLI, TUI, inference, scheduler,
 or runner integration and makes no live external-service validation claim.
 The completed S3 audit boundary remains pure and unconnected.
 
@@ -198,7 +205,7 @@ provenance-carrying context—not authority for a workflow, decision, or effect.
 Retain requests name their source turn, and recall requests never admit that
 same turn. Memory
 failures are visible and normally nonfatal. This S2 boundary has no EventCore,
-workflow, CLI, TUI, app-server, or scheduler integration.
+workflow, CLI, TUI, inference, or scheduler integration.
 
 ### Current audit and integration S3 boundary
 
@@ -209,7 +216,7 @@ evidence—not raw memory text, recall queries or recalled content, tool
 arguments, integration configuration, transport detail, or server payloads.
 Observed external payloads contribute only a byte count and domain-separated
 digest. The DTOs neither publish EventCore facts nor create workflow,
-scheduler, CLI, TUI, app-server, or runner authority.
+scheduler, CLI, TUI, inference, or runner authority.
 
 Local deterministic fake-server tests cover no-I/O policy denial, sanitized
 tool observation/ambiguity/reconciliation, and scoped memory lifecycle plus
@@ -231,7 +238,7 @@ ambiguous write, or resume a partially completed delivery after a crash.
 
 Tiber gives an individual developer one inspectable authority for those
 concerns. The intended product retains Codex's subscription-backed inference
-and familiar terminal interaction behind the accepted app-server authority
+and familiar terminal interaction behind the accepted embedded typed-policy
 boundary.
 
 ## Target user
@@ -261,11 +268,11 @@ compromised trusted toolchain are outside the v1 threat model.
 
 ## Terminal experience
 
-The terminal interface is the reviewed Codex TUI itself, launched with a
-private `--remote unix://…` endpoint owned by Tiber. Codex therefore preserves
+The terminal interface is the reviewed Codex TUI itself, linked and invoked in
+process by Tiber. Codex therefore preserves
 its exact transcript, streaming, composer, keys, history, diff display, status
 bar, and status-card behavior without a drifting imitation. Tiber injects
-bounded workflow and task tools through the app-server protocol and keeps every
+bounded workflow and task tools through typed in-process hooks and keeps every
 effect inert until signed application policy completes it. UI state and the
 Codex client never grant authority.
 
@@ -274,13 +281,11 @@ Codex client never grant authority.
 - Create invariant-carrying agent, session, assignment, attempt, effect, task,
   and workflow identities.
 - Construct bounded context with provenance and explicit trust labels.
-- Use `codex app-server` as the sole inference transport and delegate
-  subscription/browser login, credential storage, refresh, account selection,
-  endpoint selection, headers, streaming, and authentication errors to it;
-  use a direct isolated `codex login --with-api-key` stdin handoff for
-  API-key-mode setup and verify it through app-server account status.
-- Run app-server with a Tiber-owned isolated Codex home that cannot load the
-  user's Codex plugins, hooks, agents, MCP servers, tools, or global settings.
+- Embed the exact signed Codex fork and delegate subscription/browser login,
+  credential storage, refresh, account selection, endpoint selection, headers,
+  streaming, and authentication errors to its linked native APIs.
+- Rewrite thread start, resume, and fork through the typed host policy to a
+  read-only/no-network execution profile and inject only Tiber-owned tools.
 - Parse streamed text and structured tool requests; never let the model execute
   a tool.
 - Own Tiber Tasks and development-workflow operations through native services.
@@ -324,20 +329,13 @@ Codex client never grant authority.
   merely to manufacture evidence.
 - Rust Edition 2024, forbidden unsafe code, strict workspace Clippy inheritance,
   and warnings denied in CI.
-- API-key credentials are never read, copied, logged, decoded, retained,
-  serialized, forwarded, or traced by Tiber. API-key-mode login hands inherited
-  owner stdin directly to the isolated `codex login --with-api-key` child with
-  ambient API-key environment variables removed and child output suppressed;
-  Tiber records only a stable exit diagnostic, kills and reaps the child if its
-  configured ten-minute deadline expires, and requires app-server to confirm the
-  Codex-owned account state. Subscription refresh messages necessarily traverse
-  the local gateway as bounded JSON-RPC frames; Tiber may transiently buffer and
-  parse their envelope solely to correlate the reviewed Codex TUI and app-server
-  peers, but never exposes token fields to application policy, logs them,
-  persists them, or converts them into workflow or effect authority.
+- Credentials are owned by linked Codex authentication APIs and never become
+  Tiber domain data, logs, durable facts, or effect authority. Tiber admits the
+  typed login, cancellation, status, and logout lifecycle without inspecting
+  credential fields.
 - Observable model, context, policy, tool, memory, and delivery decisions with
   sensitive data redacted.
-- Native Codex turns cross the private gateway only after durable prompt and
+- Native Codex turns cross the typed host policy only after durable prompt and
   workflow admission. A terminal notification must match the admitted thread
   and turn, and reaches the TUI only after durable success or sanitized
   interruption. Restart resolves an unobserved admitted turn without replay.
@@ -348,18 +346,21 @@ Codex client never grant authority.
   catalog entry. Native-client cancellation kills and reaps an active command
   tree and records its typed terminal fact.
 - Reproducible x86_64 Linux packaging and clean-machine installation.
+- Record the exact stable tag, upstream commit, signed fork commit, Cargo source,
+  and Nix source hash in `codex-source.toml`; update them together with the
+  lockfile through an idempotent, non-force-pushing `just update-codex` flow.
 
 ## Acceptance criteria
 
-- A deterministic fixture pins the app-server protocol control surface before
-  conversation construction, and an opt-in live probe verifies effective
-  authority for each supported Codex version.
+- Focused fork and Tiber tests pin the typed host/effect control surface for the
+  exact source revision, and clean Nix package smoke proves no external Codex
+  executable is required.
 - No operation outside Tiber policy can produce an effect. Denied built-ins may
   remain in the protocol; explicitly permitted read-only, non-shell repository
   observation remains untrusted inference context; and Tiber-declared dynamic
   tools remain inert until the harness authorizes and executes them.
-- A real reviewed Codex TUI fixture submits its first composer prompt through
-  the private gateway and renders the correlated answer. Separate public
+- A real reviewed Codex TUI fixture reaches native startup without invoking a
+  hostile `codex` on `PATH` and restores its PTY exactly. Separate public
   black-box scenarios prove configured-command execution, no repository write
   before owner approval, and native-client process cancellation.
 - Native tasks, workflow, repository, process, verification, and delivery
