@@ -27,11 +27,12 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::Mutex,
+    thread,
     time::Duration,
 };
 
 use clap::Parser as _;
-use eventcore_types::{BatchSize, EventStoreError, StreamPattern};
+use eventcore_types::{BatchSize, EventStoreError, StreamId, StreamPattern};
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags, fstat, open, openat2};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -71,10 +72,16 @@ use tiber_repository_service::{
     decide_record_unknown, decide_repropose_mutation, recover_prepared_from_history,
 };
 use tiber_session_service::{
-    AssistantText, AssistantTextError, PromptText, PromptTextError, SessionBinding, SessionEvent,
-    SessionFact, SessionServiceError, decide_interrupt_inference, decide_observe_inference,
-    decide_request_inference, decide_start_session, decide_succeed_session,
-    project_started_session, task_assignment_scope,
+    AssistantText, AssistantTextError, InferenceMode, IsolatedTurnBinding, IsolatedTurnEvent,
+    IsolatedTurnFact, IsolatedTurnId, IsolatedTurnKind, IsolatedTurnRestartState, PlanDecision,
+    PlanRestartState, PromptText, PromptTextError, SessionBinding, SessionEvent, SessionFact,
+    SessionServiceError, decide_accept_plan_and_request_inference, decide_cancel_plan,
+    decide_close_isolated_turn, decide_interrupt_inference, decide_interrupt_isolated_turn,
+    decide_observe_inference, decide_observe_isolated_turn, decide_open_isolated_turn,
+    decide_propose_plan, decide_request_inference, decide_request_isolated_turn,
+    decide_request_plan, decide_start_session, decide_succeed_session,
+    project_isolated_turn_restart_state, project_plan_restart_state, project_started_session,
+    task_assignment_scope,
 };
 use tiber_store_git::{
     GitStoreError, TiberEventStore, TransactionEventPage, TransactionHistoryError,
@@ -95,6 +102,11 @@ use tiber_workflow_service::{
     decide_request_next_effect,
 };
 use tokio::runtime::Builder as RuntimeBuilder;
+
+/// Stack reserved for the OS thread that owns the native Codex TUI future.
+const NATIVE_CODEX_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
+/// Stable name for the OS thread that owns the native Codex TUI future.
+const NATIVE_CODEX_THREAD_NAME: &str = "tiber-native-codex";
 
 /// Maximum bounded result returned from a Tiber-owned dynamic tool.
 const MAX_TIBER_EFFECT_RESULT_BYTES: usize = 16 * 1024;
@@ -224,31 +236,94 @@ fn load_configured_process_catalog(
     reason = "the executable boundary reports embedded startup failures before exiting"
 )]
 fn run_native_codex_tui(arg0_paths: codex_arg0::Arg0DispatchPaths) {
-    let runtime = RuntimeBuilder::new_multi_thread()
-        .thread_stack_size(16 * 1024 * 1024)
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| {
-            eprintln!("codex_tui_runtime_failed: {error}");
+    let native_codex = spawn_native_codex_thread(move || {
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .thread_stack_size(16 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| {
+                eprintln!("codex_tui_runtime_failed: {error}");
+                process::exit(1);
+            });
+        let repository = env::current_dir().unwrap_or_else(|error| {
+            eprintln!("codex_host_repository_unavailable: {error}");
             process::exit(1);
         });
-    let repository = env::current_dir().unwrap_or_else(|error| {
-        eprintln!("codex_host_repository_unavailable: {error}");
+        let host_policy = Arc::new(codex_host_policy::TiberHostPolicy::new(repository));
+        let cli = codex_tui::Cli::parse_from(["tiber"]).with_host_policy(host_policy);
+        runtime
+            .block_on(codex_tui::run_main(
+                cli,
+                arg0_paths,
+                codex_config::LoaderOverrides::default(),
+                None,
+            ))
+            .unwrap_or_else(|error| {
+                eprintln!("codex_tui_start_failed: {error}");
+                process::exit(1);
+            });
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("codex_tui_thread_failed: {error}");
         process::exit(1);
     });
-    let host_policy = Arc::new(codex_host_policy::TiberHostPolicy::new(repository));
-    let cli = codex_tui::Cli::parse_from(["tiber"]).with_host_policy(host_policy);
-    runtime
-        .block_on(codex_tui::run_main(
-            cli,
-            arg0_paths,
-            codex_config::LoaderOverrides::default(),
-            None,
-        ))
-        .unwrap_or_else(|error| {
-            eprintln!("codex_tui_start_failed: {error}");
-            process::exit(1);
-        });
+    native_codex.join().unwrap_or_else(|_panic| {
+        eprintln!("codex_tui_thread_panicked");
+        process::exit(1);
+    });
+}
+
+/// Starts one native Codex owner thread with enough stack for its synchronous
+/// TUI future and deeply nested debug-build protocol values.
+fn spawn_native_codex_thread<Task, Output>(
+    task: Task,
+) -> std::io::Result<thread::JoinHandle<Output>>
+where
+    Task: FnOnce() -> Output + Send + 'static,
+    Output: Send + 'static,
+{
+    thread::Builder::new()
+        .name(NATIVE_CODEX_THREAD_NAME.to_owned())
+        .stack_size(NATIVE_CODEX_THREAD_STACK_BYTES)
+        .spawn(task)
+}
+
+#[cfg(test)]
+mod native_codex_thread_tests {
+    use super::{NATIVE_CODEX_THREAD_NAME, spawn_native_codex_thread};
+
+    #[inline(never)]
+    #[expect(
+        clippy::arithmetic_side_effects,
+        clippy::indexing_slicing,
+        clippy::integer_division_remainder_used,
+        clippy::large_stack_arrays,
+        reason = "this boundary regression deliberately retains and touches 64 KiB recursive stack frames to prove more than 12 MiB of owner-thread stack is usable"
+    )]
+    fn consume_stack(depth: usize) -> usize {
+        let mut frame = [0; 64 * 1024];
+        frame[depth % frame.len()] = u8::try_from(depth % 255).expect("bounded byte");
+        core::hint::black_box(&mut frame);
+        if depth == 0 {
+            return usize::from(frame[0]);
+        }
+        consume_stack(depth.saturating_sub(1))
+            .saturating_add(usize::from(frame[depth % frame.len()]))
+    }
+
+    #[test]
+    fn native_codex_runs_on_named_large_stack_owner_thread() {
+        let owner = spawn_native_codex_thread(|| {
+            let name = std::thread::current().name().map(str::to_owned);
+            let consumed = consume_stack(192);
+            (name, consumed)
+        })
+        .expect("native Codex owner thread should spawn");
+        let (name, consumed) = owner.join().expect("native Codex owner thread should join");
+
+        assert_eq!(name.as_deref(), Some(NATIVE_CODEX_THREAD_NAME));
+        core::hint::black_box(consumed);
+    }
 }
 
 /// Declares the bounded signed task-board surface visible to native Codex.
@@ -1514,12 +1589,375 @@ impl SessionStartupError {
 }
 
 /// Publishes the exact prompt request before granting the worker execution authority.
+fn publish_prompt_request(repository: &Path, prompt: &str) -> Result<(), PromptPublicationError> {
+    let store = TiberEventStore::open(repository)?;
+    let events = read_session_events(&store).map_err(PromptPublicationError::Query)?;
+    if matches!(
+        project_plan_restart_state(&events),
+        Ok(PlanRestartState::AwaitingDecision { .. })
+    ) {
+        return publish_accepted_plan_prompt_request(repository, prompt);
+    }
+    if matches!(
+        project_plan_restart_state(&events),
+        Ok(PlanRestartState::Decided {
+            decision: PlanDecision::Accepted,
+            ..
+        })
+    ) && matches!(
+        events.last().map(SessionEvent::fact),
+        Some(SessionFact::InferenceRequested {
+            mode: InferenceMode::Ordinary,
+            prompt: retained,
+            ..
+        }) if retained.as_str() == prompt
+    ) {
+        return Ok(());
+    }
+    publish_prompt_request_in_mode(repository, prompt, InferenceMode::Ordinary)
+}
+
+/// Atomically accepts the retained plan and publishes its exact next owner prompt.
 #[expect(
     clippy::pattern_type_mismatch,
     clippy::wildcard_enum_match_arm,
-    reason = "the prompt publisher inspects only request and successor facts from borrowed durable history"
+    reason = "accepted-plan recovery selects request and successor facts from non-exhaustive durable vocabularies"
 )]
-fn publish_prompt_request(repository: &Path, prompt: &str) -> Result<(), PromptPublicationError> {
+fn publish_accepted_plan_prompt_request(
+    repository: &Path,
+    prompt: &str,
+) -> Result<(), PromptPublicationError> {
+    let store = TiberEventStore::open(repository)?;
+    let revision = store.revision().clone();
+    let all_events = read_session_events(&store).map_err(PromptPublicationError::Query)?;
+    if matches!(
+        project_plan_restart_state(&all_events),
+        Ok(PlanRestartState::Decided {
+            decision: PlanDecision::Accepted,
+            ..
+        })
+    ) && matches!(
+        all_events.last().map(SessionEvent::fact),
+        Some(SessionFact::InferenceRequested {
+            mode: InferenceMode::Ordinary,
+            prompt: retained,
+            ..
+        }) if retained.as_str() == prompt
+    ) {
+        return Ok(());
+    }
+    let events = active_session_events(&all_events);
+    let prompt = PromptText::parse(prompt)?;
+    let binding = events
+        .iter()
+        .rev()
+        .find_map(|event| project_started_session(event).ok())
+        .ok_or(PromptPublicationError::MissingSession)?;
+    let latest_effect = events.iter().rev().find_map(|event| match event.fact() {
+        SessionFact::InferenceRequested { effect, .. } => Some(effect),
+        _ => None,
+    });
+    let (effect, predecessor) = if let Some(previous) = latest_effect {
+        let previous_stream = WorkflowStream::for_effect(previous)?;
+        let previous_history = read_workflow_events_query(&store, &previous_stream)
+            .map_err(PromptPublicationError::Query)?;
+        let effect = previous_history
+            .iter()
+            .rev()
+            .find_map(|event| match event.fact() {
+                tiber_workflow_service::WorkflowFact::WorkflowCompleted { successor, .. } => {
+                    Some(successor.initial_effect().clone())
+                }
+                tiber_workflow_service::WorkflowFact::WorkflowStopped { state, .. } => {
+                    continue_after_interruption(state)
+                        .ok()
+                        .map(|successor| successor.initial_effect().clone())
+                }
+                _ => None,
+            })
+            .ok_or(PromptPublicationError::MissingSession)?;
+        (effect, Some((previous_stream, previous_history)))
+    } else {
+        (binding.workflow_state().initial_effect().clone(), None)
+    };
+    let Some(publication) =
+        decide_accept_plan_and_request_inference(&all_events, prompt, effect.clone())?
+    else {
+        return Ok(());
+    };
+    let workflow_stream = WorkflowStream::for_effect(&effect)?;
+    let initialization = if let Some((previous_stream, previous_history)) = predecessor {
+        decide_initialize_successor_workflow(
+            &previous_history,
+            previous_stream,
+            workflow_stream.clone(),
+        )?
+    } else {
+        decide_initialize_workflow(workflow_stream.clone(), HarnessState::new(effect))?
+    };
+    let request = decide_request_next_effect(
+        core::slice::from_ref(initialization.event()),
+        workflow_stream,
+    )?;
+    let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+    let runtime = RuntimeBuilder::new_current_thread().build()?;
+    runtime.block_on(publisher.publish_accepted_plan_inference_with_workflow(
+        publication,
+        initialization,
+        request,
+    ))?;
+    Ok(())
+}
+
+/// Publishes one exact cancellation for the retained plan proposal.
+fn publish_cancelled_plan(repository: &Path) -> Result<(), PromptPublicationError> {
+    let store = TiberEventStore::open(repository)?;
+    let revision = store.revision().clone();
+    let all_events = read_session_events(&store).map_err(PromptPublicationError::Query)?;
+    let Some(publication) = decide_cancel_plan(&all_events)? else {
+        return Ok(());
+    };
+    let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+    let runtime = RuntimeBuilder::new_current_thread().build()?;
+    runtime.block_on(publisher.publish_plan_decision(publication))?;
+    Ok(())
+}
+
+/// Publishes one planning-only prompt before native Plan inference begins.
+fn publish_plan_prompt_request(
+    repository: &Path,
+    prompt: &str,
+) -> Result<(), PromptPublicationError> {
+    publish_prompt_request_in_mode(repository, prompt, InferenceMode::Planning)
+}
+
+/// Opens and requests one inference-only isolated child stream.
+#[expect(
+    clippy::format_collect,
+    reason = "the child identity is the lowercase SHA-256 framing of stable authority inputs"
+)]
+fn publish_isolated_prompt_request(
+    repository: &Path,
+    kind: IsolatedTurnKind,
+    prompt: &str,
+) -> Result<StreamId, PromptPublicationError> {
+    let store = TiberEventStore::open(repository)?;
+    let revision = store.revision().clone();
+    let all_events = read_session_events(&store).map_err(PromptPublicationError::Query)?;
+    let parent = active_session_events(&all_events)
+        .iter()
+        .rev()
+        .find_map(|event| project_started_session(event).ok())
+        .ok_or(PromptPublicationError::MissingSession)?;
+    let digest = Sha256::digest(format!("{revision:?}:{kind:?}:{prompt}").as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let turn_id = IsolatedTurnId::parse(&format!("isolated-{digest}"))?;
+    let retained = parent.workflow_state().initial_effect();
+    let effect = InferEffect::new(
+        retained.session_id().clone(),
+        retained.agent_id().clone(),
+        retained.workflow_id().clone(),
+        retained.assignment_id().clone(),
+        retained.assignment_scope().clone(),
+        retained.assignment_epoch(),
+        retained.attempt_number(),
+        retained.context_receipt_id().clone(),
+        retained.policy_decision_id().clone(),
+        EffectId::parse(&format!("isolated-effect-{digest}"))?,
+        IdempotencyKey::parse(&format!("isolated:{digest}"))?,
+        retained.deadline_milliseconds(),
+    );
+    let binding = IsolatedTurnBinding::new(parent, HarnessState::new(effect.clone()))?;
+    let open = decide_open_isolated_turn(&[], turn_id, kind, binding)?
+        .ok_or(PromptPublicationError::MissingSession)?;
+    let stream = open.event().stream_id().clone();
+    let request = decide_request_isolated_turn(
+        core::slice::from_ref(open.event()),
+        PromptText::parse(prompt)?,
+        effect,
+    )?;
+    let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+    let runtime = RuntimeBuilder::new_current_thread().build()?;
+    runtime.block_on(publisher.publish_isolated_turn_open_and_request(open, request))?;
+    Ok(stream)
+}
+
+/// Records one isolated answer and closes its exact child stream.
+#[expect(
+    clippy::shadow_unrelated,
+    reason = "observation and close are separate signed revisions that intentionally reopen their store and publisher"
+)]
+fn publish_isolated_turn_answer(
+    repository: &Path,
+    stream: &StreamId,
+    answer: &str,
+) -> Result<(), PromptPublicationError> {
+    let store = TiberEventStore::open(repository)?;
+    let revision = store.revision().clone();
+    let pattern = StreamPattern::try_new(stream.as_ref().to_owned())
+        .map_err(|_error| SessionQueryError::InvalidStream)?;
+    let history = store
+        .verified_transaction_reader::<IsolatedTurnEvent>(&[pattern])?
+        .read_page(TransactionEventPage::first(BatchSize::new(5)))?;
+    let observation = decide_observe_isolated_turn(&history, AssistantText::parse(answer)?)?;
+    let runtime = RuntimeBuilder::new_current_thread().build()?;
+    let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+    let observed = runtime.block_on(publisher.publish_isolated_turn_observation(observation))?;
+    let store = TiberEventStore::open(repository)?;
+    let pattern = StreamPattern::try_new(stream.as_ref().to_owned())
+        .map_err(|_error| SessionQueryError::InvalidStream)?;
+    let history = store
+        .verified_transaction_reader::<IsolatedTurnEvent>(&[pattern])?
+        .read_page(TransactionEventPage::first(BatchSize::new(5)))?;
+    if let Some(close) = decide_close_isolated_turn(&history)? {
+        let mut publisher = TiberEventPublisher::open_at(repository, observed.revision())?;
+        runtime.block_on(publisher.publish_isolated_turn_close(close))?;
+    }
+    Ok(())
+}
+
+/// Records an interrupted isolated inference and closes the child without replay.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::shadow_unrelated,
+    clippy::wildcard_enum_match_arm,
+    reason = "interruption selects the request fact and intentionally reopens the signed close revision"
+)]
+fn publish_isolated_turn_interruption(
+    repository: &Path,
+    stream: &StreamId,
+) -> Result<(), PromptPublicationError> {
+    let store = TiberEventStore::open(repository)?;
+    let revision = store.revision().clone();
+    let pattern = StreamPattern::try_new(stream.as_ref().to_owned())
+        .map_err(|_error| SessionQueryError::InvalidStream)?;
+    let history = store
+        .verified_transaction_reader::<IsolatedTurnEvent>(&[pattern])?
+        .read_page(TransactionEventPage::first(BatchSize::new(5)))?;
+    let effect = history
+        .iter()
+        .find_map(|event| match event.fact() {
+            IsolatedTurnFact::InferenceRequested { effect, .. } => Some(effect),
+            _ => None,
+        })
+        .ok_or(SessionServiceError::InvalidIsolatedTurn)?;
+    let observation = EffectObservation::Failed {
+        code: EffectFailureCode::parse("isolated_turn_inference_interrupted")?,
+        effect_id: effect.effect_id().clone(),
+        retryability: Retryability::NotRetryable,
+    };
+    let publication = decide_interrupt_isolated_turn(&history, observation)?;
+    let runtime = RuntimeBuilder::new_current_thread().build()?;
+    let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+    let observed = runtime.block_on(publisher.publish_isolated_turn_observation(publication))?;
+    let store = TiberEventStore::open(repository)?;
+    let pattern = StreamPattern::try_new(stream.as_ref().to_owned())
+        .map_err(|_error| SessionQueryError::InvalidStream)?;
+    let history = store
+        .verified_transaction_reader::<IsolatedTurnEvent>(&[pattern])?
+        .read_page(TransactionEventPage::first(BatchSize::new(5)))?;
+    if let Some(close) = decide_close_isolated_turn(&history)? {
+        let mut publisher = TiberEventPublisher::open_at(repository, observed.revision())?;
+        runtime.block_on(publisher.publish_isolated_turn_close(close))?;
+    }
+    Ok(())
+}
+
+/// Reconciles incomplete isolated child streams without replaying inference.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::shadow_unrelated,
+    clippy::wildcard_enum_match_arm,
+    reason = "restart recovery inspects selected child facts and reopens each signed publication revision"
+)]
+fn recover_isolated_turns(
+    repository: &Path,
+    session_events: &[SessionEvent],
+) -> Result<(), PromptPublicationError> {
+    let Some(parent) = session_events
+        .iter()
+        .rev()
+        .find_map(|event| project_started_session(event).ok())
+    else {
+        return Ok(());
+    };
+    let store = TiberEventStore::open(repository)?;
+    let mut streams = store
+        .stream_ids()
+        .iter()
+        .filter(|stream| stream.as_ref().starts_with("tiber:session:isolated:"))
+        .cloned()
+        .collect::<Vec<_>>();
+    streams.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+    for stream in streams {
+        let store = TiberEventStore::open(repository)?;
+        let revision = store.revision().clone();
+        let pattern = StreamPattern::try_new(stream.as_ref().to_owned())
+            .map_err(|_error| SessionQueryError::InvalidStream)?;
+        let mut history = store
+            .verified_transaction_reader::<IsolatedTurnEvent>(&[pattern])?
+            .read_page(TransactionEventPage::first(BatchSize::new(5)))?;
+        let Some(IsolatedTurnFact::Opened { binding, .. }) =
+            history.first().map(IsolatedTurnEvent::fact)
+        else {
+            return Err(SessionServiceError::InvalidIsolatedTurn.into());
+        };
+        if binding.parent() != &parent {
+            continue;
+        }
+        let runtime = RuntimeBuilder::new_current_thread().build()?;
+        if matches!(
+            project_isolated_turn_restart_state(&history)?,
+            IsolatedTurnRestartState::AwaitingInference
+        ) {
+            let effect = history
+                .iter()
+                .find_map(|event| match event.fact() {
+                    IsolatedTurnFact::InferenceRequested { effect, .. } => Some(effect),
+                    _ => None,
+                })
+                .ok_or(SessionServiceError::InvalidIsolatedTurn)?;
+            let observation = EffectObservation::Failed {
+                code: EffectFailureCode::parse("isolated_turn_inference_interrupted")?,
+                effect_id: effect.effect_id().clone(),
+                retryability: Retryability::NotRetryable,
+            };
+            let publication = decide_interrupt_isolated_turn(&history, observation)?;
+            let mut publisher = TiberEventPublisher::open_at(repository, &revision)?;
+            runtime.block_on(publisher.publish_isolated_turn_observation(publication))?;
+            let store = TiberEventStore::open(repository)?;
+            let pattern = StreamPattern::try_new(stream.as_ref().to_owned())
+                .map_err(|_error| SessionQueryError::InvalidStream)?;
+            history = store
+                .verified_transaction_reader::<IsolatedTurnEvent>(&[pattern])?
+                .read_page(TransactionEventPage::first(BatchSize::new(5)))?;
+        }
+        if matches!(
+            project_isolated_turn_restart_state(&history)?,
+            IsolatedTurnRestartState::ReadyToClose
+        ) && let Some(close) = decide_close_isolated_turn(&history)?
+        {
+            let store = TiberEventStore::open(repository)?;
+            let mut publisher = TiberEventPublisher::open_at(repository, store.revision())?;
+            runtime.block_on(publisher.publish_isolated_turn_close(close))?;
+        }
+    }
+    Ok(())
+}
+
+/// Publishes one exact prompt in its closed conversational mode.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::wildcard_enum_match_arm,
+    reason = "prompt publication selects request and successor facts from non-exhaustive durable vocabularies"
+)]
+fn publish_prompt_request_in_mode(
+    repository: &Path,
+    prompt: &str,
+    mode: InferenceMode,
+) -> Result<(), PromptPublicationError> {
     let store = TiberEventStore::open(repository)?;
     let revision = store.revision().clone();
     let all_events = read_session_events(&store).map_err(PromptPublicationError::Query)?;
@@ -1557,7 +1995,11 @@ fn publish_prompt_request(repository: &Path, prompt: &str) -> Result<(), PromptP
     } else {
         (binding.workflow_state().initial_effect().clone(), None)
     };
-    let publication = decide_request_inference(&all_events, prompt, effect.clone())?;
+    let publication = if mode == InferenceMode::Planning {
+        decide_request_plan(&all_events, binding, prompt, effect.clone())?
+    } else {
+        decide_request_inference(&all_events, prompt, effect.clone())?
+    };
     let workflow_stream = WorkflowStream::for_effect(&effect)?;
     let initialization = if let Some((previous_stream, previous_history)) = predecessor {
         decide_initialize_successor_workflow(
@@ -1601,23 +2043,29 @@ fn publish_inference_observation(
     let revision = store.revision().clone();
     let all_events = read_session_events(&store).map_err(PromptPublicationError::Query)?;
     let events = active_session_events(&all_events);
-    let effect = events
+    let (effect, mode) = events
         .iter()
         .rev()
         .find_map(|event| match event.fact() {
-            SessionFact::InferenceRequested { effect, .. } => Some(effect.clone()),
+            SessionFact::InferenceRequested { effect, mode, .. } => Some((effect.clone(), *mode)),
             _ => None,
         })
         .ok_or(PromptPublicationError::MissingSession)?;
-    let publication = decide_observe_inference(&all_events, AssistantText::parse(assistant)?)?;
+    let assistant = AssistantText::parse(assistant)?;
+    let receipt_digest = Sha256::digest(
+        format!("{}:{}", effect.effect_id().as_str(), assistant.as_str()).as_bytes(),
+    )
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect::<String>();
+    let publication = if mode == InferenceMode::Planning {
+        decide_propose_plan(&all_events, assistant)?
+    } else {
+        decide_observe_inference(&all_events, assistant)?
+    };
     let workflow_stream = WorkflowStream::for_effect(&effect)?;
     let workflow_history = read_workflow_events_query(&store, &workflow_stream)
         .map_err(PromptPublicationError::Query)?;
-    let receipt_digest =
-        Sha256::digest(format!("{}:{assistant}", effect.effect_id().as_str()).as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
     let observation = EffectObservation::Succeeded {
         effect_id: effect.effect_id().clone(),
         receipt_id: EffectReceiptId::parse(&format!("receipt-{receipt_digest}"))?,

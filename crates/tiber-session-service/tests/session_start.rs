@@ -2,11 +2,18 @@
 
 #[cfg(test)]
 mod tests {
+    use core::slice;
     use eventcore::model::{CheckStatus, check};
     use tiber_session_service::{
-        AssistantText, PromptText, SessionBinding, SessionFact, decide_interrupt_inference,
-        decide_observe_inference, decide_request_inference, decide_start_session,
-        decide_succeed_session, project_started_session, task_assignment_scope,
+        AssistantText, InferenceMode, IsolatedTurnBinding, IsolatedTurnFact, IsolatedTurnId,
+        IsolatedTurnKind, IsolatedTurnRestartState, PlanDecision, PlanRestartState, PromptText,
+        SessionBinding, SessionFact, decide_accept_plan, decide_accept_plan_and_request_inference,
+        decide_cancel_plan, decide_close_isolated_turn, decide_interrupt_inference,
+        decide_interrupt_isolated_turn, decide_observe_inference, decide_observe_isolated_turn,
+        decide_open_isolated_turn, decide_propose_plan, decide_request_inference,
+        decide_request_isolated_turn, decide_request_plan, decide_start_session,
+        decide_succeed_session, project_plan_restart_state, project_started_session,
+        task_assignment_scope,
     };
     use tiber_tasks_core::TaskId;
     use tiber_workflow_core::{
@@ -338,6 +345,286 @@ mod tests {
     }
 
     #[test]
+    fn accepted_plan_lifecycle_survives_restart_and_reconciles_the_same_decision() {
+        let binding = binding();
+        let start = decide_start_session(&[], binding.clone())
+            .expect("valid start")
+            .expect("new session");
+        let (started, _) = start.into_event_and_consistency_streams();
+        let prompt = PromptText::parse("plan the smallest safe increment").expect("prompt");
+        let planning_effect = effect();
+        let request = decide_request_plan(
+            slice::from_ref(&started),
+            binding.clone(),
+            prompt.clone(),
+            planning_effect.clone(),
+        )
+        .expect("planning request is modeled");
+        let (requested, _) = request.into_event_and_consistency_streams();
+        assert_eq!(
+            requested.fact(),
+            &SessionFact::InferenceRequested {
+                prompt: prompt.clone(),
+                effect: planning_effect.clone(),
+                predecessor_effect_id: None,
+                mode: InferenceMode::Planning,
+                planning_binding: Some(binding.clone()),
+            }
+        );
+
+        let proposal = AssistantText::parse("1. Add the public contract.\n2. Verify replay.")
+            .expect("bounded proposal");
+        let proposal_publication =
+            decide_propose_plan(&[started.clone(), requested.clone()], proposal.clone())
+                .expect("proposal is modeled");
+        let (proposed, _) = proposal_publication.into_event_and_consistency_streams();
+        assert_eq!(
+            project_plan_restart_state(&[started.clone(), requested.clone(), proposed.clone()])
+                .expect("valid planning history"),
+            PlanRestartState::AwaitingDecision {
+                binding: binding.clone(),
+                prompt,
+                effect: planning_effect.clone(),
+                proposal: proposal.clone(),
+            }
+        );
+
+        let acceptance_publication =
+            decide_accept_plan(&[started.clone(), requested.clone(), proposed.clone()])
+                .expect("acceptance is modeled")
+                .expect("first acceptance publishes");
+        let (accepted, _) = acceptance_publication.into_event_and_consistency_streams();
+        let mut history = vec![started, requested, proposed, accepted];
+        assert_eq!(
+            project_plan_restart_state(&history).expect("accepted plan replays"),
+            PlanRestartState::Decided {
+                proposal,
+                decision: PlanDecision::Accepted,
+            }
+        );
+        assert!(
+            decide_accept_plan(&history)
+                .expect("identical decision reconciles")
+                .is_none()
+        );
+
+        let second_effect = effect_with_ids("effect-plan-2", "session-1:plan-2");
+        let second_request = decide_request_plan(
+            &history,
+            binding,
+            PromptText::parse("plan a follow-up").expect("second prompt"),
+            second_effect,
+        )
+        .expect("second planning request is modeled");
+        let (second_requested, _) = second_request.into_event_and_consistency_streams();
+        history.push(second_requested);
+        let second_proposal = AssistantText::parse("No follow-up is needed.").expect("proposal");
+        let second_observation =
+            decide_propose_plan(&history, second_proposal.clone()).expect("second proposal");
+        let (second_proposed, _) = second_observation.into_event_and_consistency_streams();
+        history.push(second_proposed);
+        let cancellation = decide_cancel_plan(&history)
+            .expect("cancellation is modeled")
+            .expect("first cancellation publishes");
+        let (cancelled, _) = cancellation.into_event_and_consistency_streams();
+        history.push(cancelled);
+        assert_eq!(
+            project_plan_restart_state(&history).expect("cancelled plan replays"),
+            PlanRestartState::Decided {
+                proposal: second_proposal,
+                decision: PlanDecision::Cancelled,
+            }
+        );
+        assert!(
+            decide_cancel_plan(&history)
+                .expect("identical cancellation reconciles")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn accepting_plan_and_requesting_ordinary_inference_is_one_closed_decision() {
+        let start = decide_start_session(&[], binding())
+            .expect("start")
+            .expect("new");
+        let (started, _) = start.into_event_and_consistency_streams();
+        let planning = decide_request_plan(
+            slice::from_ref(&started),
+            binding(),
+            PromptText::parse("plan then continue").expect("prompt"),
+            effect(),
+        )
+        .expect("planning request");
+        let (requested_plan, _) = planning.into_event_and_consistency_streams();
+        let proposal = decide_propose_plan(
+            &[started.clone(), requested_plan.clone()],
+            AssistantText::parse("Proceed with the next prompt.").expect("proposal"),
+        )
+        .expect("proposal");
+        let (proposed, _) = proposal.into_event_and_consistency_streams();
+        let publication = decide_accept_plan_and_request_inference(
+            &[started.clone(), requested_plan.clone(), proposed.clone()],
+            PromptText::parse("implement the accepted plan").expect("prompt"),
+            effect_with_ids("effect-after-plan", "session-1:after-plan"),
+        )
+        .expect("atomic accepted-plan request is modeled")
+        .expect("first accepted-plan request emits");
+        let (events, streams) = publication.into_events_and_consistency_streams();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].fact(),
+            SessionFact::PlanDecided {
+                decision: PlanDecision::Accepted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[1].fact(),
+            SessionFact::InferenceRequested {
+                mode: InferenceMode::Ordinary,
+                ..
+            }
+        ));
+        assert_eq!(streams, [events[0].stream_id().clone()]);
+
+        let retained = vec![
+            started,
+            requested_plan,
+            proposed,
+            events[0].clone(),
+            events[1].clone(),
+        ];
+        assert!(
+            decide_accept_plan_and_request_inference(
+                &retained,
+                PromptText::parse("implement the accepted plan").expect("prompt"),
+                effect_with_ids("effect-after-plan", "session-1:after-plan"),
+            )
+            .expect("identical retry reconciles")
+            .is_none()
+        );
+        assert!(
+            decide_accept_plan_and_request_inference(
+                &retained,
+                PromptText::parse("changed prompt").expect("prompt"),
+                effect_with_ids("effect-after-plan", "session-1:after-plan"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn isolated_side_turn_closes_and_replays_without_active_session_authority() {
+        let parent = binding();
+        let branch = IsolatedTurnBinding::new(
+            parent.clone(),
+            HarnessState::new(effect_with_ids("effect-side-1", "session-1:side-1")),
+        )
+        .expect("branch-unique binding");
+        let turn_id = IsolatedTurnId::parse("side-1").expect("turn id");
+        let open_publication =
+            decide_open_isolated_turn(&[], turn_id, IsolatedTurnKind::Side, branch.clone())
+                .expect("open is modeled")
+                .expect("new turn emits");
+        let child_stream = open_publication.event().stream_id().clone();
+        let (opened, open_streams) = open_publication.into_event_and_consistency_streams();
+        assert_eq!(child_stream, *opened.stream_id());
+        assert_eq!(open_streams, [opened.stream_id().clone()]);
+        assert!(matches!(opened.fact(), IsolatedTurnFact::Opened { .. }));
+
+        let request = decide_request_isolated_turn(
+            slice::from_ref(&opened),
+            PromptText::parse("answer without changing the main conversation").expect("prompt"),
+            branch.workflow_state().initial_effect().clone(),
+        )
+        .expect("request is modeled");
+        let (requested, _) = request.into_event_and_consistency_streams();
+        let observation = decide_observe_isolated_turn(
+            &[opened.clone(), requested.clone()],
+            AssistantText::parse("This is isolated.").expect("assistant"),
+        )
+        .expect("observation is modeled");
+        let (observed, _) = observation.into_event_and_consistency_streams();
+        let close_publication =
+            decide_close_isolated_turn(&[opened.clone(), requested.clone(), observed.clone()])
+                .expect("close is modeled")
+                .expect("first close emits");
+        let (closed, _) = close_publication.into_event_and_consistency_streams();
+        assert_eq!(
+            tiber_session_service::project_isolated_turn_restart_state(&[
+                opened, requested, observed, closed,
+            ])
+            .expect("closed turn replays"),
+            IsolatedTurnRestartState::Closed
+        );
+    }
+
+    #[test]
+    fn isolated_btw_interruption_restarts_ready_to_close_without_assistant_text() {
+        let branch = IsolatedTurnBinding::new(
+            binding(),
+            HarnessState::new(effect_with_ids("effect-btw-1", "session-1:btw-1")),
+        )
+        .expect("branch binding");
+        let open = decide_open_isolated_turn(
+            &[],
+            IsolatedTurnId::parse("btw-1").expect("turn id"),
+            IsolatedTurnKind::Btw,
+            branch.clone(),
+        )
+        .expect("open modeled")
+        .expect("new open");
+        let (opened, _) = open.into_event_and_consistency_streams();
+        let request = decide_request_isolated_turn(
+            slice::from_ref(&opened),
+            PromptText::parse("answer this aside").expect("prompt"),
+            branch.workflow_state().initial_effect().clone(),
+        )
+        .expect("request modeled");
+        let (requested, _) = request.into_event_and_consistency_streams();
+        let interruption = EffectObservation::Failed {
+            code: EffectFailureCode::parse("provider_unavailable").expect("failure code"),
+            effect_id: branch.workflow_state().initial_effect().effect_id().clone(),
+            retryability: Retryability::Retryable,
+        };
+        let interruption_publication =
+            decide_interrupt_isolated_turn(&[opened.clone(), requested.clone()], interruption)
+                .expect("interruption modeled");
+        let (interrupted, _) = interruption_publication.into_event_and_consistency_streams();
+        assert_eq!(
+            tiber_session_service::project_isolated_turn_restart_state(&[
+                opened,
+                requested,
+                interrupted,
+            ])
+            .expect("interruption replays"),
+            IsolatedTurnRestartState::ReadyToClose
+        );
+    }
+
+    #[test]
+    fn isolated_binding_rejects_changed_context_or_policy_provenance() {
+        let parent = binding();
+        let base = parent.workflow_state().initial_effect();
+        let altered = InferEffect::new(
+            base.session_id().clone(),
+            base.agent_id().clone(),
+            base.workflow_id().clone(),
+            base.assignment_id().clone(),
+            base.assignment_scope().clone(),
+            base.assignment_epoch(),
+            base.attempt_number(),
+            ContextReceiptId::parse("different-context").expect("context"),
+            PolicyDecisionId::parse("different-policy").expect("policy"),
+            EffectId::parse("effect-isolated-altered").expect("effect"),
+            IdempotencyKey::parse("session-1:isolated-altered").expect("key"),
+            base.deadline_milliseconds(),
+        );
+        let _error = IsolatedTurnBinding::new(parent, HarnessState::new(altered))
+            .expect_err("changed context and policy provenance must be rejected");
+    }
+
+    #[test]
     fn active_session_projection_restores_the_complete_started_binding() {
         let binding = binding();
         let publication = decide_start_session(&[], binding.clone())
@@ -370,6 +657,8 @@ mod tests {
             &SessionFact::InferenceRequested {
                 effect: effect(),
                 predecessor_effect_id: None,
+                mode: InferenceMode::Ordinary,
+                planning_binding: None,
                 prompt,
             }
         );

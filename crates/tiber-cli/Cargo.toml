@@ -8,12 +8,12 @@ version.workspace = true
 [dependencies]
 chrono = "=0.4.45"
 clap = "=4.5.58"
-codex-arg0 = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
-codex-app-server-client = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
-codex-app-server-protocol = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
-codex-config = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
-codex-core = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
-codex-tui = { git = "https://github.com/jwilger/codex.git", rev = "62f448998e28bc83354a2f964dae124dbf11430c" }
+codex-arg0 = { git = "https://github.com/jwilger/codex.git", rev = "fd8255394e41c3c95b9a242cc32f4a9639eba721" }
+codex-app-server-client = { git = "https://github.com/jwilger/codex.git", rev = "fd8255394e41c3c95b9a242cc32f4a9639eba721" }
+codex-app-server-protocol = { git = "https://github.com/jwilger/codex.git", rev = "fd8255394e41c3c95b9a242cc32f4a9639eba721" }
+codex-config = { git = "https://github.com/jwilger/codex.git", rev = "fd8255394e41c3c95b9a242cc32f4a9639eba721" }
+codex-core = { git = "https://github.com/jwilger/codex.git", rev = "fd8255394e41c3c95b9a242cc32f4a9639eba721" }
+codex-tui = { git = "https://github.com/jwilger/codex.git", rev = "fd8255394e41c3c95b9a242cc32f4a9639eba721" }
 uuid = { version = "=1.24.0", features = ["v4"] }
 eventcore-types.workspace = true
 eventcore.workspace = true

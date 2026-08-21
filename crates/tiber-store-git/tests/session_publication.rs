@@ -7,18 +7,24 @@
     reason = "the signed publication fixture fails fast when its isolated Git or EventCore authority cannot be constructed"
 )]
 mod tests {
+    use core::slice;
     use std::{
         fs,
         path::{Path, PathBuf},
         process::Command,
     };
 
+    use eventcore::model::StreamIdentity as _;
     use eventcore_fs::FileEventStore;
     use eventcore_types::{BatchSize, StreamPattern};
     use tempfile::TempDir;
     use tiber_session_service::{
-        AssistantText, PromptText, SessionBinding, SessionEvent, SessionFact,
-        decide_observe_inference, decide_request_inference, decide_start_session,
+        AssistantText, InferenceMode, IsolatedTurnBinding, IsolatedTurnEvent, IsolatedTurnId,
+        IsolatedTurnKind, PromptText, SessionBinding, SessionEvent, SessionFact,
+        decide_accept_plan, decide_accept_plan_and_request_inference, decide_cancel_plan,
+        decide_close_isolated_turn, decide_observe_inference, decide_observe_isolated_turn,
+        decide_open_isolated_turn, decide_propose_plan, decide_request_inference,
+        decide_request_isolated_turn, decide_request_plan, decide_start_session,
         project_started_session, task_assignment_scope,
     };
     use tiber_store_git::{
@@ -31,8 +37,9 @@ mod tests {
         IdempotencyKey, InferEffect, PolicyDecisionId, SessionId, WorkflowId,
     };
     use tiber_workflow_service::{
-        WorkflowStream, decide_initialize_workflow, decide_record_observation,
-        decide_request_next_effect,
+        WorkflowFact, WorkflowStream, decide_advance_workflow,
+        decide_initialize_successor_workflow, decide_initialize_workflow,
+        decide_record_observation, decide_request_next_effect,
     };
 
     struct SignedRepository {
@@ -142,6 +149,359 @@ mod tests {
         )
     }
 
+    #[expect(
+        clippy::single_call_fn,
+        reason = "the named third effect keeps the branch-identity fixture distinct and readable"
+    )]
+    fn effect_three() -> InferEffect {
+        let base = effect();
+        InferEffect::new(
+            base.session_id().clone(),
+            base.agent_id().clone(),
+            base.workflow_id().clone(),
+            base.assignment_id().clone(),
+            base.assignment_scope().clone(),
+            base.assignment_epoch(),
+            base.attempt_number(),
+            base.context_receipt_id().clone(),
+            base.policy_decision_id().clone(),
+            parsed(EffectId::parse, "effect-3"),
+            parsed(IdempotencyKey::parse, "session-1:turn-3"),
+            base.deadline_milliseconds(),
+        )
+    }
+
+    #[tokio::test]
+    async fn checked_plan_cancellation_publishes_its_sole_session_fact() {
+        let fixture = SignedRepository::new();
+        let before = TiberEventStore::open(&fixture.repository).expect("authority opens");
+        let start = decide_start_session(&[], binding())
+            .expect("start is modeled")
+            .expect("new session");
+        let (started, _) = decide_start_session(&[], binding())
+            .expect("start is modeled")
+            .expect("new session")
+            .into_event_and_consistency_streams();
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, before.revision())
+            .expect("publisher opens");
+        let started_revision = publisher
+            .publish_session_start(start)
+            .await
+            .expect("start publishes");
+
+        let prompt = PromptText::parse("plan the publication boundary").expect("prompt");
+        let request = decide_request_plan(slice::from_ref(&started), binding(), prompt, effect())
+            .expect("plan request is modeled");
+        let (requested, _) = request.into_event_and_consistency_streams();
+        let proposal = decide_propose_plan(
+            &[started.clone(), requested.clone()],
+            AssistantText::parse("Publish only the checked decision.").expect("proposal"),
+        )
+        .expect("proposal is modeled");
+        let (proposed, _) = proposal.into_event_and_consistency_streams();
+        let acceptance =
+            decide_accept_plan(&[started.clone(), requested.clone(), proposed.clone()])
+                .expect("acceptance is modeled")
+                .expect("first acceptance emits");
+        let mut rejected_publisher =
+            TiberEventPublisher::open_at(&fixture.repository, started_revision.revision())
+                .expect("acceptance publisher fences started authority");
+        assert!(
+            rejected_publisher
+                .publish_plan_decision(acceptance)
+                .await
+                .is_err(),
+            "acceptance cannot publish without its ordinary workflow continuation"
+        );
+        assert_eq!(
+            TiberEventStore::open(&fixture.repository)
+                .expect("rejected authority opens")
+                .revision(),
+            started_revision.revision()
+        );
+        let decision = decide_cancel_plan(&[started, requested, proposed])
+            .expect("decision is modeled")
+            .expect("first decision emits");
+        let mut decision_publisher =
+            TiberEventPublisher::open_at(&fixture.repository, started_revision.revision())
+                .expect("decision publisher fences started authority");
+        let decided_revision = decision_publisher
+            .publish_plan_decision(decision)
+            .await
+            .expect("checked plan decision publishes");
+
+        let store = TiberEventStore::open(&fixture.repository).expect("published authority opens");
+        assert_eq!(store.revision(), decided_revision.revision());
+        let pattern =
+            StreamPattern::try_new("tiber:session:active".to_owned()).expect("session pattern");
+        let reader = store
+            .verified_transaction_reader::<SessionEvent>(&[pattern])
+            .expect("session history verifies");
+        let events = reader
+            .read_page(TransactionEventPage::first(BatchSize::new(8)))
+            .expect("session history reads");
+        assert!(matches!(
+            events.last().map(SessionEvent::fact),
+            Some(SessionFact::PlanDecided { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn checked_isolated_turn_lifecycle_publishes_only_to_its_child_stream() {
+        let fixture = SignedRepository::new();
+        let before = TiberEventStore::open(&fixture.repository).expect("authority opens");
+        let branch = IsolatedTurnBinding::new(binding(), HarnessState::new(effect_two()))
+            .expect("branch binding");
+        let opened = decide_open_isolated_turn(
+            &[],
+            IsolatedTurnId::parse("side-store-1").expect("turn id"),
+            IsolatedTurnKind::Side,
+            branch.clone(),
+        )
+        .expect("open modeled")
+        .expect("new open");
+        let opened_event = opened.event().clone();
+        let request = decide_request_isolated_turn(
+            slice::from_ref(&opened_event),
+            PromptText::parse("isolated store prompt").expect("prompt"),
+            branch.workflow_state().initial_effect().clone(),
+        )
+        .expect("request modeled");
+        let mut open_publisher =
+            TiberEventPublisher::open_at(&fixture.repository, before.revision())
+                .expect("publisher opens");
+        let opened_revision = open_publisher
+            .publish_isolated_turn_open_and_request(opened, request)
+            .await
+            .expect("isolated open and request publish atomically");
+        let (requested_event, _) = decide_request_isolated_turn(
+            slice::from_ref(&opened_event),
+            PromptText::parse("isolated store prompt").expect("prompt"),
+            branch.workflow_state().initial_effect().clone(),
+        )
+        .expect("request modeled")
+        .into_event_and_consistency_streams();
+        let observation = decide_observe_isolated_turn(
+            &[opened_event.clone(), requested_event.clone()],
+            AssistantText::parse("isolated store answer").expect("assistant"),
+        )
+        .expect("observation modeled");
+        let (observed_event, _) = decide_observe_isolated_turn(
+            &[opened_event.clone(), requested_event.clone()],
+            AssistantText::parse("isolated store answer").expect("assistant"),
+        )
+        .expect("observation modeled")
+        .into_event_and_consistency_streams();
+        let mut observation_publisher =
+            TiberEventPublisher::open_at(&fixture.repository, opened_revision.revision())
+                .expect("observation publisher opens");
+        let observed_revision = observation_publisher
+            .publish_isolated_turn_observation(observation)
+            .await
+            .expect("isolated observation publishes");
+        let close =
+            decide_close_isolated_turn(&[opened_event.clone(), requested_event, observed_event])
+                .expect("close modeled")
+                .expect("first close emits");
+        let mut close_publisher =
+            TiberEventPublisher::open_at(&fixture.repository, observed_revision.revision())
+                .expect("close publisher opens");
+        let closed_revision = close_publisher
+            .publish_isolated_turn_close(close)
+            .await
+            .expect("isolated close publishes");
+        let store = TiberEventStore::open(&fixture.repository).expect("authority reopens");
+        assert_eq!(store.revision(), closed_revision.revision());
+        let pattern = StreamPattern::try_new(opened_event.stream_id().as_ref().to_owned())
+            .expect("child pattern");
+        let events = store
+            .verified_transaction_reader::<IsolatedTurnEvent>(&[pattern])
+            .expect("child history verifies")
+            .read_page(TransactionEventPage::first(BatchSize::new(4)))
+            .expect("child history reads");
+        assert_eq!(events.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn atomic_isolated_open_rejects_a_request_for_another_branch_identity() {
+        let fixture = SignedRepository::new();
+        let before = TiberEventStore::open(&fixture.repository).expect("authority opens");
+        let parent = binding();
+        let branch_a = IsolatedTurnBinding::new(parent.clone(), HarnessState::new(effect_two()))
+            .expect("first branch binding");
+        let branch_b = IsolatedTurnBinding::new(parent, HarnessState::new(effect_three()))
+            .expect("second branch binding");
+        let turn_id = IsolatedTurnId::parse("same-stream-turn").expect("turn id");
+        let open_a =
+            decide_open_isolated_turn(&[], turn_id.clone(), IsolatedTurnKind::Side, branch_a)
+                .expect("first open modeled")
+                .expect("first open emitted");
+        let open_b =
+            decide_open_isolated_turn(&[], turn_id, IsolatedTurnKind::Side, branch_b.clone())
+                .expect("second open modeled")
+                .expect("second open emitted");
+        assert_eq!(open_a.event().stream_id(), open_b.event().stream_id());
+        let request_b = decide_request_isolated_turn(
+            slice::from_ref(open_b.event()),
+            PromptText::parse("foreign branch request").expect("prompt"),
+            branch_b.workflow_state().initial_effect().clone(),
+        )
+        .expect("foreign request modeled");
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, before.revision())
+            .expect("publisher opens");
+        assert!(
+            publisher
+                .publish_isolated_turn_open_and_request(open_a, request_b)
+                .await
+                .is_err(),
+            "same-stream tokens with different branch identities must be rejected"
+        );
+        let after = TiberEventStore::open(&fixture.repository).expect("authority reopens");
+        assert_eq!(after.revision(), before.revision());
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::pattern_type_mismatch,
+        clippy::too_many_lines,
+        reason = "the bounded end-to-end fixture asserts exact ordered session and workflow transactions"
+    )]
+    async fn accepted_plan_and_ordinary_workflow_request_publish_in_one_signed_candidate() {
+        let fixture = SignedRepository::new();
+        let before = TiberEventStore::open(&fixture.repository).expect("authority opens");
+        let start = decide_start_session(&[], binding())
+            .expect("start")
+            .expect("new");
+        let (started, _) = start.into_event_and_consistency_streams();
+        let plan = decide_request_plan(
+            slice::from_ref(&started),
+            binding(),
+            PromptText::parse("plan atomic continuation").expect("prompt"),
+            effect(),
+        )
+        .expect("plan request");
+        let (plan_requested, _) = plan.into_event_and_consistency_streams();
+        let proposal = decide_propose_plan(
+            &[started.clone(), plan_requested.clone()],
+            AssistantText::parse("Continue ordinarily.").expect("proposal"),
+        )
+        .expect("proposal");
+        let (proposed, _) = proposal.into_event_and_consistency_streams();
+        let planning_effect = effect();
+        let planning_stream =
+            WorkflowStream::for_effect(&planning_effect).expect("planning stream");
+        let planning_initialization = decide_initialize_workflow(
+            planning_stream.clone(),
+            HarnessState::new(planning_effect.clone()),
+        )
+        .expect("planning initialization");
+        let initialized = planning_initialization.event().clone();
+        let planning_request =
+            decide_request_next_effect(slice::from_ref(&initialized), planning_stream.clone())
+                .expect("planning workflow request");
+        let workflow_requested = planning_request.event().clone();
+        let planning_observation = decide_record_observation(
+            &[initialized.clone(), workflow_requested.clone()],
+            planning_stream.clone(),
+            EffectObservation::Succeeded {
+                effect_id: planning_effect.effect_id().clone(),
+                receipt_id: EffectReceiptId::parse("receipt-plan").expect("receipt"),
+            },
+        )
+        .expect("planning observation");
+        let workflow_observed = planning_observation.event().clone();
+        let planning_advance = decide_advance_workflow(
+            &[
+                initialized.clone(),
+                workflow_requested.clone(),
+                workflow_observed.clone(),
+            ],
+            planning_stream.clone(),
+        )
+        .expect("planning completion");
+        let completed = planning_advance.event().clone();
+        let WorkflowFact::WorkflowCompleted { successor, .. } = completed.fact() else {
+            panic!("planning workflow must complete");
+        };
+        let next = successor.initial_effect().clone();
+        let session = decide_accept_plan_and_request_inference(
+            &[started, plan_requested, proposed],
+            PromptText::parse("continue now").expect("prompt"),
+            next.clone(),
+        )
+        .expect("accepted continuation")
+        .expect("first acceptance emits");
+        let stream = WorkflowStream::for_effect(&next).expect("workflow stream");
+        let initialization = decide_initialize_successor_workflow(
+            &[
+                initialized,
+                workflow_requested,
+                workflow_observed,
+                completed,
+            ],
+            planning_stream,
+            stream.clone(),
+        )
+        .expect("successor initialization");
+        let request =
+            decide_request_next_effect(slice::from_ref(initialization.event()), stream.clone())
+                .expect("workflow request");
+        let mut publisher = TiberEventPublisher::open_at(&fixture.repository, before.revision())
+            .expect("publisher opens");
+        let final_revision = publisher
+            .publish_accepted_plan_inference_with_workflow(session, initialization, request)
+            .await
+            .expect("atomic accepted continuation publishes");
+        let after = TiberEventStore::open(&fixture.repository).expect("authority reopens");
+        assert_eq!(after.revision(), final_revision.revision());
+        let session_pattern =
+            StreamPattern::try_new("tiber:session:active".to_owned()).expect("session pattern");
+        let session_events = after
+            .verified_transaction_reader::<SessionEvent>(&[session_pattern])
+            .expect("session transaction verifies")
+            .read_page(TransactionEventPage::first(BatchSize::new(3)))
+            .expect("session transaction reads");
+        assert_eq!(session_events.len(), 2);
+        assert!(matches!(
+            session_events[0].fact(),
+            SessionFact::PlanDecided {
+                decision: tiber_session_service::PlanDecision::Accepted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            session_events[1].fact(),
+            SessionFact::InferenceRequested {
+                effect,
+                mode: InferenceMode::Ordinary,
+                ..
+            } if effect == &next
+        ));
+        let workflow_pattern = StreamPattern::try_new(stream.as_stream_id().as_ref().to_owned())
+            .expect("workflow pattern");
+        let workflow_events = after
+            .verified_transaction_reader::<tiber_workflow_service::WorkflowEvent>(&[
+                workflow_pattern,
+            ])
+            .expect("workflow transaction verifies")
+            .read_page(TransactionEventPage::first(BatchSize::new(3)))
+            .expect("workflow transaction reads");
+        assert_eq!(workflow_events.len(), 2);
+        assert!(matches!(
+            workflow_events[0].fact(),
+            WorkflowFact::WorkflowInitialized { state } if state.initial_effect() == &next
+        ));
+        assert!(matches!(
+            workflow_events[1].fact(),
+            WorkflowFact::EffectRequested {
+                effect: tiber_workflow_core::TiberEffect::Infer(effect),
+                ..
+            } if effect == &next
+        ));
+    }
+
     #[tokio::test]
     #[expect(
         clippy::indexing_slicing,
@@ -243,6 +603,8 @@ mod tests {
             &SessionFact::InferenceRequested {
                 effect: effect(),
                 predecessor_effect_id: None,
+                mode: InferenceMode::Ordinary,
+                planning_binding: None,
                 prompt
             }
         );

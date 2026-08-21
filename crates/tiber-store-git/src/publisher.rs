@@ -19,8 +19,10 @@ use tempfile::TempDir;
 use tiber_process_service::{ProcessPublication, ProcessStream};
 use tiber_repository_service::RepositoryMutationPublication;
 use tiber_session_service::{
-    InferenceObservationPublication, InferenceRequestPublication, SessionFact,
-    SessionStartPublication, SessionSuccessorPublication,
+    AcceptedPlanInferencePublication, InferenceObservationPublication, InferenceRequestPublication,
+    IsolatedTurnClosePublication, IsolatedTurnFact, IsolatedTurnObservationPublication,
+    IsolatedTurnOpenPublication, IsolatedTurnRequestPublication, PlanDecisionPublication,
+    SessionFact, SessionStartPublication, SessionSuccessorPublication,
 };
 use tiber_tasks_service::{
     AcceptanceAddPublication, AcceptanceCheckPublication, DependencyLinkPublication,
@@ -307,6 +309,68 @@ impl TiberEventPublisher {
         self.publish_candidate(&candidate)
     }
 
+    /// Atomically publishes accepted plan decision, ordinary prompt, and workflow request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when the closed publications disagree or publication fails.
+    #[inline]
+    pub async fn publish_accepted_plan_inference_with_workflow(
+        &mut self,
+        session: AcceptedPlanInferencePublication,
+        initialization: WorkflowInitializationPublication,
+        request: WorkflowEffectRequestPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let ([accepted, session_event], session_streams) =
+            session.into_events_and_consistency_streams();
+        let initialization_predecessor = initialization.predecessor_effect_id().cloned();
+        let (initialized, workflow_streams) = initialization.into_event_and_consistency_streams();
+        let (requested, request_streams) = request.into_event_and_consistency_streams();
+        if workflow_streams.last() != request_streams.first() {
+            return Err(TiberPublicationError::UndeclaredStream);
+        }
+        if !matches!(
+            accepted.fact(),
+            SessionFact::PlanDecided {
+                decision: tiber_session_service::PlanDecision::Accepted,
+                ..
+            }
+        ) {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        }
+        let SessionFact::InferenceRequested {
+            effect: session_effect,
+            predecessor_effect_id: session_predecessor,
+            mode: tiber_session_service::InferenceMode::Ordinary,
+            ..
+        } = session_event.fact().clone()
+        else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        let WorkflowFact::WorkflowInitialized { state } = initialized.fact().clone() else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        let WorkflowFact::EffectRequested {
+            effect: TiberEffect::Infer(workflow_effect),
+            ..
+        } = requested.fact().clone()
+        else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        if session_predecessor != initialization_predecessor
+            || session_effect != workflow_effect
+            || &session_effect != state.initial_effect()
+        {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        }
+        let session_writes = self.build_writes(&session_streams, vec![accepted, session_event])?;
+        let _session = self.store.append_events(session_writes).await?;
+        let workflow_writes = self.build_writes(&workflow_streams, vec![initialized, requested])?;
+        let _workflow = self.store.append_events(workflow_writes).await?;
+        let candidate = self.create_signed_candidate()?;
+        self.publish_candidate(&candidate)
+    }
+
     /// Atomically publishes assistant transcript and its workflow observation.
     ///
     /// # Errors
@@ -378,6 +442,115 @@ impl TiberEventPublisher {
     ) -> Result<PublishedRevision, TiberPublicationError> {
         let (event, consistency_streams) = publication.into_event_and_consistency_streams();
         self.append(&consistency_streams, vec![event]).await
+    }
+
+    /// Publishes one checked terminal plan decision against its exact session stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed publication failure when staging, signing, or exact-base
+    /// publication cannot be completed.
+    #[inline]
+    pub async fn publish_plan_decision(
+        &mut self,
+        publication: PlanDecisionPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, consistency_streams) = publication.into_event_and_consistency_streams();
+        if !matches!(
+            event.fact(),
+            SessionFact::PlanDecided {
+                decision: tiber_session_service::PlanDecision::Cancelled,
+                ..
+            }
+        ) {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        }
+        self.append(&consistency_streams, vec![event]).await
+    }
+
+    /// Publishes one checked isolated child-stream opening.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when staging, signing, or publication fails.
+    #[inline]
+    pub async fn publish_isolated_turn_open(
+        &mut self,
+        publication: IsolatedTurnOpenPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = publication.into_event_and_consistency_streams();
+        self.append(&streams, vec![event]).await
+    }
+
+    /// Publishes one checked isolated inference request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when staging, signing, or publication fails.
+    #[inline]
+    pub async fn publish_isolated_turn_request(
+        &mut self,
+        publication: IsolatedTurnRequestPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = publication.into_event_and_consistency_streams();
+        self.append(&streams, vec![event]).await
+    }
+
+    /// Atomically publishes one checked isolated branch opening and inference request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when the publications target different streams or
+    /// when staging, signing, or publication fails.
+    #[inline]
+    pub async fn publish_isolated_turn_open_and_request(
+        &mut self,
+        open: IsolatedTurnOpenPublication,
+        request: IsolatedTurnRequestPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (opened, open_streams) = open.into_event_and_consistency_streams();
+        let (requested, request_streams) = request.into_event_and_consistency_streams();
+        if open_streams != request_streams {
+            return Err(TiberPublicationError::UndeclaredStream);
+        }
+        let IsolatedTurnFact::Opened { binding, .. } = opened.fact().clone() else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        let IsolatedTurnFact::InferenceRequested { effect, .. } = requested.fact().clone() else {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        };
+        if &effect != binding.workflow_state().initial_effect() {
+            return Err(TiberPublicationError::WorkflowEffectMismatch);
+        }
+        self.append(&open_streams, vec![opened, requested]).await
+    }
+
+    /// Publishes one checked isolated inference observation or interruption.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when staging, signing, or publication fails.
+    #[inline]
+    pub async fn publish_isolated_turn_observation(
+        &mut self,
+        publication: IsolatedTurnObservationPublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = publication.into_event_and_consistency_streams();
+        self.append(&streams, vec![event]).await
+    }
+
+    /// Publishes one checked isolated child-stream closure.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when staging, signing, or publication fails.
+    #[inline]
+    pub async fn publish_isolated_turn_close(
+        &mut self,
+        publication: IsolatedTurnClosePublication,
+    ) -> Result<PublishedRevision, TiberPublicationError> {
+        let (event, streams) = publication.into_event_and_consistency_streams();
+        self.append(&streams, vec![event]).await
     }
 
     /// Publishes one modeled transfer to the successor task-bound session.
@@ -471,7 +644,6 @@ impl TiberEventPublisher {
     }
 
     /// Publishes one modeled task abandonment and resulting board order.
-    /// Publishes one modeled task abandonment batch.
     ///
     /// # Errors
     ///

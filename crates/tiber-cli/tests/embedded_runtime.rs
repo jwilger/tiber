@@ -135,7 +135,9 @@ mod tests {
             .env("CODEX_HOME", &fixture.codex_home)
             .env("PATH", fixture.path())
             .env("XDG_STATE_HOME", &fixture.state_home)
-            .stdin(Stdio::null())
+            // Keep the controller side open: `/dev/null` is an immediate EOF,
+            // which asks the native TUI to exit successfully before bootstrap.
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = ProcessGroupChild(Some(
@@ -162,7 +164,9 @@ mod tests {
             assert!(Instant::now() < deadline, "startup timed out: {rendered}");
             thread::sleep(Duration::from_millis(10));
         }
-        thread::sleep(Duration::from_millis(500));
+        // Codex reads managed configuration requirements after drawing its first
+        // frame; keep the process alive through that bootstrap request as well.
+        thread::sleep(Duration::from_secs(7));
         let rendered = fs::read_to_string(&capture).unwrap_or_default();
         let early_status = child
             .0
@@ -173,6 +177,7 @@ mod tests {
         child.terminate();
 
         assert!(early_status.is_none(), "embedded Codex exited: {rendered}");
+        assert!(!rendered.contains("codex_tui_start_failed"), "{rendered}");
         assert!(!rendered.contains("Codex executable path is not configured"));
         assert!(!fixture.hostile_invocation.exists());
     }

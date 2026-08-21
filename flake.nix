@@ -26,7 +26,7 @@
 
         cargoLock = {
           lockFile = ./Cargo.lock;
-          outputHashes."codex-agent-extension-0.148.0" = "sha256-NHw0VXzn99OOHspGXf/KL9syFlZa0+ueZ0xLMJOrLGU=";
+          outputHashes."codex-agent-extension-0.148.0" = "sha256-g288ZJaf7hNUqJQ7hpVHWcVBZIbkrIRUDFz+k9QYQoE=";
           outputHashes."crossterm-0.29.0" = "sha256-cQxQQuV+YEutuQiPurXVISq6F/99vCEk8qe5PU8BCSo=";
           outputHashes."nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
           outputHashes."tokio-tungstenite-0.28.0" = "sha256-V1xmnrfRWOcZZogelZEA4vvyMj2awCfHVA5/glQ6KAI=";

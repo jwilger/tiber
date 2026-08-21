@@ -1,23 +1,28 @@
 //! Typed authority boundary for the in-process Codex runtime.
 
 use alloc::sync::Arc;
-use std::{path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 use codex_app_server_client::{
-    HostPolicy, HostPolicyFuture, HostSlashCommand, InProcessClientExit,
-    ServerNotificationDisposition, ServerRequestDisposition,
+    BuiltinPlanDecision, BuiltinPlanDecisionRequest, BuiltinSlashCommand,
+    BuiltinSlashCommandRequest, HostPolicy, HostPolicyFuture, HostSlashCommand,
+    InProcessClientExit, ServerNotificationDisposition, ServerRequestDisposition,
 };
 use codex_app_server_protocol::{ClientRequest, JSONRPCErrorError, ServerRequest};
 use codex_core::effect_gate::{EffectDenied, EffectGate, EffectGateHandle, EffectRequest};
+use eventcore_types::StreamId;
+use tiber_session_service::IsolatedTurnKind;
 
 use super::{
     ConversationProjection, NativeProcessCancellation, PendingRepositoryChange,
     ProcessCancellation, apply_process_restart_receipts, cancel_lost_repository_proposal,
     ensure_started_session, native_dynamic_tools, native_effect_failure,
     native_process_result_for_call, native_repository_read_result, native_repository_result,
-    native_task_result, publish_approved_repository_change, publish_denied_repository_change,
-    publish_inference_interruption, publish_inference_observation, publish_prompt_request,
-    resolve_interrupted_native_inference,
+    native_task_result, publish_accepted_plan_prompt_request, publish_approved_repository_change,
+    publish_cancelled_plan, publish_denied_repository_change, publish_inference_interruption,
+    publish_inference_observation, publish_isolated_prompt_request, publish_isolated_turn_answer,
+    publish_isolated_turn_interruption, publish_plan_prompt_request, publish_prompt_request,
+    recover_isolated_turns, resolve_interrupted_native_inference,
 };
 
 /// Complete set of model-callable tools owned by Tiber policy.
@@ -30,6 +35,11 @@ const TIBER_TOOL_NAMES: [&str; 4] = [
 
 /// Durable boundary that must admit a prompt before inference begins.
 trait PromptAdmission: Send + Sync {
+    /// Reconciles durable startup state before any conversational mode begins.
+    fn recover(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
     /// Durably admits one exact owner prompt.
     fn admit(&self, prompt: &str) -> Result<(), &'static str>;
 }
@@ -97,7 +107,7 @@ impl TurnCompletionPublication for TestTurnCompletionPublication {
 }
 
 impl PromptAdmission for DurablePromptAdmission {
-    fn admit(&self, prompt: &str) -> Result<(), &'static str> {
+    fn recover(&self) -> Result<(), &'static str> {
         let (_initial_binding, session_events) =
             ensure_started_session(&self.repository).map_err(|error| error.code())?;
         self.first_turn_recovery.run(|| {
@@ -107,10 +117,16 @@ impl PromptAdmission for DurablePromptAdmission {
             resolve_interrupted_native_inference(&self.repository).map_err(|error| error.code())?;
             let (_recovered_binding, recovered_events) =
                 ensure_started_session(&self.repository).map_err(|error| error.code())?;
+            recover_isolated_turns(&self.repository, &recovered_events)
+                .map_err(|error| error.code())?;
             cancel_lost_repository_proposal(&self.repository, &recovered_events)
                 .map_err(|error| error.code())?;
             Ok(())
-        })?;
+        })
+    }
+
+    fn admit(&self, prompt: &str) -> Result<(), &'static str> {
+        self.recover()?;
         let pending = self
             .pending_repository
             .lock()
@@ -169,12 +185,14 @@ pub(crate) struct TiberHostPolicy {
     completion: Arc<dyn TurnCompletionPublication>,
     /// Exact in-memory owner decision awaiting the next turn.
     pending_repository: Arc<Mutex<Option<PendingRepositoryChange>>>,
-    /// Cancellation handshake for the active configured process.
+    /// Stable cancellation handshake for the primary parent conversation.
     process_cancellation: NativeProcessCancellation,
     /// Repository whose signed state authorizes this host.
     repository: PathBuf,
-    /// Durably admitted turn currently correlated to Codex events.
-    turn: Arc<Mutex<Option<AdmittedTurn>>>,
+    /// Exact built-in conversational mode awaiting its native turn.
+    slash_admission: Arc<Mutex<Option<SlashAdmission>>>,
+    /// Independently correlated parent and isolated child turns by Codex thread.
+    turns: Arc<Mutex<HashMap<String, AdmittedTurn>>>,
 }
 
 impl TiberHostPolicy {
@@ -193,7 +211,8 @@ impl TiberHostPolicy {
             pending_repository,
             process_cancellation: NativeProcessCancellation::default(),
             repository,
-            turn: Arc::new(Mutex::new(None)),
+            slash_admission: Arc::new(Mutex::new(None)),
+            turns: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -220,16 +239,97 @@ impl TiberHostPolicy {
             pending_repository: Arc::new(Mutex::new(None)),
             process_cancellation: NativeProcessCancellation::default(),
             repository: PathBuf::from("/workspace"),
-            turn: Arc::new(Mutex::new(None)),
+            slash_admission: Arc::new(Mutex::new(None)),
+            turns: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Cancels every admitted native turn in stable thread-id order.
+    fn cancel_admitted_turns(&self) {
+        let mut cancellations = self
+            .turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(thread_id, turn)| (thread_id.clone(), turn.cancellation.clone()))
+            .collect::<Vec<_>>();
+        cancellations.sort_by(|left, right| left.0.cmp(&right.0));
+        for (_thread_id, cancellation) in cancellations {
+            cancellation.cancel();
         }
     }
 }
 
 impl HostPolicy for TiberHostPolicy {
+    fn admit_builtin_slash_command<'policy>(
+        &'policy self,
+        request: &'policy BuiltinSlashCommandRequest,
+    ) -> HostPolicyFuture<'policy, Result<(), String>> {
+        Box::pin(async move {
+            let parent_thread_id = request
+                .thread_id
+                .clone()
+                .ok_or_else(|| "tiber_builtin_slash_thread_required".to_owned())?;
+            let admission = match request.command {
+                BuiltinSlashCommand::Plan => SlashAdmission::Plan { parent_thread_id },
+                BuiltinSlashCommand::Side => SlashAdmission::Isolated {
+                    kind: IsolatedTurnKind::Side,
+                    parent_thread_id,
+                },
+                BuiltinSlashCommand::Btw => SlashAdmission::Isolated {
+                    kind: IsolatedTurnKind::Btw,
+                    parent_thread_id,
+                },
+            };
+            let mut pending = self
+                .slash_admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pending.is_some() {
+                return Err("tiber_builtin_slash_already_pending".to_owned());
+            }
+            *pending = Some(admission);
+            Ok(())
+        })
+    }
+
+    fn observe_builtin_slash_command(&self, _request: &BuiltinSlashCommandRequest) {}
+
+    fn observe_builtin_plan_decision(&self, _request: &BuiltinPlanDecisionRequest) {}
+
+    fn admit_builtin_plan_decision<'policy>(
+        &'policy self,
+        request: &'policy BuiltinPlanDecisionRequest,
+    ) -> HostPolicyFuture<'policy, Result<(), String>> {
+        let repository = self.repository.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || match request.decision {
+                BuiltinPlanDecision::Accept | BuiltinPlanDecision::AcceptClearContext => {
+                    let prompt = request
+                        .implementation_prompt
+                        .as_deref()
+                        .ok_or_else(|| "tiber_plan_accept_prompt_missing".to_owned())?;
+                    publish_accepted_plan_prompt_request(&repository, prompt)
+                        .map_err(|error| error.code().to_owned())
+                }
+                BuiltinPlanDecision::Cancel => {
+                    if request.implementation_prompt.is_some() {
+                        return Err("tiber_plan_cancel_prompt_unexpected".to_owned());
+                    }
+                    publish_cancelled_plan(&repository).map_err(|error| error.code().to_owned())
+                }
+            })
+            .await
+            .map_err(|_error| "tiber_plan_decision_stopped".to_owned())?
+        })
+    }
+
     #[expect(
         clippy::pattern_type_mismatch,
+        clippy::too_many_lines,
         clippy::wildcard_enum_match_arm,
-        reason = "the typed admission boundary deliberately fail-closes every client variant outside its explicit harmless allowlist"
+        reason = "the auditable typed boundary keeps its complete fail-closed request allowlist and durable turn transaction together"
     )]
     fn admit_client_request(
         &self,
@@ -251,23 +351,34 @@ impl HostPolicy for TiberHostPolicy {
                     &mut params.config,
                     &mut params.base_instructions,
                 ),
-                ClientRequest::ThreadFork { params, .. } => restrict_thread(
-                    &mut params.sandbox,
-                    &mut params.config,
-                    &mut params.base_instructions,
-                ),
-                ClientRequest::TurnStart { .. } => {}
-                ClientRequest::TurnInterrupt { params, .. } => {
-                    let mut turn = self
-                        .turn
+                ClientRequest::ThreadFork { params, .. } => {
+                    let pending = self
+                        .slash_admission
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let Some(active) = turn.as_mut() else {
+                    if let Some(SlashAdmission::Isolated {
+                        parent_thread_id, ..
+                    }) = pending.as_ref()
+                        && parent_thread_id != &params.thread_id
+                    {
+                        return Err(host_error("tiber_isolated_fork_parent_unauthorized"));
+                    }
+                    drop(pending);
+                    restrict_thread(
+                        &mut params.sandbox,
+                        &mut params.config,
+                        &mut params.base_instructions,
+                    );
+                }
+                ClientRequest::TurnStart { .. } => {}
+                ClientRequest::TurnInterrupt { params, .. } => {
+                    let mut turns = self
+                        .turns
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(active) = turns.get_mut(&params.thread_id) else {
                         return Err(host_error("tiber_turn_interrupt_unauthorized"));
                     };
-                    if active.thread_id != params.thread_id {
-                        return Err(host_error("tiber_turn_interrupt_unauthorized"));
-                    }
                     let bound_pending_turn = match active.turn_id.as_deref() {
                         Some(turn_id) if turn_id != params.turn_id => {
                             return Err(host_error("tiber_turn_interrupt_unauthorized"));
@@ -278,9 +389,10 @@ impl HostPolicy for TiberHostPolicy {
                         }
                         Some(_) => false,
                     };
-                    drop(turn);
+                    let cancellation = active.cancellation.clone();
+                    drop(turns);
                     if bound_pending_turn {
-                        self.process_cancellation.cancel();
+                        cancellation.cancel();
                     }
                     return Ok(request);
                 }
@@ -294,32 +406,100 @@ impl HostPolicy for TiberHostPolicy {
                 [codex_app_server_protocol::UserInput::Text { text, .. }] => text.clone(),
                 _ => return Err(host_error("tiber_prompt_input_unsupported")),
             };
+            let turn_thread_id = params.thread_id.clone();
+            let isolated_pending = matches!(
+                self.slash_admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref(),
+                Some(SlashAdmission::Isolated { .. })
+            );
+            let turn_cancellation = if isolated_pending {
+                NativeProcessCancellation::default()
+            } else {
+                self.process_cancellation.clone()
+            };
             {
-                let mut turn = self
-                    .turn
+                let mut turns = self
+                    .turns
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if turn.is_some() {
+                if turns.contains_key(&params.thread_id) {
                     return Err(host_error("tiber_turn_already_active"));
                 }
-                *turn = Some(AdmittedTurn {
-                    thread_id: params.thread_id.clone(),
-                    turn_id: None,
-                });
+                turns.insert(
+                    params.thread_id.clone(),
+                    AdmittedTurn {
+                        authority: TurnAuthority::Ordinary,
+                        cancellation: turn_cancellation,
+                        turn_id: None,
+                    },
+                );
             };
+            let slash_admission = self
+                .slash_admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let slash_retry = slash_admission.clone();
             let prompt_admission = Arc::clone(&self.admission);
-            let admission_result =
-                match tokio::task::spawn_blocking(move || prompt_admission.admit(&prompt)).await {
-                    Ok(result) => result.map_err(host_error),
-                    Err(_error) => Err(host_error("tiber_prompt_admission_stopped")),
-                };
-            if let Err(error) = admission_result {
-                *self
-                    .turn
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                return Err(error);
-            }
+            let repository = self.repository.clone();
+            let prompt_for_admission = prompt.clone();
+            let admitted_thread_id = turn_thread_id.clone();
+            let admission_result = match tokio::task::spawn_blocking(move || {
+                prompt_admission.recover()?;
+                match slash_admission {
+                    Some(SlashAdmission::Plan { parent_thread_id })
+                        if parent_thread_id == admitted_thread_id =>
+                    {
+                        publish_plan_prompt_request(&repository, &prompt_for_admission)
+                            .map(|()| TurnAuthority::Plan)
+                            .map_err(|error| error.code())
+                    }
+                    Some(SlashAdmission::Isolated { kind, .. }) => {
+                        publish_isolated_prompt_request(&repository, kind, &prompt_for_admission)
+                            .map(TurnAuthority::Isolated)
+                            .map_err(|error| error.code())
+                    }
+                    Some(SlashAdmission::Plan { .. }) => Err("tiber_plan_thread_unauthorized"),
+                    None => prompt_admission
+                        .admit(&prompt_for_admission)
+                        .map(|()| TurnAuthority::Ordinary),
+                }
+            })
+            .await
+            {
+                Ok(result) => result.map_err(host_error),
+                Err(_error) => Err(host_error("tiber_prompt_admission_stopped")),
+            };
+            let authority = match admission_result {
+                Ok(authority) => authority,
+                Err(error) => {
+                    if let Some(retry) = slash_retry {
+                        let mut pending = self
+                            .slash_admission
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if pending.is_none() {
+                            *pending = Some(retry);
+                        }
+                    }
+                    self.turns
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&turn_thread_id);
+                    return Err(error);
+                }
+            };
+            let mut turns = self
+                .turns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(admitted) = turns.get_mut(&turn_thread_id) else {
+                return Err(host_error("tiber_admitted_turn_lost"));
+            };
+            admitted.authority = authority;
+            drop(turns);
             params.sandbox_policy = Some(codex_app_server_protocol::SandboxPolicy::ReadOnly {
                 network_access: false,
             });
@@ -341,23 +521,33 @@ impl HostPolicy for TiberHostPolicy {
                     "tiber_server_request_unauthorized",
                 ));
             };
-            if TIBER_TOOL_NAMES.contains(&params.tool.as_str()) {
-                let turn = self
-                    .turn
+            if !TIBER_TOOL_NAMES.contains(&params.tool.as_str()) {
+                return ServerRequestDisposition::Resolve(native_effect_failure(
+                    "tiber_tool_unauthorized",
+                    false,
+                ));
+            }
+            let cancellation = {
+                let turns = self
+                    .turns
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let correlated = turn.as_ref().is_some_and(|active| {
-                    active.thread_id == params.thread_id
-                        && active.turn_id.as_deref() == Some(params.turn_id.as_str())
-                });
-                if !correlated {
+                let Some(active) = turns
+                    .get(&params.thread_id)
+                    .filter(|active| active.turn_id.as_deref() == Some(params.turn_id.as_str()))
+                else {
                     return ServerRequestDisposition::Reject(host_error(
                         "tiber_dynamic_tool_turn_unauthorized",
                     ));
+                };
+                if !matches!(active.authority, TurnAuthority::Ordinary) {
+                    return ServerRequestDisposition::Reject(host_error(
+                        "tiber_dynamic_tool_mode_unauthorized",
+                    ));
                 }
-            }
+                active.cancellation.clone()
+            };
             let repository = self.repository.clone();
-            let cancellation = self.process_cancellation.clone();
             let tool = params.tool.clone();
             let arguments = params.arguments.clone();
             let call_id = params.call_id.clone();
@@ -413,16 +603,13 @@ impl HostPolicy for TiberHostPolicy {
         Box::pin(async move {
             match notification {
                 codex_app_server_protocol::ServerNotification::TurnStarted(params) => {
-                    let mut turn = self
-                        .turn
+                    let mut turns = self
+                        .turns
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let Some(admitted) = turn.as_mut() else {
+                    let Some(admitted) = turns.get_mut(&params.thread_id) else {
                         return ServerNotificationDisposition::Suppress;
                     };
-                    if admitted.thread_id != params.thread_id {
-                        return ServerNotificationDisposition::Suppress;
-                    }
                     match admitted.turn_id.as_deref() {
                         Some(turn_id) if turn_id != params.turn.id => {
                             return ServerNotificationDisposition::Suppress;
@@ -434,33 +621,55 @@ impl HostPolicy for TiberHostPolicy {
                 }
                 codex_app_server_protocol::ServerNotification::TurnCompleted(params) => {
                     let expected = self
-                        .turn
+                        .turns
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone();
+                        .get(&params.thread_id)
+                        .cloned();
                     let Some(expected) = expected else {
                         return ServerNotificationDisposition::Suppress;
                     };
-                    if expected.thread_id != params.thread_id
-                        || expected.turn_id.as_deref() != Some(params.turn.id.as_str())
-                    {
+                    if expected.turn_id.as_deref() != Some(params.turn.id.as_str()) {
                         return ServerNotificationDisposition::Suppress;
                     }
-                    self.process_cancellation.clear();
+                    expected.cancellation.clear();
                     let completion_publication = Arc::clone(&self.completion);
+                    let authority = expected.authority.clone();
+                    let repository = self.repository.clone();
                     let completed_turn = params.turn.clone();
-                    let published = tokio::task::spawn_blocking(move || {
-                        completion_publication.publish(&completed_turn)
+                    let published = tokio::task::spawn_blocking(move || match authority {
+                        TurnAuthority::Ordinary => completion_publication.publish(&completed_turn),
+                        TurnAuthority::Plan => match &completed_turn.status {
+                            codex_app_server_protocol::TurnStatus::Completed => {
+                                let assistant = terminal_assistant_text(&completed_turn)?;
+                                publish_inference_observation(&repository, assistant)
+                                    .map_err(|error| error.code())
+                            }
+                            _ => publish_inference_interruption(
+                                &repository,
+                                "native_codex_plan_interrupted",
+                            )
+                            .map_err(|error| error.code()),
+                        },
+                        TurnAuthority::Isolated(stream) => match &completed_turn.status {
+                            codex_app_server_protocol::TurnStatus::Completed => {
+                                let assistant = terminal_assistant_text(&completed_turn)?;
+                                publish_isolated_turn_answer(&repository, &stream, assistant)
+                                    .map_err(|error| error.code())
+                            }
+                            _ => publish_isolated_turn_interruption(&repository, &stream)
+                                .map_err(|error| error.code()),
+                        },
                     })
                     .await
                     .is_ok_and(|result| result.is_ok());
                     if !published {
                         return ServerNotificationDisposition::Suppress;
                     }
-                    *self
-                        .turn
+                    self.turns
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&params.thread_id);
                     ServerNotificationDisposition::Forward
                 }
                 _ => ServerNotificationDisposition::Forward,
@@ -469,25 +678,26 @@ impl HostPolicy for TiberHostPolicy {
     }
 
     fn observe_cancellation_requested(&self, thread_id: &str, turn_id: &str) {
-        let matches_active = self
-            .turn
+        let cancellation = self
+            .turns
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .is_some_and(|turn| {
-                turn.thread_id == thread_id && turn.turn_id.as_deref() == Some(turn_id)
-            });
-        if matches_active {
-            self.process_cancellation.cancel();
+            .get(thread_id)
+            .filter(|turn| turn.turn_id.as_deref() == Some(turn_id))
+            .map(|turn| turn.cancellation.clone());
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
         }
     }
 
     fn observe_client_exit(&self, _exit: InProcessClientExit) {
         self.process_cancellation.cancel();
+        self.cancel_admitted_turns();
     }
 
     fn observe_shutdown(&self) {
         self.process_cancellation.cancel();
+        self.cancel_admitted_turns();
     }
 
     fn native_slash_commands(&self) -> Vec<HostSlashCommand> {
@@ -506,10 +716,58 @@ impl HostPolicy for TiberHostPolicy {
 #[derive(Clone)]
 /// One admitted native turn and its eventual Codex runtime identity.
 struct AdmittedTurn {
-    /// Codex thread owning the admitted turn.
-    thread_id: String,
+    /// Exact configured-process cancellation handshake for this turn only.
+    cancellation: NativeProcessCancellation,
     /// Runtime turn identity, absent until `TurnStarted` arrives.
     turn_id: Option<String>,
+    /// Durable conversational authority selected before inference.
+    authority: TurnAuthority,
+}
+
+#[derive(Clone)]
+/// Durable authority attached to one exact admitted native turn.
+enum TurnAuthority {
+    /// Ordinary coding authority with access to admitted Tiber tools.
+    Ordinary,
+    /// Planning-only authority with no mutating Tiber tool access.
+    Plan,
+    /// One independently correlated side or BTW child stream.
+    Isolated(StreamId),
+}
+
+#[derive(Clone)]
+/// Exact built-in slash intent retained until native turn admission succeeds.
+enum SlashAdmission {
+    /// One planning request bound to its originating thread.
+    Plan {
+        /// Native thread that issued the Plan request.
+        parent_thread_id: String,
+    },
+    /// One isolated child request bound to its parent and semantic kind.
+    Isolated {
+        /// Side or BTW identity preserved across retry.
+        kind: IsolatedTurnKind,
+        /// Native parent thread whose authority the child inherits.
+        parent_thread_id: String,
+    },
+}
+
+/// Extracts the bounded terminal assistant or plan text from a completed turn.
+#[expect(
+    clippy::pattern_type_mismatch,
+    clippy::wildcard_enum_match_arm,
+    reason = "terminal publication selects the two textual item variants from Codex's non-exhaustive protocol vocabulary"
+)]
+fn terminal_assistant_text(turn: &codex_app_server_protocol::Turn) -> Result<&str, &'static str> {
+    turn.items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            codex_app_server_protocol::ThreadItem::AgentMessage { text, .. }
+            | codex_app_server_protocol::ThreadItem::Plan { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .ok_or("tiber_turn_missing_assistant")
 }
 
 /// Publishes one terminal Codex turn through the durable Tiber workflow.
@@ -609,6 +867,7 @@ fn harmless_client_request(method: &str) -> bool {
             | "app/list"
             | "collaborationMode/list"
             | "config/read"
+            | "configRequirements/read"
             | "mcpServer/status/list"
             | "model/list"
             | "skills/list"
@@ -726,6 +985,24 @@ mod tests {
     struct RecordingCompletion {
         called: AtomicBool,
         fails: bool,
+    }
+
+    struct FailRecoveryOnce {
+        inner: DurablePromptAdmission,
+        failed: AtomicBool,
+    }
+
+    impl PromptAdmission for FailRecoveryOnce {
+        fn recover(&self) -> Result<(), &'static str> {
+            if !self.failed.swap(true, Ordering::AcqRel) {
+                return Err("test_recovery_failed");
+            }
+            self.inner.recover()
+        }
+
+        fn admit(&self, prompt: &str) -> Result<(), &'static str> {
+            self.inner.admit(prompt)
+        }
     }
 
     struct DurableFixture {
@@ -849,6 +1126,10 @@ mod tests {
     }
 
     impl PromptAdmission for RecordingAdmission {
+        fn recover(&self) -> Result<(), &'static str> {
+            Ok(())
+        }
+
         fn admit(&self, _prompt: &str) -> Result<(), &'static str> {
             self.0.store(true, Ordering::Release);
             Ok(())
@@ -1026,6 +1307,23 @@ mod tests {
                 .expect("linked account lifecycle request should remain available");
             assert_eq!(admitted.method_name(), expected_method);
         }
+    }
+
+    #[tokio::test]
+    async fn native_bootstrap_can_read_config_requirements() {
+        let policy =
+            TiberHostPolicy::with_admission(Arc::new(RecordingAdmission(AtomicBool::new(false))));
+        let request: ClientRequest = serde_json::from_value(json!({
+            "method":"configRequirements/read", "id":1
+        }))
+        .expect("config requirements request should parse");
+
+        let admitted = policy
+            .admit_client_request(request)
+            .await
+            .expect("read-only bootstrap requirements should be admitted");
+
+        assert_eq!(admitted.method_name(), "configRequirements/read");
     }
 
     #[tokio::test]
@@ -1436,6 +1734,427 @@ stderr-bytes = 4096
         );
     }
 
+    #[tokio::test]
+    async fn built_in_slash_admission_preserves_plan_side_and_btw_identity() {
+        let policy =
+            TiberHostPolicy::with_admission(Arc::new(RecordingAdmission(AtomicBool::new(false))));
+        for (command, expected) in [
+            (BuiltinSlashCommand::Plan, "plan"),
+            (BuiltinSlashCommand::Side, "side"),
+            (BuiltinSlashCommand::Btw, "btw"),
+        ] {
+            policy
+                .admit_builtin_slash_command(&BuiltinSlashCommandRequest {
+                    command,
+                    args: "question".to_owned(),
+                    thread_id: Some("thread-parent".to_owned()),
+                })
+                .await
+                .expect("exact built-in command should be admitted");
+            let pending = policy
+                .slash_admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("identity should remain pending until its turn");
+            let actual = match pending {
+                SlashAdmission::Plan { .. } => "plan",
+                SlashAdmission::Isolated {
+                    kind: IsolatedTurnKind::Side,
+                    ..
+                } => "side",
+                SlashAdmission::Isolated {
+                    kind: IsolatedTurnKind::Btw,
+                    ..
+                } => "btw",
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_durable_admission_restores_the_exact_pending_slash_for_retry() {
+        let fixture = DurableFixture::new();
+        let mut policy = TiberHostPolicy::new(fixture.repository.clone());
+        policy.admission = Arc::new(FailRecoveryOnce {
+            inner: DurablePromptAdmission {
+                first_turn_recovery: FirstTurnRecovery::pending(),
+                pending_repository: Arc::clone(&policy.pending_repository),
+                repository: fixture.repository,
+            },
+            failed: AtomicBool::new(false),
+        });
+        let slash = BuiltinSlashCommandRequest {
+            command: BuiltinSlashCommand::Plan,
+            args: "retry the plan".to_owned(),
+            thread_id: Some("thread-parent".to_owned()),
+        };
+        policy
+            .admit_builtin_slash_command(&slash)
+            .await
+            .expect("plan slash should stage");
+        let turn = || {
+            serde_json::from_value(json!({
+                "method":"turn/start", "id":1,
+                "params":{"threadId":"thread-parent","input":[{"type":"text","text":"retry the plan","textElements":[]}]}
+            }))
+            .expect("turn should parse")
+        };
+        assert!(policy.admit_client_request(turn()).await.is_err());
+        assert!(matches!(
+            policy
+                .slash_admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref(),
+            Some(SlashAdmission::Plan { parent_thread_id }) if parent_thread_id == "thread-parent"
+        ));
+        policy
+            .admit_client_request(turn())
+            .await
+            .expect("identical retry should consume the restored plan admission");
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::shadow_unrelated,
+        clippy::too_many_lines,
+        reason = "the durable Plan scenario names each reopened signed-store checkpoint explicitly"
+    )]
+    async fn native_plan_turn_is_durable_before_start_and_completes_as_proposal() {
+        let fixture = DurableFixture::new();
+        let policy = TiberHostPolicy::new(fixture.repository.clone());
+        policy
+            .admit_builtin_slash_command(&BuiltinSlashCommandRequest {
+                command: BuiltinSlashCommand::Plan,
+                args: "plan safely".to_owned(),
+                thread_id: Some("thread-parent".to_owned()),
+            })
+            .await
+            .expect("plan slash should admit");
+        let request: ClientRequest = serde_json::from_value(json!({
+            "method":"turn/start", "id":1,
+            "params":{"threadId":"thread-parent","input":[{"type":"text","text":"plan safely","textElements":[]}]}
+        }))
+        .expect("plan turn should parse");
+        policy
+            .admit_client_request(request)
+            .await
+            .expect("planning fact must publish before inference");
+        let store = tiber_store_git::TiberEventStore::open(&fixture.repository)
+            .expect("authority should open");
+        let events = crate::read_session_events(&store).expect("session history should read");
+        assert!(matches!(
+            events.last().map(tiber_session_service::SessionEvent::fact),
+            Some(tiber_session_service::SessionFact::InferenceRequested {
+                mode: tiber_session_service::InferenceMode::Planning,
+                ..
+            })
+        ));
+
+        let started = serde_json::from_value(json!({
+            "method":"turn/started","params":{"threadId":"thread-parent","turn":{"id":"turn-plan","items":[],"status":"inProgress","error":null}}
+        }))
+        .expect("started notification should parse");
+        assert_eq!(
+            policy.admit_server_notification(&started).await,
+            ServerNotificationDisposition::Forward
+        );
+        let completed = serde_json::from_value(json!({
+            "method":"turn/completed","params":{"threadId":"thread-parent","turn":{"id":"turn-plan","items":[{"type":"plan","id":"plan-1","text":"Use typed effects."}],"status":"completed","error":null}}
+        }))
+        .expect("completed notification should parse");
+        assert_eq!(
+            policy.admit_server_notification(&completed).await,
+            ServerNotificationDisposition::Forward
+        );
+        let store = tiber_store_git::TiberEventStore::open(&fixture.repository)
+            .expect("authority should reopen");
+        let events = crate::read_session_events(&store).expect("session history should read");
+        assert!(matches!(
+            tiber_session_service::project_plan_restart_state(&events),
+            Ok(tiber_session_service::PlanRestartState::AwaitingDecision { .. })
+        ));
+
+        let decision = BuiltinPlanDecisionRequest {
+            decision: BuiltinPlanDecision::Accept,
+            implementation_prompt: Some("implement safely".to_owned()),
+        };
+        policy
+            .admit_builtin_plan_decision(&decision)
+            .await
+            .expect("native acceptance must publish before its submit effect");
+        let store = tiber_store_git::TiberEventStore::open(&fixture.repository)
+            .expect("accepted authority should reopen");
+        let accepted_event_count = crate::read_session_events(&store)
+            .expect("accepted history should read")
+            .len();
+        policy
+            .admit_builtin_plan_decision(&decision)
+            .await
+            .expect("an ambiguous duplicate acceptance must reconcile as success");
+        let store = tiber_store_git::TiberEventStore::open(&fixture.repository)
+            .expect("reconciled authority should reopen");
+        assert_eq!(
+            crate::read_session_events(&store)
+                .expect("reconciled history should read")
+                .len(),
+            accepted_event_count,
+            "the duplicate hook must not append a second decision or request"
+        );
+
+        let implementation: ClientRequest = serde_json::from_value(json!({
+            "method":"turn/start", "id":2,
+            "params":{"threadId":"thread-parent","input":[{"type":"text","text":"implement safely","textElements":[]}]}
+        }))
+        .expect("implementation turn should parse");
+        policy
+            .admit_client_request(implementation)
+            .await
+            .expect("the already-durable implementation prompt should reconcile exactly");
+        let store = tiber_store_git::TiberEventStore::open(&fixture.repository)
+            .expect("accepted authority should reopen");
+        let events = crate::read_session_events(&store).expect("accepted history should read");
+        let [.., decided, requested] = events.as_slice() else {
+            panic!("accepted plan should retain two terminal facts");
+        };
+        assert!(matches!(
+            decided.fact(),
+            tiber_session_service::SessionFact::PlanDecided {
+                decision: tiber_session_service::PlanDecision::Accepted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            requested.fact(),
+            tiber_session_service::SessionFact::InferenceRequested {
+                mode: tiber_session_service::InferenceMode::Ordinary,
+                prompt,
+                ..
+            } if prompt.as_str() == "implement safely"
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_plan_cancel_is_durable_before_the_prompt_is_dismissed() {
+        let fixture = DurableFixture::new();
+        let policy = TiberHostPolicy::new(fixture.repository.clone());
+        policy
+            .admit_builtin_slash_command(&BuiltinSlashCommandRequest {
+                command: BuiltinSlashCommand::Plan,
+                args: "plan safely".to_owned(),
+                thread_id: Some("thread-parent".to_owned()),
+            })
+            .await
+            .expect("plan slash should admit");
+        let request = serde_json::from_value(json!({
+            "method":"turn/start", "id":1,
+            "params":{"threadId":"thread-parent","input":[{"type":"text","text":"plan safely","textElements":[]}]}
+        }))
+        .expect("plan turn should parse");
+        policy
+            .admit_client_request(request)
+            .await
+            .expect("planning request should publish");
+        let started = serde_json::from_value(json!({
+            "method":"turn/started","params":{"threadId":"thread-parent","turn":{"id":"turn-plan","items":[],"status":"inProgress","error":null}}
+        }))
+        .expect("started notification should parse");
+        assert_eq!(
+            policy.admit_server_notification(&started).await,
+            ServerNotificationDisposition::Forward
+        );
+        let completed = serde_json::from_value(json!({
+            "method":"turn/completed","params":{"threadId":"thread-parent","turn":{"id":"turn-plan","items":[{"type":"plan","id":"plan-1","text":"Use typed effects."}],"status":"completed","error":null}}
+        }))
+        .expect("completed notification should parse");
+        assert_eq!(
+            policy.admit_server_notification(&completed).await,
+            ServerNotificationDisposition::Forward
+        );
+
+        policy
+            .admit_builtin_plan_decision(&BuiltinPlanDecisionRequest {
+                decision: BuiltinPlanDecision::Cancel,
+                implementation_prompt: None,
+            })
+            .await
+            .expect("native cancellation must publish before dismissal");
+
+        let store = tiber_store_git::TiberEventStore::open(&fixture.repository)
+            .expect("cancelled authority should reopen");
+        let events = crate::read_session_events(&store).expect("session history should read");
+        assert!(matches!(
+            tiber_session_service::project_plan_restart_state(&events),
+            Ok(tiber_session_service::PlanRestartState::Decided {
+                decision: tiber_session_service::PlanDecision::Cancelled,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the side-turn acceptance scenario keeps parent and child lifecycle assertions in one coherent test"
+    )]
+    async fn native_side_fork_uses_parent_authority_and_closes_its_child_stream() {
+        let fixture = DurableFixture::new();
+        let policy = TiberHostPolicy::new(fixture.repository.clone());
+        let parent: ClientRequest = serde_json::from_value(json!({
+            "method":"turn/start", "id":0,
+            "params":{"threadId":"thread-parent","input":[{"type":"text","text":"parent work","textElements":[]}]}
+        }))
+        .expect("parent turn should parse");
+        policy
+            .admit_client_request(parent)
+            .await
+            .expect("ordinary parent should remain active");
+        let parent_started = serde_json::from_value(json!({
+            "method":"turn/started","params":{"threadId":"thread-parent","turn":{"id":"turn-parent","items":[],"status":"inProgress","error":null}}
+        }))
+        .expect("parent started notification should parse");
+        assert_eq!(
+            policy.admit_server_notification(&parent_started).await,
+            ServerNotificationDisposition::Forward
+        );
+        policy
+            .admit_builtin_slash_command(&BuiltinSlashCommandRequest {
+                command: BuiltinSlashCommand::Side,
+                args: "answer separately".to_owned(),
+                thread_id: Some("thread-parent".to_owned()),
+            })
+            .await
+            .expect("side slash should admit");
+        let fork: ClientRequest = serde_json::from_value(json!({
+            "method":"thread/fork", "id":1, "params":{"threadId":"thread-parent"}
+        }))
+        .expect("thread fork should parse");
+        policy
+            .admit_client_request(fork)
+            .await
+            .expect("exact parent fork should retain authority");
+        let request: ClientRequest = serde_json::from_value(json!({
+            "method":"turn/start", "id":2,
+            "params":{"threadId":"thread-child","input":[{"type":"text","text":"answer separately","textElements":[]}]}
+        }))
+        .expect("child turn should parse");
+        policy
+            .admit_client_request(request)
+            .await
+            .expect("isolated request must publish before inference");
+        let started = serde_json::from_value(json!({
+            "method":"turn/started","params":{"threadId":"thread-child","turn":{"id":"turn-side","items":[],"status":"inProgress","error":null}}
+        }))
+        .expect("started notification should parse");
+        assert_eq!(
+            policy.admit_server_notification(&started).await,
+            ServerNotificationDisposition::Forward
+        );
+        let completed = serde_json::from_value(json!({
+            "method":"turn/completed","params":{"threadId":"thread-child","turn":{"id":"turn-side","items":[{"type":"agentMessage","id":"message-1","text":"isolated answer"}],"status":"completed","error":null}}
+        }))
+        .expect("completed notification should parse");
+        assert_eq!(
+            policy.admit_server_notification(&completed).await,
+            ServerNotificationDisposition::Forward
+        );
+
+        let store = tiber_store_git::TiberEventStore::open(&fixture.repository)
+            .expect("authority should reopen");
+        let stream = store
+            .stream_ids()
+            .iter()
+            .find(|stream| stream.as_ref().starts_with("tiber:session:isolated:"))
+            .expect("isolated child stream should exist")
+            .clone();
+        let pattern = eventcore_types::StreamPattern::try_new(stream.as_ref().to_owned())
+            .expect("isolated stream pattern should parse");
+        let history = store
+            .verified_transaction_reader::<tiber_session_service::IsolatedTurnEvent>(&[pattern])
+            .expect("isolated history should verify")
+            .read_page(tiber_store_git::TransactionEventPage::first(
+                eventcore_types::BatchSize::new(5),
+            ))
+            .expect("isolated history should read");
+        assert!(matches!(
+            history
+                .first()
+                .map(tiber_session_service::IsolatedTurnEvent::fact),
+            Some(tiber_session_service::IsolatedTurnFact::Opened {
+                kind: IsolatedTurnKind::Side,
+                ..
+            })
+        ));
+        assert!(matches!(
+            history
+                .last()
+                .map(tiber_session_service::IsolatedTurnEvent::fact),
+            Some(tiber_session_service::IsolatedTurnFact::Closed)
+        ));
+        let turns = policy
+            .turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(turns.contains_key("thread-parent"));
+        assert!(!turns.contains_key("thread-child"));
+        assert_eq!(
+            turns
+                .get("thread-parent")
+                .and_then(|turn| turn.turn_id.as_deref()),
+            Some("turn-parent")
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_interrupts_and_closes_an_unfinished_isolated_turn_without_replay() {
+        let fixture = DurableFixture::new();
+        let repository = fixture.repository.clone();
+        let stream = tokio::task::spawn_blocking(move || {
+            let (_binding, _events) =
+                crate::ensure_started_session(&repository).expect("active session should start");
+            crate::publish_isolated_prompt_request(
+                &repository,
+                IsolatedTurnKind::Btw,
+                "unfinished aside",
+            )
+            .expect("isolated request should publish")
+        })
+        .await
+        .expect("isolated setup should join");
+        let restarted = TiberHostPolicy::new(fixture.repository.clone());
+        let request: ClientRequest = serde_json::from_value(json!({
+            "method":"turn/start", "id":1,
+            "params":{"threadId":"thread-parent","input":[{"type":"text","text":"continue after restart","textElements":[]}]}
+        }))
+        .expect("restart turn should parse");
+        restarted
+            .admit_client_request(request)
+            .await
+            .expect("restart recovery should close without replay before ordinary admission");
+        let store = tiber_store_git::TiberEventStore::open(&fixture.repository)
+            .expect("recovered authority should open");
+        let pattern = eventcore_types::StreamPattern::try_new(stream.as_ref().to_owned())
+            .expect("isolated stream pattern should parse");
+        let history = store
+            .verified_transaction_reader::<tiber_session_service::IsolatedTurnEvent>(&[pattern])
+            .expect("isolated history should verify")
+            .read_page(tiber_store_git::TransactionEventPage::first(
+                eventcore_types::BatchSize::new(5),
+            ))
+            .expect("isolated history should read");
+        assert!(history.iter().any(|event| matches!(
+            event.fact(),
+            tiber_session_service::IsolatedTurnFact::InferenceInterrupted { .. }
+        )));
+        assert!(matches!(
+            history
+                .last()
+                .map(tiber_session_service::IsolatedTurnEvent::fact),
+            Some(tiber_session_service::IsolatedTurnFact::Closed)
+        ));
+    }
+
     #[test]
     fn effect_gate_denies_native_effects_and_non_tiber_tools() {
         let gate = TiberEffectGate;
@@ -1597,5 +2316,53 @@ stderr-bytes = 4096
                 .await,
             ServerRequestDisposition::Resolve(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn plan_and_isolated_turns_deny_every_tiber_dynamic_tool() {
+        let policy =
+            TiberHostPolicy::with_admission(Arc::new(RecordingAdmission(AtomicBool::new(false))));
+        {
+            let mut turns = policy
+                .turns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            turns.insert(
+                "plan-thread".to_owned(),
+                AdmittedTurn {
+                    authority: TurnAuthority::Plan,
+                    cancellation: NativeProcessCancellation::default(),
+                    turn_id: Some("plan-turn".to_owned()),
+                },
+            );
+            turns.insert(
+                "side-thread".to_owned(),
+                AdmittedTurn {
+                    authority: TurnAuthority::Isolated(
+                        eventcore_types::StreamId::try_new(
+                            "tiber:session:isolated:test".to_owned(),
+                        )
+                        .expect("test stream should parse"),
+                    ),
+                    cancellation: NativeProcessCancellation::default(),
+                    turn_id: Some("side-turn".to_owned()),
+                },
+            );
+        };
+        for (thread_id, turn_id) in [("plan-thread", "plan-turn"), ("side-thread", "side-turn")] {
+            for tool in TIBER_TOOL_NAMES {
+                let request: ServerRequest = serde_json::from_value(json!({
+                    "method":"item/tool/call", "id":1,
+                    "params":{"threadId":thread_id,"turnId":turn_id,"callId":"call-1","namespace":null,"tool":tool,"arguments":{}}
+                }))
+                .expect("dynamic tool should parse");
+                let ServerRequestDisposition::Reject(error) =
+                    policy.intercept_server_request(&request).await
+                else {
+                    panic!("non-ordinary turn must reject every Tiber tool");
+                };
+                assert_eq!(error.message, "tiber_dynamic_tool_mode_unauthorized");
+            }
+        }
     }
 }
