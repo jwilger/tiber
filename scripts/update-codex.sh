@@ -78,11 +78,11 @@ pins_are_current() {
   [[ $remote_fork == "$recorded_fork" ]] || return 1
   git -C "$codex_clone" merge-base --is-ancestor "$upstream_commit" "$remote_fork" || return 1
   verify_signature "$remote_fork"
-  rg -q --fixed-strings "rev = \"$remote_fork\"" crates/tiber-cli/Cargo.toml || return 1
-  ! rg -n 'github.com/jwilger/codex\.git.*rev = ' crates/tiber-cli/Cargo.toml |
-    rg -v --fixed-strings "rev = \"$remote_fork\"" >/dev/null || return 1
-  rg -q --fixed-strings "?rev=$remote_fork#$remote_fork" Cargo.lock || return 1
-  rg -q --fixed-strings "outputHashes.\"$recorded_hash_key\" = \"$recorded_hash\"" flake.nix || return 1
+  grep -Fq "rev = \"$remote_fork\"" crates/tiber-cli/Cargo.toml || return 1
+  ! grep -En 'github.com/jwilger/codex\.git.*rev = ' crates/tiber-cli/Cargo.toml |
+    grep -Fv "rev = \"$remote_fork\"" >/dev/null || return 1
+  grep -Fq "?rev=$remote_fork#$remote_fork" Cargo.lock || return 1
+  grep -Fq "outputHashes.\"$recorded_hash_key\" = \"$recorded_hash\"" flake.nix || return 1
 }
 
 if pins_are_current; then
@@ -118,7 +118,7 @@ cargo test -p codex-tui --lib slash_side_requests_forked_side_question_while_tas
 cargo test -p codex-tui --lib slash_btw_requests_forked_side_question_while_task_running &&
 cargo test -p codex-tui --lib plan_implementation_popup_yes_emits_submit_message_event &&
 cargo test -p codex-tui --lib plan_implementation_popup_stay_emits_typed_cancel'}
-(cd "$codex_clone/codex-rs" && bash -lc "$fork_check") || die 'focused Codex fork checks failed'
+(cd "$codex_clone/codex-rs" && bash -c "$fork_check") || die 'focused Codex fork checks failed'
 if ! git -C "$codex_clone" diff --cached --quiet; then
   commit_signing=(--gpg-sign)
   if [[ ${TIBER_CODEX_TEST_MODE:-0} == 1 ]]; then
@@ -161,7 +161,7 @@ sed -i -E \
   codex-source.toml
 
 tiber_check=${TIBER_CODEX_TIBER_CHECK:-'cargo test -p tiber --test embedded_runtime bare_tiber_launches_embedded_codex_without_invoking_path_codex && nix build --no-link .#checks.x86_64-linux.package-smoke'}
-bash -lc "$tiber_check" || die 'focused embedded-interface or package checks failed'
+bash -c "$tiber_check" || die 'focused embedded-interface or package checks failed'
 
 printf 'Updated Tiber from %s to %s at signed fork commit %s.\n' "$recorded_tag" "$stable_tag" "$new_fork"
 completed=true

@@ -142,7 +142,12 @@ fi
 printf '%s\n' '       got:    sha256-updated=' >&2
 exit 1
 EOF
-chmod +x "$stub_bin/cargo" "$stub_bin/nix"
+cat > "$stub_bin/rg" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'update-codex must not require ripgrep at runtime' >&2
+exit 99
+EOF
+chmod +x "$stub_bin/cargo" "$stub_bin/nix" "$stub_bin/rg"
 command_log="$fixture_root/update-commands.log"
 : > "$command_log"
 
