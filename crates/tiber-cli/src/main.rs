@@ -239,7 +239,7 @@ fn load_configured_process_catalog(
     clippy::print_stderr,
     reason = "the executable boundary reports embedded startup failures before exiting"
 )]
-fn run_native_codex_tui() {
+fn run_native_codex_tui(arg0_paths: codex_arg0::Arg0DispatchPaths) {
     // The next authority-integration increment ports this preserved policy boundary
     // onto the embedded host hooks; retaining the function item keeps that domain
     // implementation compiled without starting its obsolete socket transport.
@@ -259,7 +259,7 @@ fn run_native_codex_tui() {
     runtime
         .block_on(codex_tui::run_main(
             cli,
-            codex_arg0::Arg0DispatchPaths::default(),
+            arg0_paths,
             codex_config::LoaderOverrides::default(),
             None,
         ))
@@ -908,10 +908,22 @@ fn native_task_failure(code: &str) -> serde_json::Value {
     reason = "a command-line adapter intentionally writes its result and diagnostics"
 )]
 fn main() {
+    let arg0_guard = codex_arg0::arg0_dispatch();
+    let current_exe = env::current_exe().ok();
+    let arg0_paths = codex_arg0::Arg0DispatchPaths {
+        codex_self_exe: current_exe.clone(),
+        codex_linux_sandbox_exe: arg0_guard
+            .as_ref()
+            .and_then(|guard| guard.paths().codex_linux_sandbox_exe.clone())
+            .or(current_exe),
+        main_execve_wrapper_exe: arg0_guard
+            .as_ref()
+            .and_then(|guard| guard.paths().main_execve_wrapper_exe.clone()),
+    };
     let mut arguments = env::args_os();
     let _executable = arguments.next();
     let Some(command) = arguments.next() else {
-        run_native_codex_tui();
+        run_native_codex_tui(arg0_paths);
         return;
     };
     match command.to_string_lossy().as_ref() {

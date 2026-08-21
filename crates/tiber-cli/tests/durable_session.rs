@@ -12,7 +12,10 @@ mod tests {
     use std::{
         env, fs,
         io::Write as _,
-        os::unix::fs::{PermissionsExt as _, symlink},
+        os::unix::{
+            fs::{PermissionsExt as _, symlink},
+            process::CommandExt as _,
+        },
         path::{Path, PathBuf},
         process::{Child, Command, Output, Stdio},
         thread,
@@ -23,6 +26,7 @@ mod tests {
     use eventcore_types::{
         BatchSize, EventStore as _, StreamId, StreamPattern, StreamVersion, StreamWrites,
     };
+    use rustix::process::{Pid, Signal, kill_process_group};
     use serde_json::Value;
     use tempfile::TempDir;
     use tiber_repository_core::Sha256Digest;
@@ -41,6 +45,34 @@ mod tests {
     use tiber_workflow_service::{WorkflowEvent, WorkflowFact};
 
     const TASK_PREFIX: &str = "session-fixture";
+
+    /// Owns a dedicated process group and reaps its direct child on every exit path.
+    struct ProcessGroupChild {
+        /// Direct child leading the dedicated process group.
+        child: Option<Child>,
+    }
+
+    impl ProcessGroupChild {
+        /// Borrows the direct child for bounded status observation.
+        fn child_mut(&mut self) -> &mut Child {
+            self.child.as_mut().expect("process-group child is live")
+        }
+
+        /// Terminates every process in the group and reaps the direct child.
+        fn terminate(&mut self) {
+            let Some(mut child) = self.child.take() else {
+                return;
+            };
+            let _kill_result = kill_process_group(Pid::from_child(&child), Signal::KILL);
+            let _wait_result = child.wait();
+        }
+    }
+
+    impl Drop for ProcessGroupChild {
+        fn drop(&mut self) {
+            self.terminate();
+        }
+    }
 
     #[expect(
         clippy::arbitrary_source_item_ordering,
@@ -563,6 +595,84 @@ mod tests {
             output.status.success() || stderr.starts_with("codex_tui_start_failed:"),
             "bare Tiber did not reach the embedded TUI boundary: {stderr}",
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the PTY regression must report the rendered startup boundary when Codex exits early"
+    )]
+    fn embedded_codex_stays_running_past_arg0_runtime_initialization() {
+        let fixture = HarnessFixture::new();
+        let capture = fixture.repository.join("embedded-codex-terminal.txt");
+        let hostile_invocation = fixture.repository.join("hostile-codex-invoked");
+        let hostile_codex = fixture.codex_directory.join("codex");
+        fs::write(
+            &hostile_codex,
+            format!(
+                "#!/bin/sh\nprintf invoked > '{}'\nexit 73\n",
+                hostile_invocation.display()
+            ),
+        )
+        .expect("hostile Codex fixture should be written");
+        fs::set_permissions(&hostile_codex, fs::Permissions::from_mode(0o755))
+            .expect("hostile Codex fixture should be executable");
+
+        let mut command = Command::new("script");
+        command
+            .process_group(0)
+            .args([
+                "--quiet",
+                "--flush",
+                "--return",
+                "--command",
+                &format!("stty rows 24 cols 80; {}", env!("CARGO_BIN_EXE_tiber")),
+            ])
+            .arg(&capture)
+            .current_dir(&fixture.repository)
+            .env("PATH", fixture.path())
+            .env("XDG_STATE_HOME", &fixture.state_home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = ProcessGroupChild {
+            child: Some(command.spawn().expect("embedded Codex PTY should start")),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let rendered = fs::read_to_string(&capture).unwrap_or_default();
+            if rendered.contains("OpenAI Codex") {
+                break;
+            }
+            if child
+                .child_mut()
+                .try_wait()
+                .expect("embedded Codex status should remain readable")
+                .is_some()
+            {
+                panic!("embedded Codex exited during startup: {rendered}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "embedded Codex did not render its startup boundary: {rendered}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(500));
+        let rendered = fs::read_to_string(&capture).unwrap_or_default();
+        let early_status = child
+            .child_mut()
+            .try_wait()
+            .expect("embedded Codex status should remain readable");
+
+        child.terminate();
+
+        assert!(
+            early_status.is_none(),
+            "embedded Codex exited after rendering startup: {rendered}"
+        );
+        assert!(!rendered.contains("Codex executable path is not configured"));
+        assert!(!hostile_invocation.exists());
     }
 
     #[test]
