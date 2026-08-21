@@ -1,0 +1,11 @@
+# Reviewed provenance for the Codex source embedded into Tiber.
+upstream_repository = "https://github.com/openai/codex.git"
+fork_repository = "git@github.com:jwilger/codex.git"
+fork_push_repository = "git@github.com:jwilger/codex.git"
+cargo_repository = "https://github.com/jwilger/codex.git"
+stable_tag = "rust-v0.148.0"
+upstream_commit = "3ba0f711642a888aec92a611a3f3b2211157ff89"
+fork_branch = "tiber-support"
+fork_commit = "fd8255394e41c3c95b9a242cc32f4a9639eba721"
+nix_output_hash_key = "codex-agent-extension-0.148.0"
+nix_output_hash = "sha256-g288ZJaf7hNUqJQ7hpVHWcVBZIbkrIRUDFz+k9QYQoE="

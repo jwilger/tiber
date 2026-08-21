@@ -8,7 +8,7 @@ default: ci
 ci: code-quality package
 
 # Runs the source and behavior gates without constructing the Nix package.
-code-quality: actionlint lint-policy format clippy test
+code-quality: actionlint lint-policy format clippy test update-codex-test
 
 actionlint:
     actionlint
@@ -31,3 +31,11 @@ package:
     cargo clean --target-dir target/tiber
     nix build --no-link .#tiber
     nix build --no-link .#checks.x86_64-linux.package-smoke
+
+# Update the signed embedded Codex fork and Tiber's reproducible source pins.
+update-codex:
+    scripts/update-codex.sh
+
+# Exercise updater decisions without network access or remote mutation.
+update-codex-test:
+    scripts/tests/update-codex.test.sh
