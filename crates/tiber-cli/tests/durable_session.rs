@@ -562,6 +562,8 @@ mod tests {
     #[test]
     fn bare_tiber_launches_embedded_codex_without_invoking_path_codex() {
         let fixture = HarnessFixture::new();
+        let codex_home = fixture.state_home.join("codex");
+        fs::create_dir_all(&codex_home).expect("isolated Codex home should be created");
         let hostile_invocation = fixture.repository.join("hostile-codex-invoked");
         let hostile_codex = fixture.codex_directory.join("codex");
         fs::write(
@@ -577,6 +579,7 @@ mod tests {
 
         let output = Command::new(env!("CARGO_BIN_EXE_tiber"))
             .current_dir(&fixture.repository)
+            .env("CODEX_HOME", &codex_home)
             .env("PATH", fixture.path())
             .env("XDG_STATE_HOME", &fixture.state_home)
             .output()
@@ -604,6 +607,8 @@ mod tests {
     )]
     fn embedded_codex_stays_running_past_arg0_runtime_initialization() {
         let fixture = HarnessFixture::new();
+        let codex_home = fixture.state_home.join("codex");
+        fs::create_dir_all(&codex_home).expect("isolated Codex home should be created");
         let capture = fixture.repository.join("embedded-codex-terminal.txt");
         let hostile_invocation = fixture.repository.join("hostile-codex-invoked");
         let hostile_codex = fixture.codex_directory.join("codex");
@@ -630,6 +635,7 @@ mod tests {
             ])
             .arg(&capture)
             .current_dir(&fixture.repository)
+            .env("CODEX_HOME", &codex_home)
             .env("PATH", fixture.path())
             .env("XDG_STATE_HOME", &fixture.state_home)
             .stdin(Stdio::null())
@@ -641,7 +647,9 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let rendered = fs::read_to_string(&capture).unwrap_or_default();
-            if rendered.contains("OpenAI Codex") {
+            if rendered.contains("OpenAI Codex")
+                || (rendered.contains("Welcome") && rendered.contains("Codex"))
+            {
                 break;
             }
             if child

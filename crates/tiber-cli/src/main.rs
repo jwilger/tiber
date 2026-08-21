@@ -249,6 +249,7 @@ fn run_native_codex_tui(arg0_paths: codex_arg0::Arg0DispatchPaths) {
         native_dynamic_tools,
     ));
     let runtime = RuntimeBuilder::new_multi_thread()
+        .thread_stack_size(16 * 1024 * 1024)
         .enable_all()
         .build()
         .unwrap_or_else(|error| {
