@@ -5,7 +5,10 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 default: ci
 
 # Mirrors the required CI checks. No networked model or provider runner belongs here.
-ci: actionlint lint-policy format clippy test authority-fixture package
+ci: code-quality package
+
+# Runs the source and behavior gates without constructing the Nix package.
+code-quality: actionlint lint-policy format clippy test authority-fixture
 
 actionlint:
     actionlint

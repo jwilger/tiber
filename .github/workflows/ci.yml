@@ -39,16 +39,39 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Run required checks
-        run: nix develop --accept-flake-config -c just ci
+        run: nix develop --accept-flake-config -c just code-quality
+
+  package:
+    name: Reproducible package gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build package and smoke check
+        run: |
+          nix build --accept-flake-config --no-link .#tiber
+          nix build --accept-flake-config --no-link .#checks.x86_64-linux.package-smoke
 
   gate:
     name: CI gate
     runs-on: ubuntu-24.04
-    needs: [quality]
+    needs: [package, quality]
     if: always()
     steps:
       - name: Require the quality gate
         run: |
-          result="${{ needs.quality.result }}"
-          echo "quality result: $result"
-          test "$result" = success
+          package_result="${{ needs.package.result }}"
+          quality_result="${{ needs.quality.result }}"
+          echo "package result: $package_result"
+          echo "quality result: $quality_result"
+          test "$package_result" = success
+          test "$quality_result" = success
