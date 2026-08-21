@@ -12,6 +12,7 @@ git_env=(
   GIT_COMMITTER_NAME='Tiber Test'
   GIT_COMMITTER_EMAIL='tiber-test@example.invalid'
 )
+export "${git_env[@]}"
 
 commit_file() {
   local repository=$1 path=$2 content=$3 message=$4
