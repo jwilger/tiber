@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -61,6 +61,20 @@ function parseMessages(output: string): readonly RpcMessage[] {
       const parsed: unknown = JSON.parse(line);
       return toRpcMessage(parsed);
     });
+}
+
+function packageVersion(root: string): string {
+  const parsed: unknown = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8"),
+  );
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("package metadata is not an object");
+  }
+  const version: unknown = Reflect.get(parsed, "version");
+  if (typeof version !== "string") {
+    throw new Error("package metadata has no version");
+  }
+  return version;
 }
 
 function packedFilename(value: unknown): string | undefined {
@@ -176,7 +190,9 @@ describe("the packed stock-Pi package", () => {
       (message) =>
         message.type === "extension_ui_request" && message.method === "notify",
     );
-    expect(notification?.message).toContain("@jwilger/tiber 0.0.0");
+    expect(notification?.message).toContain(
+      `@jwilger/tiber ${packageVersion(root)}`,
+    );
     expect(notification?.message).toContain("Mode: read-only-bootstrap");
     expect(notification?.message).toContain(`Repository: ${workspace}`);
   }, 30_000);
