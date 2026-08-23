@@ -12,7 +12,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { GitTaskRemote } from "../../src/adapters/tasks/git-task-remote.js";
-import type { TaskCreatedEvent } from "../../src/core/tasks/task-board.js";
+import type {
+  TaskCreatedEvent,
+  TaskReadyEvent,
+  TaskSpecifiedEvent,
+} from "../../src/core/tasks/task-board.js";
+import {
+  digestTaskSpecification,
+  type TaskSpecification,
+} from "../../src/core/tasks/readiness.js";
 
 const temporaryDirectories: string[] = [];
 afterEach(() => {
@@ -91,6 +99,54 @@ describe("signed shared task ref", () => {
       "Left",
       "Right",
     ]);
+
+    const specification: TaskSpecification = {
+      outcome: "Move Left to Ready",
+      scenarios: [
+        {
+          name: "ready",
+          given: ["specified"],
+          when: ["reviewed"],
+          then: ["Ready"],
+        },
+      ],
+      acceptanceCriteria: ["shared state"],
+      exclusions: ["no claim"],
+      dependencies: [],
+      testMappings: ["shared-task-ref.test.ts"],
+      architectureImplications: "Signed review evidence remains deterministic.",
+    };
+    const digest = digestTaskSpecification(specification);
+    const specified: TaskSpecifiedEvent = {
+      schemaVersion: 1,
+      eventId: "00000000-0000-4000-8000-000000000001",
+      kind: "task-specified",
+      occurredAt: "2026-08-23T00:01:00.000Z",
+      taskId: "22222222-2222-4222-8222-222222222222",
+      specificationDigest: digest,
+      specification,
+    };
+    expect(new GitTaskRemote(clones[0] ?? "").publish(specified).mode).toBe(
+      "writable",
+    );
+    const readyEvent: TaskReadyEvent = {
+      schemaVersion: 1,
+      eventId: "00000000-0000-4000-8000-000000000002",
+      kind: "task-ready",
+      occurredAt: "2026-08-23T00:02:00.000Z",
+      taskId: specified.taskId,
+      specificationDigest: digest,
+      review: {
+        freshContext: true,
+        reviewerRole: "specification-reviewer",
+        findingCount: 0,
+        reviewedSpecificationDigest: digest,
+      },
+    };
+    const readyBoard = new GitTaskRemote(clones[1] ?? "").publish(readyEvent);
+    expect(
+      readyBoard.tasks.find((task) => task.id === specified.taskId)?.state,
+    ).toBe("Ready");
 
     const attacker = join(root, "attacker");
     git(root, ["clone", "--quiet", remote, attacker]);

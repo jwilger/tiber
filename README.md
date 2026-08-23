@@ -65,7 +65,11 @@ Shared Backlog tasks are append-only signed events on
 retries from the newly observed head after a race; it never force-pushes.
 Malformed events or any unsigned/invalid commit degrade the board read-only.
 Git signing identity and SSH allowed-signers configuration are taken from the
-repository's local Git configuration.
+repository's local Git configuration. A task can receive a canonical structured
+specification with `/tiber:task specify <id> <base64url-json>`. Running
+`/tiber:task ready <id>` creates a fresh, tool-free in-process reviewer session
+with a 60-second and 4096-output-token budget; only an exact-schema, finding-free
+review of the pinned specification digest can publish Ready.
 
 ## Status and architecture
 
