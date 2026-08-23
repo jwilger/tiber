@@ -6,6 +6,7 @@ import {
   formatDoctorReport,
 } from "../core/doctor/report.js";
 import { readPackageVersion } from "./package-version.js";
+import { handleSettingsCommand } from "./settings-command.js";
 
 export default function registerTiber(pi: ExtensionAPI): void {
   const packageVersion = readPackageVersion();
@@ -22,6 +23,11 @@ export default function registerTiber(pi: ExtensionAPI): void {
       context.ui.notify(formatDoctorReport(report), "info");
       return Promise.resolve();
     },
+  });
+
+  pi.registerCommand("tiber:settings", {
+    description: "Inspect or edit inherited Tiber settings",
+    handler: handleSettingsCommand,
   });
 
   pi.on("session_start", (_event, context) => {
