@@ -12,15 +12,18 @@ import {
 } from "../core/containment/containment.js";
 import { applyAssuranceCeiling } from "../core/configuration/authority.js";
 import { authorizeBootstrapTool } from "../core/doctor/bootstrap-policy.js";
+import { verifyToolInventory } from "../core/tools/tool-policy.js";
 import {
   createDoctorReport,
   formatDoctorReport,
 } from "../core/doctor/report.js";
+import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
 import { handleSettingsCommand } from "./settings-command.js";
 
 export default function registerTiber(pi: ExtensionAPI): void {
   const packageVersion = readPackageVersion();
+  registerGovernedTools(pi);
   let containment: ContainmentStatus = {
     state: "lockdown",
     level: "host-trusted",
@@ -56,6 +59,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", (_event, context) => {
+    pi.setActiveTools(["read", "bash", "edit", "write"]);
     const agentDirectory = getAgentDir();
     const settings = new FileSettingsStore(agentDirectory, context.cwd).load();
     const authority = new FileAuthorityStore(agentDirectory).load();
@@ -80,6 +84,15 @@ export default function registerTiber(pi: ExtensionAPI): void {
         context.cwd,
         agentDirectory,
       );
+      const inventory = verifyToolInventory(pi.getActiveTools());
+      if (effective !== "host-trusted" && !inventory.allowed) {
+        containment = {
+          state: "lockdown",
+          level: effective,
+          code: inventory.code,
+          detail: inventory.detail,
+        };
+      }
     }
     context.ui.setStatus(
       "tiber",
@@ -90,6 +103,17 @@ export default function registerTiber(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", (_event, context) => {
+    if (containment.level !== "host-trusted") {
+      const inventory = verifyToolInventory(pi.getActiveTools());
+      if (!inventory.allowed) {
+        containment = {
+          state: "lockdown",
+          level: containment.level,
+          code: inventory.code,
+          detail: inventory.detail,
+        };
+      }
+    }
     if (containment.state === "lockdown") {
       context.abort();
       context.ui.notify(formatContainment(containment), "error");
