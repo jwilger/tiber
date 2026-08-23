@@ -34,7 +34,7 @@ Load it from this checkout:
 pi -e ./dist/extension/index.js
 ```
 
-Then run `/tiber:doctor` or `/tiber:settings`.
+Then run `/tiber:doctor`, `/tiber:settings`, or `/tiber:containment`.
 
 Headless settings inspection and editing are also available:
 
@@ -50,7 +50,11 @@ Headless settings inspection and editing are also available:
 
 Global assurance locks prevent project settings from broadening authority.
 Secret settings persist only external environment-variable references, never
-secret values.
+secret values. Strong assurance levels require a signed external attestation
+in `.tiber/containment-attestation.json`, a trusted verifier key in the private
+Pi agent directory, and Linux namespace corroboration. Any missing, invalid,
+mismatched, or expired evidence enters containment lockdown before provider
+or tool dispatch while diagnostics remain available.
 
 ## Status and architecture
 
