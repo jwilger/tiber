@@ -6,6 +6,8 @@ import {
   parseTaskCreatedEvent,
   parseTaskEvent,
   type TaskCreatedEvent,
+  type TaskClaimedEvent,
+  type TaskClaimReleasedEvent,
   type TaskReadyEvent,
   type TaskSpecifiedEvent,
 } from "../../src/core/tasks/task-board.js";
@@ -94,6 +96,174 @@ const ready: TaskReadyEvent = {
     reviewedSpecificationDigest: digest,
   },
 };
+
+const claimed: TaskClaimedEvent = {
+  schemaVersion: 1,
+  eventId: "55555555-5555-4555-8555-555555555555",
+  kind: "task-claimed",
+  occurredAt: event.occurredAt,
+  taskId: event.task.id,
+  specificationDigest: digest,
+  claim: {
+    claimId: "66666666-6666-4666-8666-666666666666",
+    owner: "developer@example.test",
+    baselineRevision: "a".repeat(40),
+    workflowDigest: `sha256:${"b".repeat(64)}`,
+  },
+};
+const released: TaskClaimReleasedEvent = {
+  schemaVersion: 1,
+  eventId: "77777777-7777-4777-8777-777777777777",
+  kind: "task-claim-released",
+  occurredAt: event.occurredAt,
+  taskId: event.task.id,
+  specificationDigest: digest,
+  claimId: claimed.claim.claimId,
+  reason: "baseline-drift",
+};
+
+describe("exclusive claims", () => {
+  const created = parseTaskCreatedEvent(event);
+  if (created === undefined) throw new Error("fixture must parse");
+
+  it("parses, publishes, and releases one state-bound claim", () => {
+    expect(parseTaskEvent(claimed)).toEqual(claimed);
+    expect(
+      parseTaskEvent({
+        ...claimed,
+        claim: { ...claimed.claim, owner: "  developer@example.test  " },
+      }),
+    ).toEqual(claimed);
+    expect(parseTaskEvent(released)).toEqual(released);
+    expect(parseTaskEvent({ ...released, reason: "released" })).toEqual({
+      ...released,
+      reason: "released",
+    });
+    expect(parseTaskEvent({ ...released, reason: "completed" })).toEqual({
+      ...released,
+      reason: "completed",
+    });
+    const inProgress = foldTaskEvents([created, specified, ready, claimed]);
+    expect(inProgress.tasks[0]).toMatchObject({
+      state: "In Progress",
+      claim: claimed.claim,
+    });
+    const backToReady = foldTaskEvents([
+      created,
+      specified,
+      ready,
+      claimed,
+      released,
+    ]);
+    expect(backToReady.tasks[0]).toEqual({
+      id: created.task.id,
+      title: created.task.title,
+      description: created.task.description,
+      state: "Ready",
+      blocked: false,
+      specification,
+      specificationDigest: digest,
+    });
+  });
+
+  it("denies a second, stale, or mismatched claim transition", () => {
+    const duplicateClaim = foldTaskEvents([
+      created,
+      specified,
+      ready,
+      claimed,
+      { ...claimed, eventId: "88888888-8888-4888-8888-888888888888" },
+    ]);
+    expect(duplicateClaim.tasks).toHaveLength(1);
+    expect(duplicateClaim).toMatchObject({
+      mode: "degraded-read-only",
+      failure: "task claim is not exclusive or state-bound",
+    });
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        ready,
+        { ...claimed, specificationDigest: `sha256:${"c".repeat(64)}` },
+      ]),
+    ).toMatchObject({ mode: "degraded-read-only" });
+    const releaseWithoutClaim = foldTaskEvents([
+      created,
+      specified,
+      ready,
+      released,
+    ]);
+    expect(releaseWithoutClaim.tasks).toHaveLength(1);
+    expect(releaseWithoutClaim).toMatchObject({
+      mode: "degraded-read-only",
+      failure: "task claim release does not match the active claim",
+    });
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        ready,
+        claimed,
+        { ...released, claimId: "99999999-9999-4999-8999-999999999999" },
+      ]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: "task claim release does not match the active claim",
+    });
+  });
+
+  it.each([
+    { ...claimed, kind: "unknown" },
+    { ...claimed, claim: null },
+    { ...claimed, claim: { ...claimed.claim, claimId: "bad" } },
+    {
+      ...claimed,
+      claim: { ...claimed.claim, claimId: `x${claimed.claim.claimId}` },
+    },
+    {
+      ...claimed,
+      claim: { ...claimed.claim, claimId: `${claimed.claim.claimId}x` },
+    },
+    { ...claimed, claim: { ...claimed.claim, owner: " " } },
+    { ...claimed, claim: { ...claimed.claim, owner: 1 } },
+    { ...claimed, claim: { ...claimed.claim, baselineRevision: "bad" } },
+    {
+      ...claimed,
+      claim: {
+        ...claimed.claim,
+        baselineRevision: `x${claimed.claim.baselineRevision}`,
+      },
+    },
+    {
+      ...claimed,
+      claim: {
+        ...claimed.claim,
+        baselineRevision: `${claimed.claim.baselineRevision}x`,
+      },
+    },
+    { ...claimed, claim: { ...claimed.claim, workflowDigest: "bad" } },
+    {
+      ...claimed,
+      claim: {
+        ...claimed.claim,
+        workflowDigest: `x${claimed.claim.workflowDigest}`,
+      },
+    },
+    {
+      ...claimed,
+      claim: {
+        ...claimed.claim,
+        workflowDigest: `${claimed.claim.workflowDigest}x`,
+      },
+    },
+    { ...released, claimId: "bad" },
+    { ...released, claimId: `x${released.claimId}` },
+    { ...released, claimId: `${released.claimId}x` },
+    { ...released, reason: "stolen" },
+  ])("rejects malformed claim event %j", (candidate) => {
+    expect(parseTaskEvent(candidate)).toBeUndefined();
+  });
+});
 
 describe("reviewed Ready events", () => {
   it("parses specification and exact clean review events", () => {

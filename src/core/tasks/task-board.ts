@@ -8,6 +8,13 @@ import {
 
 export type TaskState = "Backlog" | "Ready" | "In Progress" | "Done";
 
+export interface TaskClaim {
+  readonly claimId: string;
+  readonly owner: string;
+  readonly baselineRevision: string;
+  readonly workflowDigest: string;
+}
+
 export interface Task {
   readonly id: string;
   readonly title: string;
@@ -16,6 +23,7 @@ export interface Task {
   readonly blocked: boolean;
   readonly specification?: TaskSpecification;
   readonly specificationDigest?: string;
+  readonly claim?: TaskClaim;
 }
 
 export interface TaskCreatedEvent {
@@ -50,7 +58,33 @@ export interface TaskReadyEvent {
   readonly review: ReadinessReview;
 }
 
-export type TaskEvent = TaskCreatedEvent | TaskSpecifiedEvent | TaskReadyEvent;
+export interface TaskClaimedEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: string;
+  readonly kind: "task-claimed";
+  readonly occurredAt: string;
+  readonly taskId: string;
+  readonly specificationDigest: string;
+  readonly claim: TaskClaim;
+}
+
+export interface TaskClaimReleasedEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: string;
+  readonly kind: "task-claim-released";
+  readonly occurredAt: string;
+  readonly taskId: string;
+  readonly specificationDigest: string;
+  readonly claimId: string;
+  readonly reason: "baseline-drift" | "released" | "completed";
+}
+
+export type TaskEvent =
+  | TaskCreatedEvent
+  | TaskSpecifiedEvent
+  | TaskReadyEvent
+  | TaskClaimedEvent
+  | TaskClaimReleasedEvent;
 
 export interface TaskBoard {
   readonly mode: "writable" | "degraded-read-only";
@@ -145,6 +179,59 @@ export function parseTaskEvent(value: unknown): TaskEvent | undefined {
           specification,
         };
   }
+  if (value.kind === "task-claimed" && isRecord(value.claim)) {
+    const claim = value.claim;
+    if (
+      // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects every non-string JSON value and this guard narrows the semantic type.
+      typeof claim.claimId !== "string" ||
+      !/^[0-9a-f-]{36}$/u.test(claim.claimId) ||
+      // Stryker disable next-line ConditionalExpression: trim is only reached after this guard and all non-string values fail the subsequent semantic operation; this guard narrows the type.
+      typeof claim.owner !== "string" ||
+      claim.owner.trim().length === 0 ||
+      // Stryker disable next-line ConditionalExpression: the following SHA grammar rejects every non-string JSON value and this guard narrows the semantic type.
+      typeof claim.baselineRevision !== "string" ||
+      !/^[0-9a-f]{40}$/u.test(claim.baselineRevision) ||
+      // Stryker disable next-line ConditionalExpression: the following digest grammar rejects every non-string JSON value and this guard narrows the semantic type.
+      typeof claim.workflowDigest !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(claim.workflowDigest)
+    )
+      return undefined;
+    return {
+      schemaVersion: 1,
+      eventId: common.eventId,
+      kind: "task-claimed",
+      occurredAt: common.occurredAt,
+      taskId: value.taskId,
+      specificationDigest: value.specificationDigest,
+      claim: {
+        claimId: claim.claimId,
+        owner: claim.owner.trim(),
+        baselineRevision: claim.baselineRevision,
+        workflowDigest: claim.workflowDigest,
+      },
+    };
+  }
+  if (value.kind === "task-claim-released") {
+    if (
+      // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects every non-string JSON value and this guard narrows the semantic type.
+      typeof value.claimId !== "string" ||
+      !/^[0-9a-f-]{36}$/u.test(value.claimId) ||
+      (value.reason !== "baseline-drift" &&
+        value.reason !== "released" &&
+        value.reason !== "completed")
+    )
+      return undefined;
+    return {
+      schemaVersion: 1,
+      eventId: common.eventId,
+      kind: "task-claim-released",
+      occurredAt: common.occurredAt,
+      taskId: value.taskId,
+      specificationDigest: value.specificationDigest,
+      claimId: value.claimId,
+      reason: value.reason,
+    };
+  }
   if (value.kind === "task-ready" && isRecord(value.review)) {
     const review = value.review;
     if (
@@ -217,6 +304,48 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         ...task,
         specification: event.specification,
         specificationDigest: event.specificationDigest,
+      });
+      continue;
+    }
+    if (event.kind === "task-claimed") {
+      if (
+        // Stryker disable next-line ConditionalExpression, LogicalOperator: claim and In Progress state are installed atomically, so either condition independently detects an existing claim; both document the closed state invariant.
+        task.state !== "Ready" ||
+        // Stryker disable next-line ConditionalExpression: claim and In Progress state are installed atomically, so the state check already detects every existing claim; this check documents exclusivity directly.
+        task.claim !== undefined ||
+        task.specificationDigest !== event.specificationDigest
+      ) {
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: "task claim is not exclusive or state-bound",
+        };
+      }
+      tasks.set(task.id, { ...task, state: "In Progress", claim: event.claim });
+      continue;
+    }
+    if (event.kind === "task-claim-released") {
+      if (
+        task.claim?.claimId !== event.claimId ||
+        // Stryker disable next-line ConditionalExpression: a claim can only be installed on a Ready task whose specification and digest are present; this restates that fold invariant before reconstruction.
+        task.specification === undefined ||
+        // Stryker disable next-line ConditionalExpression: a claim can only be installed on a Ready task whose specification and digest are present; this restates that fold invariant before reconstruction.
+        task.specificationDigest === undefined
+      ) {
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: "task claim release does not match the active claim",
+        };
+      }
+      tasks.set(task.id, {
+        id: task.id,
+        title: task.title,
+        description: task.description,
+        state: "Ready",
+        blocked: false,
+        specification: task.specification,
+        specificationDigest: task.specificationDigest,
       });
       continue;
     }

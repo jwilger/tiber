@@ -144,6 +144,7 @@ export class GitTaskRemote {
       let repository: string | undefined;
       try {
         repository = this.clone();
+        let existingEvents: TaskEvent[] = [];
         try {
           git(repository, [
             "fetch",
@@ -158,14 +159,18 @@ export class GitTaskRemote {
             "task-events",
             "refs/remotes/origin/tiber-tasks",
           ]);
-          if (verifiedEvents(repository) === undefined)
+          const verified = verifiedEvents(repository);
+          if (verified === undefined)
             return degraded(
               "task history signature or event verification failed",
             );
+          existingEvents = verified;
         } catch {
           git(repository, ["checkout", "--quiet", "--orphan", "task-events"]);
           git(repository, ["rm", "-rf", "--ignore-unmatch", "."]);
         }
+        const proposed = foldTaskEvents([...existingEvents, event]);
+        if (proposed.mode !== "writable") return proposed;
         mkdirSync(join(repository, "events"), { recursive: true });
         writeFileSync(
           join(repository, "events", `${event.eventId}.json`),
