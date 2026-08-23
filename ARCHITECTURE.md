@@ -1,529 +1,293 @@
-# Tiber Architecture
+# Tiber architecture
 
-## System context
+This is the cumulative normative architecture derived from the active ADRs.
+It describes how new and revised code must be implemented and may intentionally
+lead the current implementation. Existing divergence is corrected when that
+code is otherwise changed.
 
-Tiber is designed as the local authority between a repository owner, embedded
-Codex inference, repositories and processes, third-party MCP servers, memory,
-and remote delivery systems. Codex's native TUI and in-process backend run in
-the Tiber process behind typed host-policy and effect-policy boundaries.
+## System boundary
 
-```text
-owner -> embedded Codex TUI + in-process backend
-                         |
-                         v
-              typed Tiber host/effect policy
-                         |
-                         v
-          EventCore authority -> closed effects -> interpreters
-```
+Tiber is the npm package `@jwilger/tiber` loaded by an unmodified stock Pi. Its
+TypeScript runs inside Pi's Node.js process and packages extensions, skills,
+prompts, declarative workflows, and themes. Tiber has no launcher, daemon,
+native binary, Pi fork, or MCP bridge.
 
-OpenAI supplies inference only. Tool requests are untrusted proposals. Tiber
-owns every identity, policy decision, effect, fact, receipt, retry,
-reconciliation, and terminal workflow outcome.
+The visible Pi conversation coordinates work. Isolated in-process Pi agent
+sessions perform bounded planning, implementation, and review assignments.
+Models are untrusted semantic collaborators: they may request effects and
+classify evidence but never execute effects, grant authority, advance workflow
+state, or approve exceptions.
 
-## Component model
-
-- **Terminal presentation:** the exact pinned Codex TUI is linked as Rust
-  source and invoked directly. Codex owns pixels, keyboard behavior, composer,
-  history, authentication presentation, and protocol streaming rather than a
-  look-alike UI or external executable.
-- **Codex host policy:** the linked in-process client admits typed client
-  requests, server requests, notifications, built-in slash actions, and lower-
-  level effects. It rewrites threads to read-only/no-network policy, injects
-  only Tiber-owned dynamic tools, and fails closed on unknown authority-bearing
-  requests. User turns are suspended until
-  the prompt/workflow request is signed; terminal presentation is suspended
-  until the exact correlated observation or interruption is signed and the
-  workflow advances. Restart closes an admitted but unresolved turn without
-  redispatching it. Native dynamic tools reuse the existing task, repository,
-  and configured-process boundaries: a bounded non-shell read returns one
-  exact UTF-8 regular-file preimage without minting authority, repository
-  proposals remain inert until a later exact owner `approve` or `deny` turn,
-  and configured commands resolve only semantic IDs from trusted repository
-  configuration.
-  Closing the native client cancels and reaps an active configured process
-  before the embedded runtime is released.
-- **Application core:** explicit state machines for conversations,
-  assignments, effects, verification, delivery, recovery, and cancellation.
-- **EventCore domains:** authoritative facts for sessions, agents, tasks,
-  workflow, integrations, mutations, verification, delivery, and CI recovery.
-- **Scheduler and context builder:** owns typed identities, leases, budgets,
-  provenance, trust labels, authoritative context construction, the bounded
-  observation policy, and no-progress termination.
-- **Ports:** `InferenceGateway`, `MemoryBackend`, `TaskService`,
-  `WorkflowService`, `ExternalToolService`, `RepositoryService`,
-  `ProcessService`, and future `VerificationService` and `DeliveryService`
-  ports.
-- **Adapters:** embedded Codex inference, native Tiber Tasks, native
-  development workflow, RMCP client, Hindsight HTTP, Git/forge, Linux
-  isolation, and verification runners.
-
-## Trust and authority boundaries
-
-The owner, repository, local environment, installed toolchain, PATH, and
-explicit configuration are trusted for this single-owner local tool.
-Model output, recalled memories, repository contents when interpreted as
-instructions, MCP descriptions/schemas/results, Codex protocol messages, process
-output, and remote forge/CI responses are untrusted input.
-
-The model can request an effect but cannot execute it. Authorization is the
-intersection of the current agent role, session, assignment, workflow mode,
-global policy, effect classification, and any required owner approval.
-Presentation state and advisory text never grant authority.
+Tiber governs requested effects. It does not claim that authorized project code
+is sandboxed. Strong containment is externally provisioned and attested.
 
 ## Functional core and imperative shell
 
-The core is referentially transparent. External values are parsed once into
-semantic types; invalid states are not constructible. Expected failures are
-typed values with a stable code, structured context, retained cause, and
-retryability.
+The core consists of pure command decisions over immutable semantic facts. A
+command folds only the facts required for that decision and returns accepted
+events and a closed list of effects, a stable typed denial, or a blocker with
+compliant recovery alternatives.
 
-The shipped workflow core currently has one closed effect variant:
-`TiberEffect::Infer`. Its immutable envelope carries semantic session, agent,
-workflow, assignment, context-receipt, policy-decision, and effect identities,
-plus bounded deadline and idempotency data. Future variants must be explicit
-additions to the closed `TiberEffect` vocabulary:
+The core cannot read time, generate identifiers, perform I/O, invoke models,
+mutate processes, or inspect ambient state. Application services collect facts,
+call decisions, persist intent, ask adapters to interpret effects, validate
+observations, and record receipts.
+
+The closed effect algebra includes exact Git reads and task publication,
+bounded repository reads and writes, named executable/argv invocation, isolated
+model assignments, content-addressed artifact access, configured HTTP queries,
+and Pi UI updates. There is no generic shell, callback, import, or arbitrary
+effect node.
+
+Every consequential effect follows:
 
 ```text
-Infer | Authenticate | ReadRepository | MutateRepository | RunProcess
-ListExternalTools | InvokeExternalTool | ReadMemory | WriteMemory | ForgetMemory
-QueryTasks | DecideTask | QueryWorkflow | DecideWorkflow
-Verify | Review | Commit | Push | PullRequest | ObserveCi | RecoverCi
-RequestOwnerApproval | Reconcile | Checkpoint | EmitProjection | Terminate
+durable intent -> attempted effect -> observation -> validated receipt
 ```
 
-Effect variants carry agent, session, assignment, attempt, policy, and effect
-identities plus bounded deadlines and idempotency data where needed.
+Startup and retry reconcile unresolved intents. They do not assume success or
+blindly repeat non-idempotent work.
 
-## Step and trampoline execution
+## Semantic boundaries and failures
 
-Each workflow is a serializable state plus a total `step(state, observation)`
-function returning one of:
+All external representations remain `unknown` until parsed once into semantic
+types. Important types include canonical repository paths, Git object IDs,
+repository and task IDs, signer identities, workflow and specification digests,
+containment levels, model routes, budgets, secret references, and exact
+revisions.
 
-- `Continue { state, effect }`
-- `Complete { state, result }`
-- `Stop { state, error }`
+Expected failure is typed and carries a stable code, safe context, causes,
+retryability, required recovery evidence, and redaction classification.
+Malformed configuration, model output, Git output, process output, HTTP data,
+or persisted state never becomes partial authority.
 
-There are no closures as continuations. The shell interprets one effect,
-records its observation or ambiguous outcome, and feeds it to the next step.
-For the shipped workflow foundation, `RecordObservation` records an
-`EffectObserved` fact in a transaction distinct from `RequestNextEffect`.
-After the observation is durable, a later `RequestNextEffect` may invoke
-`step` and emit `EffectRequested`, `WorkflowCompleted`, or `WorkflowStopped`;
-observation persistence cannot be combined with the successor decision. The
-service exposes neither a generic workflow append nor an effect executor.
-Every loop has explicit turn, tool, retry-by-error-class, elapsed-time, token,
-cost where applicable, and no-progress bounds. Cancellation checkpoints are
-durable.
+## Ports and adapters
 
-## EventCore domains and fact ownership
+Authority domains remain separate behind these ports:
 
-Commands express business-domain intent. Each command folds its own state from
-the relevant facts in the event stream, and that state contains only the data
-needed to make that command's decision. Tiber does not use aggregate objects,
-shared write models, or a generic whole-session replay state as EventCore write
-authority. Commands emit typed domain facts; separate projections serve reads.
+- `PiHost`
+- `GitRepository`
+- `TaskRemote`
+- `Filesystem`
+- `ProcessRunner`
+- `ContainmentVerifier`
+- `ModelSession`
+- `CiAuthority`
+- `ReviewService`
+- `Context7Service`
+- `HindsightService`
+- `Clock`
+- `IdentifierSource`
+- `SecretResolver`
 
-Every shipping modeled command is registered with EventCore's experimental
-checked-model graph. The repository gate requires a verified graph with no
-unconsumed command origins, state/event fields, or provenance warnings.
-Facts, not UI or adapter caches, own the truth. Checked models consume all
-provenance and reject stale epochs, invalid identity relationships, duplicate
-non-idempotent effects, and terminal-state mutation.
+GitHub may implement GitHub-specific CI and review adapters, but its credentials,
+permissions, failures, and receipts remain separate from Git transport.
 
-Durable receipts cover mutations, processes, tests, memory, external tools,
-approvals, retries, cancellation, reconciliation, commits, pushes, pull
-requests, CI observations, and delivery completion.
+## State and persistence
 
-Repository mutation is the first connected non-inference vertical slice. A
-structured dynamic-tool request is parsed once, then Tiber rereads the selected
-root-relative file and publishes only a content-free safe proposal identity.
-Command-specific `tiber-repository-service` models own proposal/reproposal,
-owner decision, preparation, terminal outcome, and reconciliation facts on the
-signed authority branch. Verified `Proposed -> Approved -> Prepared` history is
-required before the core can mint opaque adapter authority. The shell executes
-that authority only through the fixed Bubblewrap repository worker. Stale
-preimages require a new signed proposal and approval; signed `Prepared` without
-a terminal fact permits one read-only reconciliation and never redispatch.
+### Shared task authority
 
-Configured process execution is the second connected non-inference vertical
-slice. The trusted repository-owned `.tiber/commands.toml` is parsed once when
-the TUI starts and maps semantic command IDs to fixed absolute executables,
-literal argv, repository-relative working directories, cleared fixed
-environments, deadlines, and output bounds; network is always denied. The
-model requests only `run_configured_command` plus a command ID and never sees
-or supplies that execution plan. Each dynamic-tool call identity derives a
-distinct process stream under the active durable effect.
+The remote branch `refs/heads/tiber/tasks/v1` contains signed append-only,
+versioned task event batches. It is authoritative for tasks, specifications,
+dependencies, Ready ordering, claims, blockers, amendments, review and
+verification evidence, delivery and CI receipts, and completion.
 
-Command-specific checked EventCore models own atomic `Requested`/`Prepared` or
-content-free `Refused` publication and the `Completed`, `SpawnFailed`,
-`TimedOut`, `Cancelled`, `Unknown`, and `Reconciled` lifecycle. Verified
-requested/prepared history and unchanged configuration are required before the
-core can mint opaque process authority. The Linux adapter executes it through
-a fixed Bubblewrap profile and a package-private direct-argv launcher. Raw
-bounded stdout and stderr are returned only as an ephemeral, sanitized tool
-result; durable signed facts and the private journal retain byte counts and
-digests, not output content. Retained preparation is never redispatched. At TUI
-startup the CLI automatically records `Unknown`, consumes the one-shot
-read-only reconciliation capability through the Linux adapter, publishes
-`Reconciled`, and projects `completed`, `not-completed`, or `still-unknown` to
-the public session. Once every process stream for the active effect is closed
-or reconciled, the CLI records a sanitized inference interruption, advances
-the enclosing workflow, and exposes its successor so a new prompt can proceed
-without replaying the interrupted inference. There is no explicit owner
-recovery command. The pass scans verified stream identities, then fails closed
-above 64 matching process streams for the active effect or four events in any
-selected process stream; unrelated historical streams do not consume that
-effect-scoped budget.
+Tiber verifies configured signer identities, schemas, event invariants, and
+ancestry before projection. Publication creates a signed child commit of the
+exact observed remote head and uses a normal fast-forward push. Concurrent
+failure triggers fetch and command re-evaluation. Tiber never force-pushes the
+task ref. Invalid signatures, malformed events, or rewritten history degrade
+the board to read-only at the last verified head.
 
-## Agent and context lifecycle
+### Repository-shared declarations
 
-Tiber creates agents within a session and assignments within a workflow task.
-An attempt belongs to exactly one assignment epoch. Context is assembled from
-owner input, authoritative EventCore projections, scoped repository material,
-bounded advisory memory, and typed tool observations. Each item carries source,
-trust, freshness, and token accounting.
+Tracked files may declare versioned data-only workflows, named commands, test
+mappings, and narrower project policy. They are untrusted input and cannot grant
+more authority than user-local settings and the policy floor already permit.
 
-Agents terminate on success, terminal error, cancellation, any budget, or
-no-progress. A handoff transfers an explicit artifact and authority scope; it
-does not share ambient identity.
+### Local private state
 
-## Embedded Codex inference boundary
+Pi's agent directory stores global settings, repository trust profiles,
+project-local settings, run journals, effect intents and receipts,
+content-addressed artifacts, worktree and process registry, heartbeats, budget
+usage, and diagnostics. A generated repository identity stored in the Git
+common directory is bound to its canonical location and expected remotes.
 
-Tiber pins one signed commit of `jwilger/codex:tiber-support`, based on a named
-stable upstream tag. The fork supplies generic, default-transparent host seams
-and imports no Tiber domain types. Tiber invokes `codex_tui::run_main` with the
-native in-process client and backend. There is no runtime Codex executable
-lookup, version preflight, child app-server, private socket, or WebSocket
-gateway.
+Node's built-in SQLite may store local structured journals after its stock
+runtime contract is verified. Artifact bodies are files addressed by digest and
+protected by restrictive permissions and quotas. Session entries contain
+bounded status and pointers, not primary authority.
 
-Codex owns subscription authentication, credential storage and refresh,
-account and endpoint selection, streaming, and terminal presentation through
-its linked APIs. Tiber admits those typed lifecycle requests but never treats
-credentials as domain authority. Threads are restricted to read-only execution
-and no ambient network. The lower-level effect gate denies file writes,
-processes, network, and non-Tiber tools unless a closed Tiber handler completes
-the request.
+## Configuration and trust
 
-Prompt admission is durable before inference. Server requests remain inert
-until the application dispatcher correlates them to the exact admitted thread
-and turn. Terminal notifications wait for durable observation and may be
-suppressed on publication failure. Cancellation remains live while policy
-awaits durable work; restart records interrupted inference and reconciles
-prepared repository/process effects without replay.
+Effective settings resolve project-local explicit, user-global explicit, and
+built-in default, then apply restrictive global ceiling locks and the immutable
+Tiber floor. Repository declarations can only narrow authority.
 
-Native `/plan`, `/side`, and `/btw` actions cross typed pre-effect seams.
-Planning prompts, proposals, and accept/cancel decisions become durable before
-their dependent Codex action. Side and BTW turns use independently correlated
-child authority, preserve the parent turn, and close or recover their own
-durable streams.
+`/tiber:settings` exposes Built-in, User global, and Project columns, the
+effective value, and its source. Empty project text values mean inheritance.
+Global settings can forbid broader project overrides; unlocking requires an
+explicit human confirmation and conflict preview.
 
-## Native workflow and Tiber Tasks
+Settings contain references to externally provisioned secrets. Child process
+environments are scrubbed by default. Tightening applies immediately. Loosening
+applies to a new run or an explicitly rebound existing run.
 
-`tiber-tasks-core` defines the task vocabulary and
-`tiber-tasks-service` folds its immutable history into the query projection.
-`tiber-workflow-core` provides the pure, serializable workflow state, semantic
-identities, one closed `Infer` effect, and total trampoline step. Its
-`tiber-workflow-service` boundary provides command-specific EventCore decisions
-to initialize the workflow, request its effect, record an observation, and
-advance. Recording `EffectObserved` is one durable transaction; only a later
-advance may invoke the trampoline to request, complete, or stop. It provides no
-generic workflow append and executes no effect.
-`tiber-store-git` resolves the exact signed authority revision: when an
-`origin` remote is configured, it retrieves the currently advertised fixed
-`tiber` commit without moving a caller Git ref; without `origin`, it reads only
-the local `refs/heads/tiber` ref. Its reader materializes a disposable
-`EventCore` snapshot. Its separate one-shot publication boundary stages named
-facts in a disposable store, signs one candidate, and uses either an exact-base
-`--force-with-lease` update of `origin/tiber` or a local ref CAS. The remote
-operation rejects any changed authority head rather than overwriting it. It is
-not a generic writable EventCore store, and an ambiguous remote result requires
-reload rather than an automatic retry.
+Tiber is the only executable extension trusted by default in governed mode. An
+observed unallowlisted executable extension or incomplete inventory causes
+read-only lockdown. If Tiber is disabled or a malicious peer can act outside
+observable Pi boundaries, Tiber cannot claim governance.
 
-The shipped native task-query surface exposes `tiber tasks list [--status
-<status>]`, `show`, `search`, and `next`. Those queries replay the full task history into a
-separate `TaskBoardProjection`; that projection is a read model, never
-EventCore command authority. The write surface remains deliberately closed to
-named commands: `tiber tasks create [--id <stable-prefix>] <title>`,
-`tiber tasks start <ref>`, `tiber tasks acceptance check <ref>
-<one-based-index>`, `tiber tasks subtask check <ref> <one-based-occurrence>`,
-and `tiber tasks transition <ref> done`. Each is a command-specific pure fold
-that consumes only an opaque modeled
-publication token at the signed Git adapter; no adapter exposes a generic
-append. Creation folds only current task identities and the latest strict board
-order, emits one backlog task plus its appended order on the board stream, and
-uses a stable caller-visible prefix to reconcile ambiguity without duplication.
-`start` can activate only the current eligible next task when no other
-task is active; an exact retry of that sole active task is a no-op. It is a
-bounded activation operation rather than generic lifecycle mutation or a
-scheduler. The occurrence check carries the exact current subtask at its
-immutable position, so duplicate legacy IDs cannot redirect it. The transition
-grammar accepts only `done`, therefore no arbitrary lifecycle transition enters
-the native surface. When retained lifecycle state is already `Done` but strict
-board order still names the task, the command publishes only the closed order
-repair and never re-emits a transition. Every publication declares only the
-board and addressed task stream as its consistency boundary. Publication
-Broader workflow scheduling remains a subsequent vertical slice. Durable
-interactive session binding and the closed embedded-Codex inference runner
-are implemented; an uncertain dispatched effect is exposed as `reconcile` and
-is never automatically replayed. Internal actions never call legacy MCP or shell
-back into the `tiber` executable.
+## Task model
 
-The same closed publication boundary admits one exceptional history-repair
-fact: `tiber tasks subtask repair-duplicate <ref> <occurrence> <replacement-id>`.
-It is not generic subtask mutation. Its pure decision captures the exact
-one-based occurrence, complete current subtask preimage, replacement identity,
-and board/task consistency boundary, then publishes only a named
-`TaskSubtaskIdCorrected` fact. Replay verifies that preimage and changes only
-the selected occurrence, preserving all historical bytes and leaving any
-prerequisite references intact.
+Tasks move through `Backlog -> Ready -> In Progress -> Done`. Blocked is an
+orthogonal badge and filter. Done requires canonical acceptance, configured
+delivery, exact-revision required CI, human criteria, claim release, and
+verified cleanup.
 
-## Assignment-bound repository mutation
+Canonical structured Gherkin, rendered canonical text, typed acceptance
+criteria, exclusions, dependencies, and verification mappings live in task
+events. Repository feature files are deterministic projections and must remain
+semantically equivalent.
 
-`tiber-repository-core` is a pure, unconnected authority boundary for narrow
-repository file mutations made within one assignment. An opaque authorization
-permits only a write with either an absent-file or exact-digest precondition, or
-a delete with an exact-digest precondition. The core models typed mutation
-receipts and failures plus a read-only reconciliation handle; it performs no
-filesystem, Git, process, or network I/O.
+Readiness requires a clean fresh-context review of outcome, scenarios, edge
+cases, exclusions, dependencies, mappings, and architecture implications.
+Material amendments create a new user-approved version. After claim,
+independent revalidation freezes the specification against the current
+baseline and active architecture. Material baseline changes invalidate that
+receipt.
 
-Authorization requires complete workflow provenance, repository identity, and
-component-aware assignment scope to agree with the trusted mutation policy and
-an opaque `RepositoryMutationApproval` bound to that exact safe proposal
-identity and policy/assignment context. A raw proposal cannot reach a repository
-adapter.
+A task has one exclusive remotely published claim. Heartbeats may establish
+staleness but never transfer ownership. Release, completion, or an explicit
+audited human takeover changes ownership. Offline continuation is permitted
+only after remote claim publication; delivery requires remote revalidation.
 
-An unknown mutation outcome must be reconciled by its stable mutation identity
-before a later layer can decide what to do next. It is never auto-replayed.
-The boundary is not a generic filesystem or shell runner, and it does not
-generalize `tiber-store-git`: that adapter remains the narrowly scoped signed
-publisher for the fixed `tiber` EventCore authority branch.
+Ready ordering is shared and deterministic. Scheduling removes tasks with
+unsatisfied dependencies or active claims before selecting the highest-ranked
+eligible task. Agent discoveries may create provenance-bearing untriaged
+Backlog tasks but cannot promote, rank, or claim them without user action or an
+explicit deterministic policy.
 
-S2 adds `tiber-repository-linux`, the Linux-only imperative
-`RepositoryService` adapter. It interprets only opaque bounded authorizations
-and reconciliation values through a fixed, private
-`tiber-repository-worker` under Bubblewrap. Neither the model nor a caller can
-supply shell text, arbitrary argv, cwd, environment, mount, or network
-configuration. The adapter owns bounded operational timeout, cancellation,
-child cleanup, and typed non-durable outcomes; it adds no workflow
-`TiberEffect`, EventCore fact, CLI, TUI, scheduler, runner, or generic
-`ProcessService` integration. S3 adds the private recovery and package boundary
-described below without changing that integration scope.
+## Workflow definitions and execution
 
-## Third-party MCP
+Workflow definitions are versioned JSON compiled into immutable canonical IR.
+Compilation parses schemas and references, validates bounds and reachability,
+checks the policy floor, canonicalizes data, and calculates a SHA-256 digest.
+Definitions cannot contain executable code, imports, callbacks, shell text,
+arbitrary tools, or arbitrary network endpoints.
 
-`tiber-external-tools-core` is the pure authority boundary for configured
-third-party MCP integrations. A capability must pass the global, workflow-mode,
-agent-role, session, assignment, and effect-policy grants, all bound to the
-configured `IntegrationId`, before it mints an opaque authorization. The named
-operations are configured tool list/call, Tiber-owned root declaration,
-optional resource list/read, and optional prompt list/get. Roots remain hidden
-from ordinary tokens and can be disclosed only by the dedicated root
-authorization. Descriptions, schemas, server notifications, and resource or
-prompt outputs are bounded untrusted payloads; they never grant authority.
+An active run pins workflow digest, task specification version, baseline
+revision, effective policy digest, containment receipt, model routes, and
+budgets. Material changes invalidate affected receipts instead of mutating the
+run silently.
 
-`tiber-rmcp-client` is the imperative adapter pinned to RMCP 3.1.2. It admits
-only bounded absolute direct-argv stdio and loopback Streamable HTTP sessions,
-with capability negotiation, cancellation, tool/resource/prompt operations,
-roots, and bounded tool/resource/prompt/progress/log/change observations. Its
-HTTP client uses no proxy, redirects, automatic retry, automatic
-reinitialization, or SSE resume. Resource templates, subscriptions, cache
-directives, and input-required continuations are refused. Sampling,
-elicitation, and MCP tasks are explicit refusals.
+The immutable floor requires a remote claim before mutation, clean readiness
+and start reviews, semantically valid RED before production mutation, observed
+GREEN, green-only refactoring, lightweight review per increment, scope-complete
+verification, three consecutive complete clean final reviews, exact-revision
+delivery and CI, all required CI authorities, resolved claims and worktrees,
+and human-only exact exceptions.
 
-For bounded safety, the adapter rejects a negotiated protocol version at or
-above `ProtocolVersion::STANDARD_HEADERS` (`2026-07-28`) before an operational
-request. RMCP 3.1.2 standard-header mode retains tool schemas without a Tiber
-bound while constructing later request headers. This is a deliberate
-compatibility ceiling pending an upstream-safe bounded path, not a retry or a
-generic protocol change.
+The default flow is intake, specification, readiness review, claim,
+revalidation, worktree, vertical RED/GREEN increments, lightweight review and
+refactoring, increment preservation, full verification, risk-selected final
+review, delivery, exact-revision CI, claim release, cleanup, and Done.
 
-Mutating calls require stable idempotency; an unknown result enters the
-configured read-only reconciliation operation rather than an automatic replay.
-This S1 boundary is not connected to workflow `TiberEffect`, EventCore, CLI,
-TUI, app-server, scheduler, or runner code, and no live external-service
-validation is claimed. The S3 audit-fact boundary is pure and does not change
-that execution boundary.
+Pre-mutation blockers release the claim, return the task to the same Ready rank,
+and permit independent campaign work. Post-mutation blockers retain claim and
+worktree while other eligible work may proceed. A repository-wide CI hold
+blocks further delivery until causally resolved.
 
-## Memory
+## Model sessions and context
 
-`tiber-memory-core` defines a swappable `MemoryBackend` port. The first
-adapter, `tiber-hindsight-http`, contains private DTOs for the schema-verified
-Hindsight HTTP API 0.8.3 and 0.8.4 contracts and
-supports only asynchronous retain, operation status, cancellation, forget,
-recall, and named read-only reconciliation. Tiber connects only to an explicit
-endpoint; it never installs or
-globally configures Hindsight, retries a request, manages Hindsight
-authentication, or claims generic or deployment-service validation.
+The visible session coordinates and remains steerable. Each worker is an
+isolated in-process Pi agent session with typed assignment input and completion
+output, one bounded initial context pack, a role-specific immutable prompt,
+fixed tool schemas, and hard token, cost, time, concurrency, and effect budgets.
+Missing model routes block instead of silently substituting.
 
-Memory operations carry strict owner and repository provenance. Banks are
-owner-global or repository-scoped; typed tags include repository, agent,
-session, task, and memory kind. Backend document and operation handles are
-stable and scope-bound. An ambiguous mutation supplies a read-only
-reconciliation handle rather than a replay. Retain requests name their source
-turn, and recall requests never admit that same turn. Recall is
-advisory,
-untrusted, provenance-carrying, and bounded by item and token budgets. It
-cannot grant authority. Failure is visible and nonfatal unless a future
-workflow explicitly requires memory. This boundary is not connected to
-EventCore, workflow execution, CLI, TUI, app-server, or scheduler.
+Within a cache epoch, prompt, initial context, tool schemas, and ordering are
+byte-stable. Dynamic state is append-only suffix content. Compaction starts a
+new explicit epoch. Typed context priorities and configurable headroom reserve
+capacity for completion and tool results. Summaries are advisory and preserve
+links to original artifacts.
 
-## Audit facts and integration evidence
+Oversized Tiber-controlled results are stored as content-addressed local
+artifacts. Models receive bounded previews and searchable/range-readable
+handles. This replaces arbitrary context-mode execution with closed effects.
 
-`tiber-integration-audit` is a functional-core boundary that constructs
-provider-neutral, serializable audit DTOs. It records trusted provenance,
-stable policy and operation outcomes, reconciliation identities, and bounded
-evidence. It never retains raw memory text, recall queries, recalled content,
-tool arguments, integration/transport configuration, or server payloads. An
-observed external payload becomes only a byte count and domain-separated digest.
-The facts are not EventCore publications or durable receipts yet and grant no
-workflow, scheduler, CLI, TUI, app-server, or runner authority.
+## Processes and containment
 
-Deterministic fake-server coverage crosses both adapters: a policy denial
-performs no server I/O, and tool observation, ambiguity, reconciliation,
-scoped memory lifecycle, and hostile inputs yield only sanitized facts. The
-Hindsight adapter also carries an ignored, explicit-only live check. It runs
-only with `TIBER_RUN_LIVE_HINDSIGHT=1` plus a nonempty
-`TIBER_HINDSIGHT_ENDPOINT`, uses a nonce-isolated synthetic lifecycle, and
-forgets its exact document during cleanup. Default CI is network-free; the
-existence of this check is not evidence of a deployed service run.
+A named command has an executable, argv vector, canonical cwd, scrubbed
+environment, timeout, output limits, and local grant. Tiber does not accept
+model-authored shell strings, interpolation, pipes, redirects, substitutions,
+or executable paths. It owns and terminates process groups it starts.
 
-## TUI
+Containment assurance levels are `host-trusted`, `workspace-isolated`,
+`workspace-and-network-isolated`, and `hermetic`. Strong levels require an
+external attestation and local Linux corroboration. Tiber defines and verifies
+the protocol but does not provision isolation. Unsupported platforms fail
+closed when strong assurance is required.
 
-The shipping presentation is now Codex's native TUI from the exact pinned fork.
-Tiber does not ship a look-alike presentation or an external remote-client
-transport. Typed host hooks cover replacement and resume paths as well as the
-initial TUI. Presentation state never authorizes work.
+Failure enters persistent configuration-only lockdown by default. An optional
+policy requests graceful Pi shutdown. Stock Pi must prove that startup abort
+prevents provider dispatch; otherwise pre-inference refusal is unsupported and
+release is blocked.
 
-## Isolation and process execution
+## Worktrees and recovery
 
-Linux-specific filesystem, process, and network controls sit behind the
-`tiber-repository-linux` platform adapter. S2 interprets only bounded
-`tiber-repository-core` authorizations through its fixed, private
-`tiber-repository-worker` under Bubblewrap, rather than exposing a generic
-filesystem, shell, or process executor. The adapter constructs the worker argv
-and isolation configuration from parsed trusted configuration and opaque
-authorization; callers supply neither command nor execution configuration.
-It enforces resource bounds, timeout, cancellation, and child cleanup, and
-returns typed non-durable outcomes. The v1 implementation targets only x86_64
-Linux. S3 adds durable receipt facts and recovery evidence, but does not claim
-durable working-tree filesystem state beyond those journal facts.
+Mutating tasks use dedicated owned branches and worktrees by default. A durable
+registry reconciles Git metadata, canonical paths, claims, heartbeats, process
+groups, and quotas. Foreign, ambiguous, or actively claimed paths are never
+deleted.
 
-Configured commands use a separate `tiber-process-linux` adapter. It accepts
-only opaque authority derived from signed process history and the startup
-catalog, clears the environment, and constructs a fixed network-denied
-Bubblewrap invocation around a private direct-argv launcher. The launcher
-handshake distinguishes a definitive pre-launch failure from an outcome that
-became uncertain after launch. Its private full-fsync journal is operational
-evidence, not business authority, and contains no raw stdout or stderr. The
-package installs the launcher and pinned Bubblewrap helper under `libexec`; it
-does not expose a second public command.
+Before abandoned uncommitted source is removed, Tiber stores it under a bounded
+private local recovery ref. Generated and ignored content may be discarded.
+Recovery refs are not pushed automatically. Shutdown terminates owned process
+groups, checkpoints state, and retains active claims/worktrees for resume; no
+daemon continues work.
 
-## Recovery, verification, and delivery
+## Human exceptions
 
-The native development workflow treats one observed public-boundary RED as the
-only implementation authority for a product-behavior increment. Durable facts
-bind scenario identity, declared behavioral scope, command/evidence, and the
-exact expected failure before repository mutation or process execution can be
-authorized. RED evidence is either the predicted public runtime assertion or
-the predicted compiler diagnostic for an intentionally missing
-type/API/trait/case; incidental compilation failures grant no authority. GREEN
-references that same scenario and proves the specific
-failure resolved; it does not authorize unrelated production behavior. A
-source delta outside the active scenario's behavioral scope fails closed before
-the workflow advances. When an outer BDD failure has multiple plausible causes,
-the workflow records a drill-down chain of progressively narrower behavioral
-RED evidence and withholds mutation authority until one leaf failure has a
-single predicted cause. It authorizes only that leaf repair, then requires
-evidence to replay outward through the chain. Every generated production delta
-then receives a mandatory independent fresh-context exact-failure-conformance
-review against the durable RED evidence, drill-down chain, declared scope, and
-complete source delta. A non-clean result blocks GREEN, the next RED,
-verification, final review, and delivery. Each green increment requires a fresh-context
-lightweight review before another RED may begin. Explicit typed exemptions
-cover simple development-environment scripts, CI workflows, covered refactors,
-and removals without inventing a tautological committed-text test.
+Ordinary denials provide typed private recovery feedback and compliant
+alternatives. Escalation occurs only when the stated goal is blocked and no
+compliant route remains. An independent review establishes necessity before one
+deduplicated attention item reaches the user.
 
-Partial or unknown mutation results are reconciled by identity before retry.
-Checkpoints make crash and restart resumption explicit. Verification and review
-gates consume exact-revision evidence. Delivery state machines own commit,
-push, pull-request, CI observation, and the single fenced CI-recovery incident.
-Remote writes are idempotent where possible and otherwise enter typed
-reconciliation.
+Approval freezes an operation and binds it to task, run, exact revision, paths,
+preimages, arguments, expiry, and one use. Tiber executes that frozen operation
+directly. Replay, near matches, drift, or expiry fail. The model cannot create,
+approve, see, or reuse a capability.
 
-For repository mutation S3, `tiber-repository-linux` keeps a private, pinned
-`eventcore-fs` receipt journal outside the repository in an owner-only state
-root, with full file and directory fsync. It records `Prepared` before the
-private worker receives mutation bytes, then durable terminal `Applied`,
-`Failed`, or `Unknown` facts. Its restart scan projects only read-only
-ambiguity-derived reconciliation handles; it never recreates mutation authority
-or auto-replays a worker request.
+## External context services
 
-The journal validates corrupt, dangling, forked, and stale state fail-closed.
-The adapter takes its cooperative state-root lease before the worker can take
-the repository-root lock, preserving a single lock order for concurrent owners.
-The x86_64 Linux package exposes public `tiber` and keeps the worker plus
-Bubblewrap helper private under `libexec`. CI's package smoke covers that
-artifact layout and entry behavior only; real adapter behavior remains covered
-by separate integration tests.
+Context7 is a first-party direct typed HTTP adapter exposing bounded library
+resolution and documentation queries with library, version, source, and cache
+provenance. It obeys configured endpoint and network capabilities.
 
-## Review orchestration
+Hindsight is optional and uses separate user-global, private-repository, and
+opt-in shared-project banks with independent recall and retain permissions. A
+worker receives at most one bounded initial recall; later recall is explicit.
+Private banks receive selected checkpoints. Shared banks receive reviewed
+completion artifacts only. Raw output, source, diffs, and detected secrets are
+excluded by default.
 
-Review is a durable Tiber workflow, not a presentation feature and not a
-single model call. A risk-assessment step selects independent review lenses and
-verifier routes. Each lens is assigned to a separate reviewer agent in a fresh
-context. The reviewer receives a bounded assignment, closes after returning one
-typed finding artifact with provenance, and never shares ambient conversational
-state with another lens. EventCore facts own assignment,
-completion, cancellation, supersession, and clean-review decisions.
+## Delivery, CI, and release
 
-Any material delta after assessment invalidates affected evidence and triggers
-bounded reassessment. Delivery cannot cross the clean-review gate until every
-required lens and verifier has a current terminal result and all blocking
-findings are resolved. The former marketplace orchestration is reference-only,
-not a runtime authority; native migration preserves its risk assessment,
-independent lenses, verifier routing, durable state, delta reassessment, and
-clean-review gating.
+Git delivery, CI observation, and review service are independent. Every required
+CI authority must report terminal success for the exact delivered revision.
+Generic CI commands are user-local, digest-pinned executable/argv templates
+returning validated JSON; mutable repository scripts cannot assert remote CI
+success.
 
-The source-level `tiber-review` crate makes that native contract executable. It
-defines semantic session, source-snapshot, lens, agent, role, assignment, and
-evidence identities; a closed serializable review-fact vocabulary; deterministic
-command-specific event folds; exact assignment-provenance checks; bounded
-material-delta iterations; verified finding resolution; and the clean-review
-transition. It is a pure domain crate with no inference, filesystem, process,
-network, UI, MCP, or store dependency. A later Ticket 4 scheduler slice will
-bind these commands to the native scheduler; the initial workflow core/service
-slice deliberately does not do so, preserving the contract before it reaches
-an imperative runner or shared context.
+The Tiber repository requires PRs, linear squash history, Conventional
+Commit-compatible titles, resolved conversations, and an aggregate full-CI
+check. An authorized ordinary PR author may enable auto-merge after all gates.
+Release-please maintains a release PR that Tiber never auto-merges. Human merge
+is the publication boundary; tag, GitHub Release, and npm OIDC/provenance
+publication follow automatically.
 
-## Observability and deferred qualitative evaluation
-
-Trace spans cover inference, context, policy, tools, memory, handoffs,
-verification, and delivery. They record versioned model/protocol/prompt/policy,
-latency, token counts, cost where available, and typed failure reasons while
-redacting secrets.
-
-Deterministic tests prove schemas, identities, policy, refusals, isolation,
-reconciliation, and receipts. Provider-backed and stochastic evaluations do
-not run while the harness workflow is under construction and do not gate CI.
-Once the complete workflow exists, Tiber will define a separate qualitative
-evaluation strategy for orchestration, context selection, tool choice,
-abstention, and recovery with named units, metrics, aggregation rules,
-thresholds, distinct-case counts, and intentional repeats.
-
-## Package and command cutover
-
-The supported product surface changes atomically to `tiber`. Default
-invocation opens the TUI; tasks live only at `tiber tasks …`. Ambiguous task
-crates use `tiber-tasks-*`. There are no legacy aliases, compatibility crates,
-deprecated paths, or transition window. Existing EventCore history and the
-`tiber` Git branch are preserved.
-
-## Codex source provenance and updates
-
-`codex-source.toml` records the stable tag, upstream commit, signed fork commit,
-Cargo repository, and Nix source hash. `just update-codex` runs the tracked
-updater: it rejects a dirty checkout, advances the clean upstream mirror and
-support branch without force-pushing, preserves conflict clones, runs focused
-fork and embedding checks, and updates Cargo, Nix, and provenance together. An
-already-current source is an idempotent no-op.
+Local hooks remain fast: formatting, strict lint, incremental type checking,
+fast unit tests, and commit-message validation. There is no heavy pre-push
+hook. Full acceptance, integration, recovery, package, and mutation
+verification runs in ordinary Node/npm CI without Nix.

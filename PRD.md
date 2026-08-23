@@ -1,394 +1,178 @@
-# Tiber Product Requirements
+# Tiber product requirements
 
-## Product
+## Summary
 
-Tiber is a standalone, local-first development harness for one repository
-owner. Tiber owns the authoritative state and execution of development work.
-Its exact pinned Codex fork provides the native TUI and in-process backend; a
-typed Tiber host/effect policy is the accepted v1 boundary. There is no runtime
-Codex executable, child app-server, private socket, or version preflight.
-Task-bound durable sessions run through the checked workflow trampoline.
-Prompts, workflow effects, observations,
-receipts, and transcript facts are published to signed authority before their
-dependent action; interrupted uncertain effects stop at an explicit reconcile
-next action rather than being replayed.
+Tiber is a public installable package for unmodified stock Pi that provides
+shared task tracking, deterministic development-workflow guardrails, bounded
+autonomous execution, and controlled context and memory services. It replaces
+the former Rust/Codex implementation without compatibility or data migration.
 
-The v1 product and executable are named `tiber`. The existing task board is
-named Tiber Tasks. Running `tiber` without arguments opens the current
-interactive terminal UI. Native task operations live only under `tiber tasks
-…`. The shipped task slice includes read-only `list`, `show`, `search`, and
-`next` queries over EventCore history preserved on the signed Tiber authority
-branch, plus command-specific native operations: `create <title>`, `start <ref>`, `acceptance check`,
-`subtask check <ref> <one-based-occurrence>`, and `transition <ref> done`.
-Each folds only the facts needed for that decision, publishes a closed modeled
-fact sequence through the exact board/task consistency boundary, signs the
-candidate, and uses an exact-base lease to publish to the fixed authority ref.
-Creation emits one empty backlog task and the resulting strict order on the
-board stream. Its stable `--id` retry form reconciles an ambiguous publication
-as an idempotent no-op when that exact creation is already durable.
-The occurrence check captures the addressed subtask's complete preimage, so a
-legacy duplicate ID cannot select the wrong row. Transition accepts only the
-terminal `done` status; it is not a generic lifecycle setter. There is no
-general public EventCore append, legacy MCP task write, or generic task-mutation
-surface. A retained done task with stale strict-board entries receives only an
-order reconciliation, never a repeated transition. Publication reconciliation
-and workflow scheduling remain subsequent native slices.
+## Users and outcomes
 
-`start` is a bounded activation operation, not a general transition: it can
-activate only the current eligible next task while no other task is active. An
-exact retry for that sole active task succeeds without publishing another
-authority revision. It does not implement scheduling or a workflow loop.
+A developer can install `@jwilger/tiber`, open an ordinary Git repository in Pi,
+and:
 
-The native workflow is the authority for interactive inference.
-`tiber-workflow-core` provides serializable semantic identities, a total
-`step(state, observation)` trampoline, and one closed `Infer` effect with
-bounded deadline, provenance, and idempotency data.
-`tiber-workflow-service` provides command-specific EventCore decisions to
-initialize a workflow, request the effect, record its observation, and advance
-the trampoline. Recording an observation persists `EffectObserved` in its own
-transaction; only a later advance decision may call `step` to request, complete,
-or stop. The service exposes neither a generic workflow append nor an effect
-executor. The CLI interprets only its closed `Infer` effect through embedded
-Codex, records the observation and terminal advance durably, and restores the
-native session on relaunch. Effect-bearing typed requests remain inert until a
-Tiber-owned handler accepts them. The native Codex surface can read one bounded
-UTF-8 regular-file preimage without shell or effect authority, then submit an
-exact repository proposal for a later owner decision or request a trusted
-configured command by semantic ID. Broader scheduling and operator-directed
-resolution of uncertain effects remain later native slices.
-
-Native `/plan`, `/side`, and `/btw` preserve their distinct Codex presentation
-while Tiber owns durable authority. Planning inference and its accept, accept-
-with-context-clear, or cancel decision are durable before dependent UI or
-coding action. Side and BTW turns use independent child streams, preserve the
-ordinary parent turn, and recover unfinished child work without replay.
-
-The native task surface also has one explicit legacy-data repair, not a general
-write: `subtask repair-duplicate`. It requires a one-based occurrence and a new
-identity, folds the exact current subtask as a precondition, and appends a typed
-correction fact through the same board/task lease. This lets an owner repair a
-malformed duplicate subtask ID without rewriting signed history or ambiguously
-changing the first matching row.
-
-### Current repository-mutation vertical slice
-
-The interactive harness now connects model-proposed repository writes to the
-existing assignment-bound authority and isolated Linux adapter. The dynamic-
-tool request remains inert structured input until Tiber rereads the exact target,
-constructs the diff, publishes the safe proposal identity to signed authority,
-and receives an explicit owner decision. Denial or cancellation is signed,
-performs no adapter dispatch, and returns the conversation to prompting. A
-changed preimage produces a signed exact-digest reproposal and requires another
-owner approval.
-
-`tiber-repository-core` remains the pure authority boundary for narrow
-assignment-bound repository file mutations. Its opaque authorization
-permits a write with an absent-file or exact-digest precondition, or a delete
-with an exact-digest precondition. It models typed mutation receipts and
-failures plus read-only reconciliation without performing filesystem, Git,
-process, or network I/O.
-
-Authorization requires the complete workflow provenance, repository identity,
-and component-aware assignment scope to match the trusted mutation policy and
-an opaque `RepositoryMutationApproval` bound to that exact safe proposal
-identity and policy/assignment context. A raw proposal cannot reach a repository
-adapter.
-
-An unknown mutation outcome is reconciled by stable mutation identity before any
-later decision; it is never auto-replayed. This is neither a generic filesystem
-nor shell-runner API, and it does not extend `tiber-store-git` beyond its fixed
-signed `tiber` authority-branch publication role.
-
-`tiber-repository-service` owns command-specific EventCore 2.0.1 models for
-proposal, reproposal, approval, denial, cancellation, preparation, terminal
-outcomes, and reconciliation. Every command is registered with the experimental
-checked-model graph and must verify without provenance warnings. Preparation is
-two-phase: signed `Prepared` is confirmed before verified history may mint the
-opaque adapter authority. The CLI then dispatches only through
-`tiber-repository-linux`, the x86_64 Linux-only
-`RepositoryService` adapter. It runs only opaque bounded authorizations and
-reconciliation through a fixed, private `tiber-repository-worker` under
-Bubblewrap. The model and caller cannot provide shell text, arbitrary argv,
-cwd, environment, mount, or network configuration. The adapter owns bounded
-operational timeouts, cancellation, child cleanup, and typed non-durable
-outcomes. It adds no shell, generic runner, or arbitrary filesystem surface.
-
-Signed EventCore history is the business authority for `Proposed`, owner
-decision, `Prepared`, terminal `Applied`/`Failed`/`Unknown`, and `Reconciled`
-facts. A restart with signed `Prepared` and no terminal fact derives only a
-read-only reconciliation handle, never mutation authority or replay. The Linux
-adapter's private full-fsync journal remains operational evidence inside that
-query; it cannot initiate recovery independently of signed history. Tiber signs
-one reconciliation outcome, and later restarts neither query again nor append a
-duplicate result. These receipts make no broader claim about working-tree
-filesystem durability.
-
-The clean x86_64 Linux package exposes public `tiber` and keeps the worker plus
-Bubblewrap helper private under `libexec`. CI's package smoke verifies package
-layout and entry behavior only; real adapter tests remain outside that smoke.
-
-### Current configured-process vertical slice
-
-The interactive harness executes only repository-owner-configured commands
-from the trusted `.tiber/commands.toml` loaded at TUI startup. Each semantic ID
-selects a fixed absolute executable, literal argv, repository-relative working
-directory, cleared fixed environment, deadline, and stdout/stderr bounds;
-network access cannot be enabled. The model's `tiber_effect` request contains
-only `run_configured_command` and that semantic ID, never executable or
-containment details.
-
-The exact dynamic-tool call identity correlates each invocation to its own
-signed process stream under the active workflow effect. Checked
-`tiber-process-service` models own atomic `Requested`/`Prepared` admission (or
-content-free `Refused`) and terminal `Completed`, `SpawnFailed`, `TimedOut`,
-`Cancelled`, `Unknown`, and `Reconciled` facts. Only verified preparation and
-unchanged trusted configuration mint opaque dispatch authority.
-
-`tiber-process-linux` interprets that authority through fixed network-denied
-Bubblewrap containment and a private direct-argv launcher. The package keeps
-the launcher and pinned Bubblewrap helper under `libexec`. Bounded stdout and
-stderr are sanitized into the immediate tool result, while signed facts
-and the private full-fsync journal retain only content-free byte counts,
-digests, exit status, and stable terminal categories.
-
-A retained preparation is never redispatched. At TUI startup the CLI
-automatically records `Unknown`, consumes the one-shot read-only reconciliation
-capability through the Linux adapter, publishes `Reconciled`, and projects
-`completed`, `not-completed`, or `still-unknown` into the public session. There
-is no explicit owner recovery command. After every process stream for the
-active effect is closed or reconciled, startup durably interrupts and advances
-the enclosing inference workflow so its successor can accept a new prompt
-without replaying the interrupted inference. Recovery fails closed above 64
-matching process streams for the active effect or four events in any selected
-process stream; unrelated historical streams do not consume that effect-scoped
-budget.
-
-### Current external-tools S1 boundary
-
-The external-tools boundary is now implemented but is not connected to a
-workflow. `tiber-external-tools-core` is pure: the global, workflow-mode,
-agent-role, session, assignment, and effect-policy grants all intersect and
-bind to one `IntegrationId` before they mint opaque authorizations for tool
-list/call, Tiber-owned root declaration, optional resource list/read, or
-optional prompt list/get. A root URI can leave the core only through the
-dedicated root authorization; server metadata and resource/prompt outputs stay
-bounded and untrusted.
-
-`tiber-rmcp-client` pins RMCP 3.1.2 and interprets only bounded absolute
-direct-argv stdio and loopback Streamable HTTP. It rejects proxies, redirects,
-automatic replay or reinitialization, SSE resumption, resource templates,
-subscriptions, cache directives, and interactive continuations. Mutating tool
-calls carry an idempotency identity and ambiguous outcomes enter
-reconciliation. Sampling, elicitation, and MCP tasks are explicit refusals.
-This slice adds no `TiberEffect`, EventCore, CLI, TUI, inference, scheduler,
-or runner integration and makes no live external-service validation claim.
-The completed S3 audit boundary remains pure and unconnected.
-
-### Current memory S2 boundary
-
-`tiber-memory-core` provides a swappable `MemoryBackend` port;
-`tiber-hindsight-http` is its first adapter and keeps private DTOs for the
-schema-verified Hindsight HTTP API 0.8.3 and 0.8.4 contracts at that boundary.
-The adapter supports only asynchronous retain,
-operation status, cancellation, forget, recall, and named read-only
-reconciliation. It uses an explicit
-endpoint only: Tiber does not install or globally configure Hindsight, retry
-requests, manage Hindsight authentication, or claim generic or deployment
-service validation.
-
-Every memory operation is scoped by strict owner and repository provenance,
-with typed repository, agent, session, task, and memory-kind tags. Backend
-document and operation handles are stable and scope-bound. An ambiguous
-mutation carries a read-only reconciliation handle rather than granting a
-replay. Recall is bounded, advisory, untrusted,
-provenance-carrying context—not authority for a workflow, decision, or effect.
-Retain requests name their source turn, and recall requests never admit that
-same turn. Memory
-failures are visible and normally nonfatal. This S2 boundary has no EventCore,
-workflow, CLI, TUI, inference, or scheduler integration.
-
-### Current audit and integration S3 boundary
-
-`tiber-integration-audit` defines provider-neutral, serializable facts for
-memory and external-tool interactions. Its facts retain trusted provenance,
-stable policy/operation outcomes, reconciliation identities, and bounded
-evidence—not raw memory text, recall queries or recalled content, tool
-arguments, integration configuration, transport detail, or server payloads.
-Observed external payloads contribute only a byte count and domain-separated
-digest. The DTOs neither publish EventCore facts nor create workflow,
-scheduler, CLI, TUI, inference, or runner authority.
-
-Local deterministic fake-server tests cover no-I/O policy denial, sanitized
-tool observation/ambiguity/reconciliation, and scoped memory lifecycle plus
-hostile-input handling. An ignored Hindsight live test is available only with
-both `TIBER_RUN_LIVE_HINDSIGHT=1` and a nonempty
-`TIBER_HINDSIGHT_ENDPOINT`; it uses nonce-isolated synthetic data and
-exact-document cleanup. It is not part of default CI, which remains
-network-free. The explicit check passed against a local loopback Hindsight
-0.8.4 service on 2026-08-14; this is not a deployment claim or support beyond
-the schema-verified API versions.
-
-## Problem
-
-An inference client cannot safely serve as the authority for durable task,
-workflow, tool, memory, repository, verification, or delivery decisions.
-The former marketplace's advisory instructions were useful bootstrap context,
-but they could not prove agent identity, isolate a process, reconcile an
-ambiguous write, or resume a partially completed delivery after a crash.
-
-Tiber gives an individual developer one inspectable authority for those
-concerns. The intended product retains Codex's subscription-backed inference
-and familiar terminal interaction behind the accepted embedded typed-policy
-boundary.
-
-## Target user
-
-The v1 user is a single repository owner developing on x86_64 Linux. Tiber
-trusts that owner, the repository, local environment, configured toolchain,
-PATH, and explicitly configured integrations. It protects against ordinary
-mistakes, malformed or hostile external data, model errors, interruption,
-crashes, stale or corrupt state, partial I/O, ambiguous remote results, and
-remote data loss. Malicious local root, intentional owner bypass, and a
-compromised trusted toolchain are outside the v1 threat model.
-
-## Target primary workflows
-
-1. Start `tiber`, resume or create a session, select a Tiber Task, and converse
-   with streaming inference.
-2. Inspect the model's proposed tools, apply Tiber policy and owner approvals,
-   execute authorized effects, and retain durable receipts.
-3. Delegate bounded assignments to typed agents while Tiber owns identity,
-   context, budgets, cancellation, and no-progress termination.
-4. Inspect repository state, edit in an assignment boundary, run isolated
-   processes, verify behavior, review changes, and reconcile failures.
-5. Commit, push, open or update a pull request, recover CI, and resume delivery
-   after restart from EventCore facts.
-6. Use native Tiber Tasks and development-workflow services, third-party MCP
-   integrations, and optional Hindsight memory without internal MCP loopback.
-
-## Terminal experience
-
-The terminal interface is the reviewed Codex TUI itself, linked and invoked in
-process by Tiber. Codex therefore preserves
-its exact transcript, streaming, composer, keys, history, diff display, status
-bar, and status-card behavior without a drifting imitation. Tiber injects
-bounded workflow and task tools through typed in-process hooks and keeps every
-effect inert until signed application policy completes it. UI state and the
-Codex client never grant authority.
+- Configure local authority without trusting repository declarations.
+- Share signed tasks, specifications, priorities, dependencies, and claims
+  through Git.
+- Start one task or a bounded campaign and continue steering from the visible
+  conversation.
+- Observe mechanical enforcement of specification review, BDD/TDD, review,
+  delivery, CI, and cleanup.
+- Collaborate concurrently without duplicate task ownership.
+- Recover interrupted work without a background daemon.
+- Use bounded documentation, large-output, headroom, and optional memory
+  services without installing executable marketplace extensions.
 
 ## Functional requirements
 
-- Create invariant-carrying agent, session, assignment, attempt, effect, task,
-  and workflow identities.
-- Construct bounded context with provenance and explicit trust labels.
-- Embed the exact signed Codex fork and delegate subscription/browser login,
-  credential storage, refresh, account selection, endpoint selection, headers,
-  streaming, and authentication errors to its linked native APIs.
-- Rewrite thread start, resume, and fork through the typed host policy to a
-  read-only/no-network execution profile and inject only Tiber-owned tools.
-- Parse streamed text and structured tool requests; never let the model execute
-  a tool.
-- Own Tiber Tasks and development-workflow operations through native services.
-- Execute configured third-party MCP servers through a harness-owned client.
-- Provide a swappable memory port with the schema-verified Hindsight HTTP API
-  0.8.3 and 0.8.4 contracts as the first adapter, bounded asynchronous
-  retain/status/cancel/forget/recall/reconciliation operations, strict
-  owner/repository provenance and tags, and advisory untrusted recall.
-- Isolate bounded repository mutations behind the x86_64 Linux
-  `tiber-repository-linux` platform adapter, and execute only trusted
-  configured commands through the fixed `tiber-process-linux` adapter; a
-  generic model-controlled shell or process surface is not product scope.
-- Record durable facts and receipts for decisions, mutations, tests, memory,
-  retries, cancellation, reconciliation, verification, and delivery.
-- Resume safely after cancellation, interruption, crash, stale state, corrupt
-  state, concurrency, or an ambiguous remote result.
+### Installation and compatibility
 
-## Non-functional requirements
+- Ship as the public npm package `@jwilger/tiber` under `MIT OR Apache-2.0`.
+- Load extensions, skills, prompts, workflows, and themes through Pi's package
+  manifest.
+- Run in Pi's Node.js process without a launcher, daemon, Pi fork, native Tiber
+  binary, or MCP bridge.
+- Test against explicitly supported stock Pi and Node versions.
 
-- Functional core and imperative shell with explicit serializable trampoline
-  steps; no closure continuations.
-- Semantic types at domain boundaries and typed expected errors with stable
-  codes, structured context, causal chains, and retryability.
-- Explicit bounds for attempts, elapsed time, tokens, tool calls, cost where
-  applicable, and no-progress detection.
-- EventCore commands for durable decisions, command-specific folds, and no
-  unconsumed provenance in checked models.
-- Exact RED–GREEN implementation authority: every new or changed first-party
-  product behavior records a public-boundary failing scenario before
-  implementation, and the authorized production delta may address only that
-  exact failure. A predicted compiler diagnostic may serve as RED when a
-  missing type/API/trait/case is the intended boundary; incidental compilation
-  breakage may not. When an outer BDD failure has multiple plausible causes,
-  Tiber requires drill-down RED evidence at progressively narrower behavioral
-  boundaries until one cause is explicit, and authorizes only that leaf fix
-  before rerunning outward. After generation, an independent fresh-context
-  exact-failure-conformance review compares the complete production delta with
-  the durable RED evidence and blocks every later phase when the delta exceeds
-  that authority. Explicit exemptions cover simple development scripts, CI
-  workflows, covered refactors, and removals; tests never assert committed text
-  merely to manufacture evidence.
-- Rust Edition 2024, forbidden unsafe code, strict workspace Clippy inheritance,
-  and warnings denied in CI.
-- Credentials are owned by linked Codex authentication APIs and never become
-  Tiber domain data, logs, durable facts, or effect authority. Tiber admits the
-  typed login, cancellation, status, and logout lifecycle without inspecting
-  credential fields.
-- Observable model, context, policy, tool, memory, and delivery decisions with
-  sensitive data redacted.
-- Native Codex turns cross the typed host policy only after durable prompt and
-  workflow admission. A terminal notification must match the admitted thread
-  and turn, and reaches the TUI only after durable success or sanitized
-  interruption. Restart resolves an unobserved admitted turn without replay.
-- The native Codex tool contract exposes bounded task operations, exact
-  repository-write proposals, and configured-command requests. A repository
-  proposal produces no mutation authority until the owner submits an exact
-  later `approve` turn; a configured command can name only a trusted semantic
-  catalog entry. Native-client cancellation kills and reaps an active command
-  tree and records its typed terminal fact.
-- Reproducible x86_64 Linux packaging and clean-machine installation.
-- Record the exact stable tag, upstream commit, signed fork commit, Cargo source,
-  and Nix source hash in `codex-source.toml`; update them together with the
-  lockfile through an idempotent, non-force-pushing `just update-codex` flow.
+### Configuration and trust
 
-## Acceptance criteria
+- Resolve built-in, user-global, and project-local values with visible
+  inheritance.
+- Let global settings constrain project overrides to more restrictive values.
+- Keep project authority and secret references outside repository-controlled
+  files.
+- Bind project trust to generated identity, canonical Git common directory,
+  and expected remotes.
+- Enter visible read-only lockdown when required authority, extension inventory,
+  or containment evidence is missing or invalid.
 
-- Focused fork and Tiber tests pin the typed host/effect control surface for the
-  exact source revision, and clean Nix package smoke proves no external Codex
-  executable is required.
-- No operation outside Tiber policy can produce an effect. Denied built-ins may
-  remain in the protocol; explicitly permitted read-only, non-shell repository
-  observation remains untrusted inference context; and Tiber-declared dynamic
-  tools remain inert until the harness authorizes and executes them.
-- A real reviewed Codex TUI fixture reaches native startup without invoking a
-  hostile `codex` on `PATH` and restores its PTY exactly. Separate public
-  black-box scenarios prove configured-command execution, no repository write
-  before owner approval, and native-client process cancellation.
-- Native tasks, workflow, repository, process, verification, and delivery
-  services operate without MCP or shell loopback into Tiber.
-- MCP denial, cancellation, ambiguous-write, hostile-input, and capability
-  negotiation cases pass.
-- Hindsight fake-server tests prove scoped memory, provenance budgets,
-  cancellation, and nonfatal failure behavior without a live-service claim.
-- Crash/restart, stale/corrupt state, concurrency, and clean-machine packaging
-  cases pass.
-- Formatting, strict Clippy, deterministic behavior, EventCore,
-  semantic-type property, trampoline, mutation, TUI snapshot, and secret-leak
-  gates pass. Qualitative evaluation design is deferred until the complete
-  harness workflow is available; provider or stochastic evaluations are not
-  current product or CI gates.
-- Every roadmap increment is reviewed, committed with a rationale-bearing
-  Conventional Commit, pushed, confirmed green in CI, and closed in Tiber.
+### Tasks and collaboration
+
+- Store authoritative shared task events on a dedicated signed Git branch.
+- Support Backlog, Ready, In Progress, Done, an orthogonal Blocked state, shared
+  Ready order, dependencies, and evidence.
+- Publish claims remotely before mutation and enforce one exclusive claim per
+  task.
+- Never transfer a stale claim automatically.
+- Permit provenance-bearing untriaged discovery without autonomous promotion or
+  priority changes.
+
+### Specifications and workflow
+
+- Store canonical structured Gherkin and typed acceptance criteria with the
+  task.
+- Require fresh readiness review before Ready and fresh baseline revalidation
+  after claim.
+- Compile versioned data-only workflow definitions into immutable canonical IR.
+- Pin active runs to specification, baseline, workflow, policy, containment,
+  model route, and budget.
+- Enforce the Tiber policy floor regardless of project workflow.
+
+### BDD, TDD, and review
+
+- Work one independently valuable vertical scenario at a time.
+- Require a semantically valid RED observation before production mutation.
+- Allow a compile failure as RED only when it demonstrates a missing required
+  public surface.
+- Follow the actual diagnostic one minimal step at a time.
+- Permit refactoring only while green.
+- Require fresh lightweight review for every increment.
+- Require scope-complete verification and three consecutive complete,
+  finding-free final-review iterations.
+- Reset dependent evidence after findings, malformed review output, or material
+  source changes.
+
+### Autonomous execution
+
+- Keep the visible Pi session as coordinator and run worker roles in isolated
+  in-process Pi sessions.
+- Enforce hard task, initiative, time, token, cost, concurrency, and effect
+  bounds.
+- Keep worker prompts and tools stable within cache epochs.
+- Handle ordinary denial privately; escalate only a necessary unresolved
+  blocker.
+- Continue eligible campaign work around pre- and post-mutation blockers using
+  their distinct claim/worktree rules.
+- Stop work and checkpoint when Pi exits.
+
+### Effects and containment
+
+- Let models request but never execute or authorize effects.
+- Expose structured file operations and named executable/argv commands rather
+  than arbitrary shell text.
+- Persist intent and validate observations and receipts for consequential
+  effects.
+- Support host-trusted and externally attested isolation levels.
+- Verify strong containment first on Linux and fail closed elsewhere when it is
+  required.
+- Allow only human exact, state-bound, single-use, audited exceptions.
+
+### Worktrees and recovery
+
+- Use dedicated task branches/worktrees by default.
+- Reconcile owned worktrees, claims, processes, and heartbeats after restart.
+- Never delete foreign or ambiguous paths.
+- Preserve abandoned uncommitted source in private local recovery refs before
+  cleanup.
+- Require claim release and cleanup before Done.
+
+### Delivery and CI
+
+- Keep Git remote, CI providers, and review services as separate permissions and
+  receipts.
+- Support local-only, branch, direct, and review delivery modes.
+- Use signed Conventional Commits with explanatory bodies.
+- Require terminal success from every required CI authority for the exact
+  delivered revision.
+- Create a repository-wide hold after terminal CI failure until causally
+  resolved.
+- Support GitHub through a thin first-party adapter while retaining generic
+  ports for other services.
+
+### Context and integrations
+
+- Virtualize oversized Tiber-controlled output into local content-addressed
+  artifacts with bounded previews and search/range access.
+- Reserve context headroom and use typed priorities without rewriting prior
+  turns.
+- Provide first-party bounded Context7 library resolution and documentation
+  queries with provenance.
+- Provide optional Hindsight HTTP integration with separate private and opt-in
+  shared banks and strict retention filters.
+
+### UI
+
+- Provide status, doctor, settings, Kanban, task detail, work, campaign,
+  attention, containment, and artifact surfaces.
+- Keep lockdown, active workflow state, budgets, claim state, CI hold, and human
+  attention visible without modal prompts for ordinary denial.
+
+## Quality and delivery requirements
+
+- Use strict TypeScript and a functional core/imperative shell.
+- Parse untrusted data once and use stable typed failures.
+- Test product behavior through public boundaries with deterministic fixtures.
+- Do not test copied development-guidance wording.
+- Keep local commit hooks fast and run full verification in ordinary Node/npm
+  CI.
+- Require PRs for `main`; authorized ordinary PRs may auto-merge after gates.
+- Maintain versions through a release PR requiring explicit human merge.
+- Publish automatically afterward through npm trusted OIDC with provenance.
 
 ## Non-goals
 
-- Platforms other than x86_64 Linux in v1.
-- Direct OpenAI Responses API or Anthropic/Claude inference providers.
-- Allowing an ambient or unsupported Codex version to define runtime authority.
-- Installing or globally configuring Codex, Claude, MCP, Hindsight, shells, or
-  SSH.
-- MCP sampling, elicitation, or MCP tasks in the initial integration.
-- Hindsight `reflect` as the primary agent reasoning mechanism.
-- Compatibility aliases, deprecated task commands, transition crates, or a
-  command/package migration window.
-- Defending against malicious local root, intentional owner self-bypass, or a
-  compromised trusted local toolchain.
+- Migrating legacy tasks, events, sessions, signatures, or schemas.
+- Supporting the old Rust CLI or embedded Codex presentation.
+- Provisioning containers, namespaces, VMs, or network policy.
+- Running after Pi exits.
+- Providing an arbitrary provider runner or live-provider CI.
+- Trusting mutable repository scripts as CI authorities.
+- Installing or executing marketplace packages as dependencies.
+- Pretending Tiber can govern effects when it is disabled or a malicious peer
+  extension acts outside observable Pi boundaries.
+
+## Delivery plan
+
+The accepted vertical slices and their black-box acceptance boundaries are in
+`docs/plans/0001-stock-pi-typescript-replacement.md`.

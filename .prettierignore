@@ -1,8 +1,6 @@
-# Generated, vendored, and frozen reference trees are not formatter input.
-.dependencies/
-.direnv/
+dist/
+node_modules/
+package-lock.json
+coverage/
+.stryker-tmp/
 .worktrees/
-target/
-old-code-for-reference/
-Cargo.lock
-flake.lock

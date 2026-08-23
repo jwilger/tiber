@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "id": "tiber.default",
+  "name": "Tiber default workflow",
+  "status": "bootstrap",
+  "description": "The accepted default workflow is delivered incrementally by the vertical slices in the implementation plan."
+}

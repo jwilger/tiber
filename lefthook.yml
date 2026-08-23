@@ -1,11 +1,18 @@
-# Tiber standalone coding harness commit gate.
 assert_lefthook_installed: true
 
 pre-commit:
+  parallel: true
   commands:
-    tiber-format:
-      run: nix develop -c cargo fmt --all --check
-    tiber-clippy:
-      run: nix develop -c cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-    tiber-unit-tests:
-      run: nix develop -c cargo test --locked --workspace --all-features --lib --bins
+    format:
+      run: npm run format:check
+    lint:
+      run: npm run lint
+    typecheck:
+      run: npm run typecheck
+    unit:
+      run: npm run test:unit
+
+commit-msg:
+  commands:
+    conventional-with-rationale:
+      run: node tools/validate-commit-message.mjs {1}

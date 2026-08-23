@@ -1,89 +1,79 @@
 # Tiber contributor guide
 
-Tiber is a standalone Rust application, not an integration bundle. The root
-workspace is the product. `old-code-for-reference/` is frozen migration input:
-do not add it to workspace membership, CI, packaging, or a public command path.
+Tiber is the stock-Pi TypeScript package defined by `PRD.md`, the active ADRs,
+and `ARCHITECTURE.md`. The former Rust/Codex product is obsolete and must not be
+restored, invoked, included in CI, or exposed through a compatibility path.
 
-## Task authority
+## Authority and documentation
 
-This repository dogfoods the standalone Tiber built from this workspace. Its
-task board and `origin/tiber` branch are the authoritative development harness.
-Use that standalone executable for task search, creation, updates, validation,
-and publication recovery.
+ADRs record accepted decisions. `ARCHITECTURE.md` is the cumulative normative
+architecture derived from active ADRs and may lead implementation. New and
+revised code must conform; existing divergence is corrected when that code is
+otherwise changed.
 
-The development-system plugin's legacy Tiber integration is intentionally
-disabled by `[features] tiber = false` in `.development-system.toml`. Do not
-enable it, do not require its MCP tools, and do not treat their absence as a
-blocker. Generic plugin instructions for that legacy integration do not apply
-to task operations in this repository.
+Read the relevant local rule before changing code:
 
-## Toolchain and checks
+- `docs/rules/change-preflight.md`
+- `docs/rules/functional-core.md`
+- `docs/rules/semantic-types-and-errors.md`
+- `docs/rules/bdd-and-tdd.md`
+- `docs/rules/verification.md`
+- `docs/rules/review.md`
+- `docs/rules/workflow-and-commits.md`
+- `docs/rules/ci-and-delivery.md`
+- `docs/rules/worktree-hygiene.md`
+- `docs/rules/agentic-systems.md`
 
-Use the pinned Nix shell; do not install toolchains globally.
-
-```shell
-nix develop
-```
-
-Git owns local commit verification through the tracked Lefthook pre-commit
-configuration. The hook runs formatting, strict Clippy, and unit tests. Do not
-manually invoke `lefthook run`, the installed pre-commit hook, or its component
-commands as delivery verification; proceed to `git commit` and let Git invoke
-the hook. If the hook rejects the commit, fix the failure and retry the commit.
-Do not run `just ci` locally, including before or after a commit; `just ci` is
-the remote CI entry point for actionlint, the workspace lint-policy audit,
-formatting, strict Clippy, the full test suite, the app-server authority fixture,
-and packaging. Keep both boundaries credential-free and reproducible.
+The accepted implementation sequence is
+`docs/plans/0001-stock-pi-typescript-replacement.md`. Until the new shared task
+board is delivered, that approved plan and its vertical-slice order are the
+bootstrap task authority. Do not attempt to use the deleted Rust task system.
 
 ## Architecture
 
-- Keep a functional core and an imperative shell. Domain decisions are pure;
-  adapters interpret closed, typed effects.
-- Parse external representations once at the boundary into semantic types.
-  Expected failures use typed errors with stable codes, context, causes, and
-  retryability.
-- Use no unsafe code. Every shipping crate inherits workspace lints. Do not
-  add blanket Clippy allowances; a narrow `#[expect]` needs a reason and must
-  comply with [ADR 0012](docs/adr/0012-tiber-strict-clippy-policy.md).
-- EventCore commands express business-domain intent. Each command folds only
-  the facts needed for that decision; do not introduce aggregates, generic
-  mutable write models, or whole-session replay as command authority. Register
-  shipping models with EventCore's checked-model facilities and consume their
-  provenance completely.
-- The model may request a tool but never execute one. Keep all mutation,
-  process, network, memory, verification, and delivery effects behind Tiber
-  policy and durable receipts.
+Keep a functional core and imperative shell. Parse external representations
+once into semantic types. Domain decisions return closed typed effects or
+stable typed failures. Models may request effects but never execute or
+authorize them. Every consequential effect uses durable intent, observation,
+and validated receipt.
 
-Read [`ARCHITECTURE.md`](ARCHITECTURE.md), [`PRD.md`](PRD.md), the relevant
-ADR, and [`docs/rules/`](docs/rules/) before changing an architectural boundary.
+Workflow and policy authorization are deterministic. Inference may assess
+semantics but cannot grant capability. Human exceptions are exact, single-use,
+state-bound, short-lived, and audited.
 
-## Tests and documentation
+Use strict TypeScript. Shipping code has no `any`, unsafe casts across trust
+boundaries, blanket lint suppressions, hidden subprocess shells, or install-time
+native dependencies.
 
-Write behavior-focused tests through public boundaries. Keep deterministic
-fixtures local and scrub secrets from all inputs, output, and failures. Record
-hard-to-reverse decisions in `docs/adr/`; update the relevant rule when a
-working agreement changes.
+## Development and tests
 
-There is no provider-runner or marketplace-validation surface in this
-repository. Do not add one or wire one into CI without an explicit product
-decision.
+Use the pinned Node/npm versions. Nix is local convenience only and must not be
+required by CI.
+
+Write behavior-focused tests through stable public boundaries. Use a real
+failing observation before implementation when behavior changes. Do not add
+tests that merely assert copied guidance, prompt wording, types, constants, or
+source layout.
+
+Run focused tests while developing. Do not run the complete CI suite locally as
+a delivery ritual. Git's pre-commit hook runs formatting, strict lint,
+incremental type checking, and fast unit tests. Full acceptance, integration,
+recovery, package, and mutation verification belongs to CI. There is no heavy
+pre-push hook.
 
 ## Delivery
 
-Tiber uses direct-to-trunk delivery unless the owner explicitly chooses another
-mode. Every authored commit must be signed, use a concise Conventional Commit
-subject, and include a non-empty body explaining why the change exists. Never
-disable signing and never add AI-attribution trailers.
+All source changes use pull requests. Direct pushes to `main` and force pushes
+are prohibited. Every authored commit is signed and has a concise Conventional
+Commit subject plus a non-empty explanatory body. Never disable signing or add
+AI-attribution trailers.
 
-The delivery boundary is one-way:
+Ordinary PRs may auto-merge after every required gate when the author has
+permission. Generated release PRs require explicit human merge; tagging,
+GitHub Release creation, and OIDC/provenance npm publication are automatic only
+after that merge.
 
-1. Complete final review against the final source-content snapshot.
-2. Create the signed commit; Git runs the Lefthook pre-commit gate.
-3. Push and confirm the full remote CI gate for the pushed revision.
-
-A content-identical commit does not invalidate completed source review merely
-because staging partition, `HEAD`, commit metadata, or its signature changed.
-Restart source review only when reviewed paths, contents, modes, untracked
-content, pinned baseline, or requested scope changes. Commit-message, signature,
-and remote CI checks are delivery verification, not a reason to repeat source
-review. See [`docs/rules/workflow-and-commits.md`](docs/rules/workflow-and-commits.md).
+Complete final source review before creating the delivery commit. A
+content-identical commit metadata or signature change does not invalidate that
+review. If a hook or CI gate fails, fix the cause and rerun the narrowest
+relevant check before retrying delivery.
