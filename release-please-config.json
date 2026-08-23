@@ -8,6 +8,7 @@
       "release-type": "node",
       "package-name": "@jwilger/tiber",
       "changelog-path": "CHANGELOG.md",
+      "initial-version": "0.1.0",
       "include-component-in-tag": false,
       "pull-request-title-pattern": "chore: release ${version}"
     }
