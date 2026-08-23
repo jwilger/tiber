@@ -21,6 +21,7 @@ import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
 import { handleSettingsCommand } from "./settings-command.js";
 import { registerTaskCommands } from "./task-commands.js";
+import { handleWorkCommand } from "./work-command.js";
 
 export default function registerTiber(pi: ExtensionAPI): void {
   const packageVersion = readPackageVersion();
@@ -50,6 +51,11 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:settings", {
     description: "Inspect or edit inherited Tiber settings",
     handler: handleSettingsCommand,
+  });
+
+  pi.registerCommand("tiber:work", {
+    description: "Claim a Ready task and pin its baseline workflow run",
+    handler: handleWorkCommand,
   });
 
   pi.registerCommand("tiber:containment", {

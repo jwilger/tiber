@@ -71,6 +71,13 @@ specification with `/tiber:task specify <id> <base64url-json>`. Running
 with a 60-second and 4096-output-token budget; only an exact-schema, finding-free
 review of the pinned specification digest can publish Ready.
 
+`/tiber:work <ready-task-id>` compiles the built-in or narrower project
+`.tiber/workflow.json`, durably records a claim intent, publishes one exclusive
+claim, pins the exact source baseline and workflow digest, and revalidates both
+before work begins. Baseline drift releases the claim and preserves Ready
+ordering. Invalid workflow data, missing floor stages, competing claims, and
+unresolved publication attempts fail closed.
+
 ## Status and architecture
 
 The accepted replacement plan is in

@@ -13,6 +13,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { GitTaskRemote } from "../../src/adapters/tasks/git-task-remote.js";
 import type {
+  TaskClaimedEvent,
+  TaskClaimReleasedEvent,
   TaskCreatedEvent,
   TaskReadyEvent,
   TaskSpecifiedEvent,
@@ -146,6 +148,51 @@ describe("signed shared task ref", () => {
     const readyBoard = new GitTaskRemote(clones[1] ?? "").publish(readyEvent);
     expect(
       readyBoard.tasks.find((task) => task.id === specified.taskId)?.state,
+    ).toBe("Ready");
+
+    const claim: TaskClaimedEvent = {
+      schemaVersion: 1,
+      eventId: "00000000-0000-4000-8000-000000000003",
+      kind: "task-claimed",
+      occurredAt: "2026-08-23T00:03:00.000Z",
+      taskId: specified.taskId,
+      specificationDigest: digest,
+      claim: {
+        claimId: "00000000-0000-4000-8000-000000000004",
+        owner: "task@example.test",
+        baselineRevision: "a".repeat(40),
+        workflowDigest: `sha256:${"b".repeat(64)}`,
+      },
+    };
+    const claimedBoard = new GitTaskRemote(clones[0] ?? "").publish(claim);
+    expect(
+      claimedBoard.tasks.find((task) => task.id === claim.taskId)?.state,
+    ).toBe("In Progress");
+    const competing = new GitTaskRemote(clones[1] ?? "").publish({
+      ...claim,
+      eventId: "00000000-0000-4000-8000-000000000005",
+      claim: {
+        ...claim.claim,
+        claimId: "00000000-0000-4000-8000-000000000006",
+      },
+    });
+    expect(competing).toMatchObject({
+      mode: "degraded-read-only",
+      failure: "task claim is not exclusive or state-bound",
+    });
+    const release: TaskClaimReleasedEvent = {
+      schemaVersion: 1,
+      eventId: "00000000-0000-4000-8000-000000000007",
+      kind: "task-claim-released",
+      occurredAt: "2026-08-23T00:04:00.000Z",
+      taskId: claim.taskId,
+      specificationDigest: digest,
+      claimId: claim.claim.claimId,
+      reason: "baseline-drift",
+    };
+    const releasedBoard = new GitTaskRemote(clones[1] ?? "").publish(release);
+    expect(
+      releasedBoard.tasks.find((task) => task.id === claim.taskId)?.state,
     ).toBe("Ready");
 
     const attacker = join(root, "attacker");
