@@ -1,31 +1,23 @@
-# Reproducible, project-local tool state.
-/.dependencies/
-/**/.dependencies/
-/.direnv/
-/node_modules/
-/.codex/config.toml
+# Node
+node_modules/
+dist/
+coverage/
+.stryker-tmp/
+.worktrees/
+*.tsbuildinfo
 
-# Build and local runtime state.
-/target/
-/**/target/
-/.tasks
-/.worktrees/
-/.env.worktree
-/output/
-/mutants.out/
-/mutants.out.old/
+# Local Pi/Tiber state
+.pi/
+.tiber/
 
-# Local residue from the retired repository layout must never re-enter Tiber.
-/.evals/
-/plugins/
-/evals/
-/site/
-/tooling/evals/
+# Nix
+.direnv/
+result
+result-*
 
-# Nix build results.
-/result
-/result-*
-
-# Editor and operating-system noise.
+# Editors and operating systems
 .DS_Store
 *.swp
+*.swo
+.idea/
+.vscode/

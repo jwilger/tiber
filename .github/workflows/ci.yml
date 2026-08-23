@@ -17,61 +17,74 @@ concurrency:
 
 jobs:
   quality:
-    name: Deterministic quality gate
+    name: Quality
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:unit
 
-      - name: Enable user namespaces for Bubblewrap
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - name: Run required checks
-        run: nix develop --accept-flake-config -c just code-quality
-
-  package:
-    name: Reproducible package gate
+  acceptance:
+    name: Acceptance and package
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:acceptance
+      - run: npm run verify:package
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - name: Build package and smoke check
-        run: |
-          nix build --accept-flake-config --no-link .#tiber
-          nix build --accept-flake-config --no-link .#checks.x86_64-linux.package-smoke
+  mutation:
+    name: Mutation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run test:mutation
 
   gate:
     name: CI gate
     runs-on: ubuntu-24.04
-    needs: [package, quality]
     if: always()
+    needs: [quality, acceptance, mutation]
     steps:
-      - name: Require the quality gate
+      - name: Require every verification job
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          ACCEPTANCE: ${{ needs.acceptance.result }}
+          MUTATION: ${{ needs.mutation.result }}
         run: |
-          package_result="${{ needs.package.result }}"
-          quality_result="${{ needs.quality.result }}"
-          echo "package result: $package_result"
-          echo "quality result: $quality_result"
-          test "$package_result" = success
-          test "$quality_result" = success
+          printf 'quality=%s acceptance=%s mutation=%s\n' "$QUALITY" "$ACCEPTANCE" "$MUTATION"
+          test "$QUALITY" = success
+          test "$ACCEPTANCE" = success
+          test "$MUTATION" = success
