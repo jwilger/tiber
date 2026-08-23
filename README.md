@@ -76,7 +76,17 @@ review of the pinned specification digest can publish Ready.
 claim, pins the exact source baseline and workflow digest, and revalidates both
 before work begins. Baseline drift releases the claim and preserves Ready
 ordering. Invalid workflow data, missing floor stages, competing claims, and
-unresolved publication attempts fail closed.
+unresolved publication attempts fail closed. A successful claim receives a
+quota-bounded dedicated branch and owned worktree in Tiber's private agent
+directory. Ownership survives restart; shutdown terminates only registered
+process groups. Cleanup refuses foreign, ambiguous, or active ownership and
+first commits dirty tracked and untracked source to a private local
+`refs/tiber/recovery/...` ref that is never pushed automatically.
+
+Human takeover is available as `/tiber:work takeover <task-id>`. It requires an
+interactive exact task-and-claim confirmation, publishes a state-bound takeover
+event, and transfers durable worktree ownership; stale heartbeat alone never
+transfers authority.
 
 ## Status and architecture
 

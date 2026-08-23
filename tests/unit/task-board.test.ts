@@ -8,6 +8,7 @@ import {
   type TaskCreatedEvent,
   type TaskClaimedEvent,
   type TaskClaimReleasedEvent,
+  type TaskClaimTakenOverEvent,
   type TaskReadyEvent,
   type TaskSpecifiedEvent,
 } from "../../src/core/tasks/task-board.js";
@@ -111,6 +112,20 @@ const claimed: TaskClaimedEvent = {
     workflowDigest: `sha256:${"b".repeat(64)}`,
   },
 };
+const takenOver: TaskClaimTakenOverEvent = {
+  schemaVersion: 1,
+  eventId: "88888888-8888-4888-8888-888888888888",
+  kind: "task-claim-taken-over",
+  occurredAt: event.occurredAt,
+  taskId: event.task.id,
+  specificationDigest: digest,
+  previousClaimId: claimed.claim.claimId,
+  claim: {
+    ...claimed.claim,
+    claimId: "99999999-9999-4999-8999-999999999999",
+    owner: "takeover@example.test",
+  },
+};
 const released: TaskClaimReleasedEvent = {
   schemaVersion: 1,
   eventId: "77777777-7777-4777-8777-777777777777",
@@ -164,6 +179,118 @@ describe("exclusive claims", () => {
       specification,
       specificationDigest: digest,
     });
+  });
+
+  it("allows only an exact human-published claim takeover", () => {
+    expect(parseTaskEvent(takenOver)).toEqual(takenOver);
+    expect(
+      parseTaskEvent({
+        ...takenOver,
+        claim: { ...takenOver.claim, owner: "  takeover@example.test  " },
+      }),
+    ).toEqual(takenOver);
+    const board = foldTaskEvents([
+      created,
+      specified,
+      ready,
+      claimed,
+      takenOver,
+    ]);
+    expect(board.tasks[0]).toMatchObject({
+      state: "In Progress",
+      claim: takenOver.claim,
+    });
+    for (const invalid of [
+      { ...takenOver, previousClaimId: takenOver.claim.claimId },
+      {
+        ...takenOver,
+        previousClaimId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      },
+      { ...takenOver, specificationDigest: `sha256:${"c".repeat(64)}` },
+      {
+        ...takenOver,
+        claim: { ...takenOver.claim, baselineRevision: "c".repeat(40) },
+      },
+      {
+        ...takenOver,
+        claim: {
+          ...takenOver.claim,
+          workflowDigest: `sha256:${"d".repeat(64)}`,
+        },
+      },
+      {
+        ...takenOver,
+        claim: { ...takenOver.claim, claimId: claimed.claim.claimId },
+      },
+    ]) {
+      const denied = foldTaskEvents([
+        created,
+        specified,
+        ready,
+        claimed,
+        invalid,
+      ]);
+      expect(denied.tasks).toHaveLength(1);
+      expect(denied).toMatchObject({
+        mode: "degraded-read-only",
+        failure: "task claim takeover is not exact or state-bound",
+      });
+    }
+  });
+
+  it.each([
+    { ...takenOver, kind: "unknown" },
+    { ...takenOver, previousClaimId: "bad" },
+    { ...takenOver, previousClaimId: `x${takenOver.previousClaimId}` },
+    { ...takenOver, previousClaimId: `${takenOver.previousClaimId}x` },
+    { ...takenOver, previousClaimId: 1 },
+    { ...takenOver, claim: null },
+    { ...takenOver, claim: { ...takenOver.claim, claimId: "bad" } },
+    {
+      ...takenOver,
+      claim: { ...takenOver.claim, claimId: `x${takenOver.claim.claimId}` },
+    },
+    {
+      ...takenOver,
+      claim: { ...takenOver.claim, claimId: `${takenOver.claim.claimId}x` },
+    },
+    { ...takenOver, claim: { ...takenOver.claim, claimId: 1 } },
+    { ...takenOver, claim: { ...takenOver.claim, owner: " " } },
+    { ...takenOver, claim: { ...takenOver.claim, owner: 1 } },
+    { ...takenOver, claim: { ...takenOver.claim, baselineRevision: "bad" } },
+    {
+      ...takenOver,
+      claim: {
+        ...takenOver.claim,
+        baselineRevision: `x${takenOver.claim.baselineRevision}`,
+      },
+    },
+    {
+      ...takenOver,
+      claim: {
+        ...takenOver.claim,
+        baselineRevision: `${takenOver.claim.baselineRevision}x`,
+      },
+    },
+    { ...takenOver, claim: { ...takenOver.claim, baselineRevision: 1 } },
+    { ...takenOver, claim: { ...takenOver.claim, workflowDigest: "bad" } },
+    {
+      ...takenOver,
+      claim: {
+        ...takenOver.claim,
+        workflowDigest: `x${takenOver.claim.workflowDigest}`,
+      },
+    },
+    {
+      ...takenOver,
+      claim: {
+        ...takenOver.claim,
+        workflowDigest: `${takenOver.claim.workflowDigest}x`,
+      },
+    },
+    { ...takenOver, claim: { ...takenOver.claim, workflowDigest: 1 } },
+  ])("rejects malformed takeover authority %j", (input) => {
+    expect(parseTaskEvent(input)).toBeUndefined();
   });
 
   it("denies a second, stale, or mismatched claim transition", () => {

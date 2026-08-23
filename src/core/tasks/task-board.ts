@@ -68,6 +68,17 @@ export interface TaskClaimedEvent {
   readonly claim: TaskClaim;
 }
 
+export interface TaskClaimTakenOverEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: string;
+  readonly kind: "task-claim-taken-over";
+  readonly occurredAt: string;
+  readonly taskId: string;
+  readonly specificationDigest: string;
+  readonly previousClaimId: string;
+  readonly claim: TaskClaim;
+}
+
 export interface TaskClaimReleasedEvent {
   readonly schemaVersion: 1;
   readonly eventId: string;
@@ -84,6 +95,7 @@ export type TaskEvent =
   | TaskSpecifiedEvent
   | TaskReadyEvent
   | TaskClaimedEvent
+  | TaskClaimTakenOverEvent
   | TaskClaimReleasedEvent;
 
 export interface TaskBoard {
@@ -211,6 +223,41 @@ export function parseTaskEvent(value: unknown): TaskEvent | undefined {
       },
     };
   }
+  if (value.kind === "task-claim-taken-over" && isRecord(value.claim)) {
+    const claim = value.claim;
+    if (
+      // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects non-string JSON values and this guard narrows the type.
+      typeof value.previousClaimId !== "string" ||
+      !/^[0-9a-f-]{36}$/u.test(value.previousClaimId) ||
+      // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects non-string JSON values and this guard narrows the type.
+      typeof claim.claimId !== "string" ||
+      !/^[0-9a-f-]{36}$/u.test(claim.claimId) ||
+      typeof claim.owner !== "string" ||
+      claim.owner.trim().length === 0 ||
+      // Stryker disable next-line ConditionalExpression: the following SHA grammar rejects non-string JSON values and this guard narrows the type.
+      typeof claim.baselineRevision !== "string" ||
+      !/^[0-9a-f]{40}$/u.test(claim.baselineRevision) ||
+      // Stryker disable next-line ConditionalExpression: the following digest grammar rejects non-string JSON values and this guard narrows the type.
+      typeof claim.workflowDigest !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(claim.workflowDigest)
+    )
+      return undefined;
+    return {
+      schemaVersion: 1,
+      eventId: common.eventId,
+      kind: "task-claim-taken-over",
+      occurredAt: common.occurredAt,
+      taskId: value.taskId,
+      specificationDigest: value.specificationDigest,
+      previousClaimId: value.previousClaimId,
+      claim: {
+        claimId: claim.claimId,
+        owner: claim.owner.trim(),
+        baselineRevision: claim.baselineRevision,
+        workflowDigest: claim.workflowDigest,
+      },
+    };
+  }
   if (value.kind === "task-claim-released") {
     if (
       // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects every non-string JSON value and this guard narrows the semantic type.
@@ -322,6 +369,26 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         };
       }
       tasks.set(task.id, { ...task, state: "In Progress", claim: event.claim });
+      continue;
+    }
+    if (event.kind === "task-claim-taken-over") {
+      if (
+        // Stryker disable next-line ConditionalExpression, LogicalOperator: claim and In Progress state are installed atomically, so exact claim identity independently establishes this state; both checks document the invariant.
+        task.state !== "In Progress" ||
+        // Stryker disable next-line OptionalChaining: In Progress always carries a claim by the closed fold invariant.
+        task.claim?.claimId !== event.previousClaimId ||
+        task.specificationDigest !== event.specificationDigest ||
+        task.claim.baselineRevision !== event.claim.baselineRevision ||
+        task.claim.workflowDigest !== event.claim.workflowDigest ||
+        event.claim.claimId === event.previousClaimId
+      ) {
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: "task claim takeover is not exact or state-bound",
+        };
+      }
+      tasks.set(task.id, { ...task, claim: event.claim });
       continue;
     }
     if (event.kind === "task-claim-released") {

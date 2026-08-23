@@ -9,10 +9,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { FileRunJournal } from "../adapters/runs/file-run-journal.js";
+import { GitOwnedWorktrees } from "../adapters/worktrees/git-owned-worktrees.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
 import type {
   TaskClaimedEvent,
   TaskClaimReleasedEvent,
+  TaskClaimTakenOverEvent,
 } from "../core/tasks/task-board.js";
 import {
   BUILT_IN_WORKFLOW,
@@ -42,12 +44,102 @@ function projectWorkflow(cwd: string): unknown {
   }
 }
 
-export function handleWorkCommand(
+export async function handleWorkCommand(
   argumentsText: string,
   context: ExtensionCommandContext,
 ): Promise<void> {
-  const taskId = argumentsText.trim();
   const remote = new GitTaskRemote(context.cwd);
+  const takeoverMatch = /^takeover\s+(\S+)$/u.exec(argumentsText.trim());
+  if (takeoverMatch !== null) {
+    const taskId = takeoverMatch[1] ?? "";
+    const board = remote.read();
+    const task = board.tasks.find((candidate) => candidate.id === taskId);
+    if (
+      board.mode !== "writable" ||
+      task?.state !== "In Progress" ||
+      task.claim === undefined ||
+      task.specificationDigest === undefined
+    ) {
+      context.ui.notify(
+        "TIBER_TAKEOVER_DENIED: no exact active claim",
+        "error",
+      );
+      return;
+    }
+    if (!context.hasUI) {
+      context.ui.notify(
+        "TIBER_TAKEOVER_HUMAN_REQUIRED: interactive confirmation required",
+        "error",
+      );
+      return;
+    }
+    const phrase = `takeover ${task.id} ${task.claim.claimId}`;
+    const confirmation = await context.ui.input(
+      "Exact claim takeover",
+      `Type: ${phrase}`,
+    );
+    if (confirmation !== phrase) {
+      context.ui.notify(
+        "TIBER_TAKEOVER_DENIED: exact confirmation did not match",
+        "error",
+      );
+      return;
+    }
+    const owner = git(context.cwd, ["config", "user.email"]);
+    if (owner === undefined) {
+      context.ui.notify(
+        "TIBER_WORK_GIT_IDENTITY_REQUIRED: owner is unavailable",
+        "error",
+      );
+      return;
+    }
+    const claimId = randomUUID();
+    const occurredAt = new Date().toISOString();
+    const event: TaskClaimTakenOverEvent = {
+      schemaVersion: 1,
+      eventId: randomUUID(),
+      kind: "task-claim-taken-over",
+      occurredAt,
+      taskId: task.id,
+      specificationDigest: task.specificationDigest,
+      previousClaimId: task.claim.claimId,
+      claim: { ...task.claim, claimId, owner },
+    };
+    const published = remote.publish(event);
+    if (
+      published.mode !== "writable" ||
+      published.tasks.find((candidate) => candidate.id === task.id)?.claim
+        ?.claimId !== claimId
+    ) {
+      context.ui.notify(
+        "TIBER_TAKEOVER_PUBLICATION_FAILED: takeover was not observed",
+        "error",
+      );
+      return;
+    }
+    const transfer = new GitOwnedWorktrees(
+      context.cwd,
+      getAgentDir(),
+    ).transferClaim({
+      taskId: task.id,
+      previousClaimId: task.claim.claimId,
+      claimId,
+      occurredAt,
+    });
+    if (!transfer.ok) {
+      context.ui.notify(
+        `${transfer.failure.code}: ${transfer.failure.message}`,
+        "error",
+      );
+      return;
+    }
+    context.ui.notify(
+      `Claim takeover published\nTask: ${task.id}\nClaim: ${claimId}`,
+      "info",
+    );
+    return;
+  }
+  const taskId = argumentsText.trim();
   const board = remote.read();
   const task = board.tasks.find((candidate) => candidate.id === taskId);
   if (
@@ -139,9 +231,46 @@ export function handleWorkCommand(
     );
     return Promise.resolve();
   }
-  journal.write({ ...baseRecord, state: "active" });
+  const worktree = new GitOwnedWorktrees(context.cwd, getAgentDir()).create({
+    taskId: task.id,
+    claimId,
+    baselineRevision,
+    occurredAt: new Date().toISOString(),
+  });
+  if (!worktree.ok) {
+    const release: TaskClaimReleasedEvent = {
+      schemaVersion: 1,
+      eventId: randomUUID(),
+      kind: "task-claim-released",
+      occurredAt: new Date().toISOString(),
+      taskId: task.id,
+      specificationDigest: task.specificationDigest,
+      claimId,
+      reason: "released",
+    };
+    remote.publish(release);
+    journal.write({ ...baseRecord, state: "blocked-worktree" });
+    context.ui.notify(
+      `${worktree.failure.code}: ${worktree.failure.message}; claim released`,
+      "error",
+    );
+    return Promise.resolve();
+  }
+  if (
+    !journal.write({
+      ...baseRecord,
+      state: "active",
+      worktreePath: worktree.value.path,
+    })
+  ) {
+    context.ui.notify(
+      "TIBER_RUN_JOURNAL_FAILED: active worktree receipt was not durable",
+      "error",
+    );
+    return Promise.resolve();
+  }
   context.ui.notify(
-    `Tiber work started\nTask: ${task.id}\nClaim: ${claimId}\nBaseline: ${baselineRevision}\nWorkflow: ${workflow.value.digest}`,
+    `Tiber work started\nTask: ${task.id}\nClaim: ${claimId}\nBaseline: ${baselineRevision}\nWorkflow: ${workflow.value.digest}\nWorktree: ${worktree.value.path}`,
     "info",
   );
   return Promise.resolve();

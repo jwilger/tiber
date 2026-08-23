@@ -4,6 +4,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { verifyFileContainment } from "../adapters/containment/file-containment-verifier.js";
+import { FileProcessGroupRegistry } from "../adapters/processes/file-process-group-registry.js";
 import { FileAuthorityStore } from "../adapters/settings/file-authority-store.js";
 import { FileSettingsStore } from "../adapters/settings/file-settings-store.js";
 import {
@@ -69,6 +70,13 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, context) => {
     pi.setActiveTools(["read", "bash", "edit", "write"]);
     const agentDirectory = getAgentDir();
+    const processes = new FileProcessGroupRegistry(agentDirectory).reconcile();
+    if (!processes.ok) {
+      context.ui.notify(
+        `${processes.failure.code}: ${processes.failure.message}`,
+        "error",
+      );
+    }
     const settings = new FileSettingsStore(agentDirectory, context.cwd).load();
     const authority = new FileAuthorityStore(agentDirectory).load();
     if (!settings.ok || !authority.ok) {
@@ -108,6 +116,10 @@ export default function registerTiber(pi: ExtensionAPI): void {
         ? `Tiber: ${containment.level}`
         : "Tiber: containment lockdown",
     );
+  });
+
+  pi.on("session_shutdown", () => {
+    new FileProcessGroupRegistry(getAgentDir()).terminateAll();
   });
 
   pi.on("before_agent_start", (_event, context) => {
