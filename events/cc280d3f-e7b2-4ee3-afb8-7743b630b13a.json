@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "eventId": "cc280d3f-e7b2-4ee3-afb8-7743b630b13a",
+  "kind": "task-created",
+  "occurredAt": "2026-08-23T22:01:46.316Z",
+  "task": {
+    "id": "2424c876-6180-4c64-976e-9ea4bd540744",
+    "title": "Complete accepted replacement plan slices 7 through 22",
+    "description": ""
+  }
+}
