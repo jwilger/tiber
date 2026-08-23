@@ -43,7 +43,14 @@ Headless settings inspection and editing are also available:
 /tiber:settings set global assuranceLevel workspace-isolated
 /tiber:settings set project worktreeMode current
 /tiber:settings set project worktreeMode inherit
+/tiber:settings lock assuranceLevel workspace-and-network-isolated
+/tiber:settings unlock assuranceLevel unlock minimumAssuranceLevel=workspace-and-network-isolated
+/tiber:settings secret context7 environment CONTEXT7_API_KEY
 ```
+
+Global assurance locks prevent project settings from broadening authority.
+Secret settings persist only external environment-variable references, never
+secret values.
 
 ## Status and architecture
 

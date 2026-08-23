@@ -116,6 +116,27 @@ describe("layered settings persistence", () => {
       "assuranceLevel | host-trusted | workspace-isolated | inherit | workspace-isolated (user-global)",
     );
 
+    await invoke(
+      repositoryB,
+      "/tiber:settings lock assuranceLevel workspace-and-network-isolated",
+    );
+    await invoke(
+      repositoryB,
+      "/tiber:settings set project assuranceLevel host-trusted",
+    );
+    await invoke(
+      repositoryB,
+      "/tiber:settings secret context7 environment CONTEXT7_API_KEY",
+    );
+    const lockedView = await invoke(repositoryB, "/tiber:settings show");
+    expect(lockedView).toContain(
+      "Assurance after ceiling: workspace-and-network-isolated",
+    );
+    expect(lockedView).toContain(
+      "Conflict: project requested host-trusted, but the user-global ceiling requires workspace-and-network-isolated or stronger",
+    );
+    expect(lockedView).toContain("context7=environment:CONTEXT7_API_KEY");
+
     const identityA = readFileSync(
       join(repositoryA, ".git", "tiber", "project-id"),
       "utf8",

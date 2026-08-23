@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { parseSettingsCommand } from "../../src/core/configuration/settings-command.js";
 
 const usage =
-  "usage: /tiber:settings [show | set <global|project> <setting> <value|inherit>]";
+  "usage: /tiber:settings [show | set <global|project> <setting> <value|inherit> | lock assuranceLevel <value> | unlock assuranceLevel <exact-confirmation> | secret <key> <environment NAME|inherit>]";
 
 describe("settings command", () => {
   it.each(["", "show", "   show   "])("parses show from %j", (input) => {
@@ -34,6 +34,42 @@ describe("settings command", () => {
     });
   });
 
+  it("parses authority commands", () => {
+    expect(
+      parseSettingsCommand(
+        "lock assuranceLevel workspace-and-network-isolated",
+      ),
+    ).toEqual({
+      ok: true,
+      value: { kind: "lock", value: "workspace-and-network-isolated" },
+    });
+    expect(
+      parseSettingsCommand(
+        "unlock assuranceLevel unlock minimumAssuranceLevel=hermetic",
+      ),
+    ).toEqual({
+      ok: true,
+      value: {
+        kind: "unlock",
+        confirmation: "unlock minimumAssuranceLevel=hermetic",
+      },
+    });
+    expect(
+      parseSettingsCommand("secret context7 environment CONTEXT7_API_KEY"),
+    ).toEqual({
+      ok: true,
+      value: {
+        kind: "secret",
+        key: "context7",
+        environmentName: "CONTEXT7_API_KEY",
+      },
+    });
+    expect(parseSettingsCommand("secret context7 inherit")).toEqual({
+      ok: true,
+      value: { kind: "secret", key: "context7" },
+    });
+  });
+
   it.each(["set", "set global", "set global assuranceLevel", "show extra"])(
     "rejects incomplete input %j with usage",
     (input) => {
@@ -47,6 +83,29 @@ describe("settings command", () => {
       });
     },
   );
+
+  it.each([
+    "set assuranceLevel inherit",
+    "lock other hermetic",
+    "lock assuranceLevel hermetic extra",
+    "unlock other unlock minimumAssuranceLevel=hermetic",
+    "unlock assuranceLevel minimumAssuranceLevel=hermetic",
+    "secret context7",
+    "secret context7 literal value",
+    "secret context7 environment",
+    "secret context7 inherit extra",
+    "other context7 inherit",
+    "other context7 environment VALUE",
+  ])("rejects malformed authority command %j", (input) => {
+    expect(parseSettingsCommand(input)).toEqual({
+      ok: false,
+      failure: {
+        code: "TIBER_SETTINGS_INVALID_VALUE",
+        message: usage,
+        retryable: false,
+      },
+    });
+  });
 
   it("rejects an unknown operation", () => {
     expect(parseSettingsCommand("remove global assuranceLevel value")).toEqual({

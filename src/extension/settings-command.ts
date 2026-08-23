@@ -3,11 +3,18 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 
+import { FileAuthorityStore } from "../adapters/settings/file-authority-store.js";
 import { FileSettingsStore } from "../adapters/settings/file-settings-store.js";
 import {
   parseSettingsCommand,
   type SettingsScope,
 } from "../core/configuration/settings-command.js";
+import {
+  formatAuthority,
+  lockMinimumAssurance,
+  setSecretReference,
+  unlockMinimumAssurance,
+} from "../core/configuration/authority.js";
 import {
   ASSURANCE_LEVELS,
   formatSettingsTable,
@@ -123,7 +130,9 @@ export async function handleSettingsCommand(
   argumentsText: string,
   context: ExtensionCommandContext,
 ): Promise<void> {
-  const store = new FileSettingsStore(getAgentDir(), context.cwd);
+  const agentDirectory = getAgentDir();
+  const store = new FileSettingsStore(agentDirectory, context.cwd);
+  const authorityStore = new FileAuthorityStore(agentDirectory);
   if (argumentsText.trim().length === 0 && context.mode === "tui") {
     await editInteractively(context, store);
     return;
@@ -138,6 +147,12 @@ export async function handleSettingsCommand(
   const loaded = store.load();
   if (!loaded.ok) {
     notifyFailure(context, loaded.failure.code, loaded.failure.message);
+    return;
+  }
+
+  const authority = authorityStore.load();
+  if (!authority.ok) {
+    notifyFailure(context, authority.failure.code, authority.failure.message);
     return;
   }
 
@@ -160,6 +175,53 @@ export async function handleSettingsCommand(
       notifyFailure(context, written.failure.code, written.failure.message);
       return;
     }
+  } else if (command.value.kind === "lock") {
+    const lockValue = command.value.value;
+    const level = ASSURANCE_LEVELS.find((candidate) => candidate === lockValue);
+    if (level === undefined) {
+      notifyFailure(
+        context,
+        "TIBER_SETTINGS_INVALID_VALUE",
+        `invalid assurance lock: ${lockValue}`,
+      );
+      return;
+    }
+    const saved = authorityStore.save(
+      lockMinimumAssurance(authority.value, level),
+    );
+    if (!saved.ok) {
+      notifyFailure(context, saved.failure.code, saved.failure.message);
+      return;
+    }
+  } else if (command.value.kind === "unlock") {
+    const unlocked = unlockMinimumAssurance(
+      authority.value,
+      command.value.confirmation,
+    );
+    if (!unlocked.ok) {
+      notifyFailure(context, unlocked.failure.code, unlocked.failure.message);
+      return;
+    }
+    const saved = authorityStore.save(unlocked.value);
+    if (!saved.ok) {
+      notifyFailure(context, saved.failure.code, saved.failure.message);
+      return;
+    }
+  } else if (command.value.kind === "secret") {
+    const updated = setSecretReference(
+      authority.value,
+      command.value.key,
+      command.value.environmentName,
+    );
+    if (!updated.ok) {
+      notifyFailure(context, updated.failure.code, updated.failure.message);
+      return;
+    }
+    const saved = authorityStore.save(updated.value);
+    if (!saved.ok) {
+      notifyFailure(context, saved.failure.code, saved.failure.message);
+      return;
+    }
   }
 
   const refreshed = store.load();
@@ -167,12 +229,24 @@ export async function handleSettingsCommand(
     notifyFailure(context, refreshed.failure.code, refreshed.failure.message);
     return;
   }
-
+  const refreshedAuthority = authorityStore.load();
+  if (!refreshedAuthority.ok) {
+    notifyFailure(
+      context,
+      refreshedAuthority.failure.code,
+      refreshedAuthority.failure.message,
+    );
+    return;
+  }
+  const requested =
+    refreshed.value.projectValues.assuranceLevel ??
+    refreshed.value.globalValues.assuranceLevel ??
+    "host-trusted";
   context.ui.notify(
-    formatSettingsTable(
+    `${formatSettingsTable(
       refreshed.value.globalValues,
       refreshed.value.projectValues,
-    ),
+    )}\n\n${formatAuthority(refreshedAuthority.value, requested)}`,
     "info",
   );
 }
