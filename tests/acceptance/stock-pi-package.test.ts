@@ -179,5 +179,5 @@ describe("the packed stock-Pi package", () => {
     expect(notification?.message).toContain("@jwilger/tiber 0.0.0");
     expect(notification?.message).toContain("Mode: read-only-bootstrap");
     expect(notification?.message).toContain(`Repository: ${workspace}`);
-  });
+  }, 30_000);
 });

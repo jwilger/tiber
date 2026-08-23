@@ -6,8 +6,9 @@ Node.js process and is being rebuilt as the public npm package
 `@jwilger/tiber`.
 
 The current bootstrap release is deliberately read-only. It provides
-`/tiber:doctor` and blocks Pi's known mutation tools while the governed task and
-workflow slices are implemented.
+`/tiber:doctor`, inherited global/project settings through `/tiber:settings`,
+and blocks Pi's known mutation tools while governed task workflows are
+implemented.
 
 ## Development
 
@@ -33,7 +34,16 @@ Load it from this checkout:
 pi -e ./dist/extension/index.js
 ```
 
-Then run `/tiber:doctor`.
+Then run `/tiber:doctor` or `/tiber:settings`.
+
+Headless settings inspection and editing are also available:
+
+```text
+/tiber:settings show
+/tiber:settings set global assuranceLevel workspace-isolated
+/tiber:settings set project worktreeMode current
+/tiber:settings set project worktreeMode inherit
+```
 
 ## Status and architecture
 
