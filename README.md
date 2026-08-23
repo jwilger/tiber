@@ -34,7 +34,8 @@ Load it from this checkout:
 pi -e ./dist/extension/index.js
 ```
 
-Then run `/tiber:doctor`, `/tiber:settings`, or `/tiber:containment`.
+Then run `/tiber:doctor`, `/tiber:settings`, `/tiber:containment`,
+`/tiber:tasks`, or `/tiber:task create <title>`.
 
 Headless settings inspection and editing are also available:
 
@@ -58,6 +59,13 @@ or tool dispatch while diagnostics remain available. Tiber replaces Pi's
 active `read`, `bash`, `edit`, and `write` schemas with a fixed governed
 surface: reads require canonical in-workspace targets, and mutation remains
 denied until a remotely published exclusive task claim exists.
+
+Shared Backlog tasks are append-only signed events on
+`refs/heads/tiber/tasks/v1`. Publication uses ordinary fast-forward pushes and
+retries from the newly observed head after a race; it never force-pushes.
+Malformed events or any unsigned/invalid commit degrade the board read-only.
+Git signing identity and SSH allowed-signers configuration are taken from the
+repository's local Git configuration.
 
 ## Status and architecture
 

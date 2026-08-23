@@ -20,10 +20,12 @@ import {
 import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
 import { handleSettingsCommand } from "./settings-command.js";
+import { registerTaskCommands } from "./task-commands.js";
 
 export default function registerTiber(pi: ExtensionAPI): void {
   const packageVersion = readPackageVersion();
   registerGovernedTools(pi);
+  registerTaskCommands(pi);
   let containment: ContainmentStatus = {
     state: "lockdown",
     level: "host-trusted",
