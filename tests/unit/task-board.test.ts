@@ -4,8 +4,15 @@ import {
   foldTaskEvents,
   formatTaskBoard,
   parseTaskCreatedEvent,
+  parseTaskEvent,
   type TaskCreatedEvent,
+  type TaskReadyEvent,
+  type TaskSpecifiedEvent,
 } from "../../src/core/tasks/task-board.js";
+import {
+  digestTaskSpecification,
+  type TaskSpecification,
+} from "../../src/core/tasks/readiness.js";
 
 const event: TaskCreatedEvent = {
   schemaVersion: 1,
@@ -48,6 +55,167 @@ describe("signed task event boundary", () => {
     { ...event, task: { ...event.task, description: 1 } },
   ])("rejects malformed authority %j", (input) => {
     expect(parseTaskCreatedEvent(input)).toBeUndefined();
+  });
+});
+
+const specification: TaskSpecification = {
+  outcome: "Deliver reviewed readiness",
+  scenarios: [
+    { name: "ready", given: ["complete"], when: ["reviewed"], then: ["Ready"] },
+  ],
+  acceptanceCriteria: ["shared Ready"],
+  exclusions: ["no priority mutation"],
+  dependencies: [],
+  testMappings: ["readiness.test.ts"],
+  architectureImplications: "Deterministic authority consumes review evidence.",
+};
+const digest = digestTaskSpecification(specification);
+
+const specified: TaskSpecifiedEvent = {
+  schemaVersion: 1,
+  eventId: "33333333-3333-4333-8333-333333333333",
+  kind: "task-specified",
+  occurredAt: event.occurredAt,
+  taskId: event.task.id,
+  specificationDigest: digest,
+  specification,
+};
+const ready: TaskReadyEvent = {
+  schemaVersion: 1,
+  eventId: "44444444-4444-4444-8444-444444444444",
+  kind: "task-ready",
+  occurredAt: event.occurredAt,
+  taskId: event.task.id,
+  specificationDigest: digest,
+  review: {
+    freshContext: true,
+    reviewerRole: "specification-reviewer",
+    findingCount: 0,
+    reviewedSpecificationDigest: digest,
+  },
+};
+
+describe("reviewed Ready events", () => {
+  it("parses specification and exact clean review events", () => {
+    expect(parseTaskEvent(specified)).toEqual(specified);
+    expect(parseTaskEvent(ready)).toEqual(ready);
+  });
+
+  it("projects Ready only after the canonical specification and clean review", () => {
+    const created = parseTaskCreatedEvent(event);
+    if (created === undefined) throw new Error("fixture must parse");
+    expect(foldTaskEvents([created, specified, ready]).tasks[0]?.state).toBe(
+      "Ready",
+    );
+    expect(foldTaskEvents([created, ready])).toEqual({
+      mode: "degraded-read-only",
+      tasks: [
+        {
+          id: created.task.id,
+          title: created.task.title,
+          description: created.task.description,
+          state: "Backlog",
+          blocked: false,
+        },
+      ],
+      failure: "Ready event lacks an exact clean specification review",
+    });
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        { ...ready, review: { ...ready.review, findingCount: 1 } },
+      ]),
+    ).toMatchObject({ mode: "degraded-read-only" });
+    const staleDigest = `sha256:${"b".repeat(64)}`;
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        {
+          ...ready,
+          specificationDigest: staleDigest,
+          review: {
+            ...ready.review,
+            reviewedSpecificationDigest: staleDigest,
+          },
+        },
+      ]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: "Ready event lacks an exact clean specification review",
+    });
+  });
+
+  it.each([
+    null,
+    { ...specified, schemaVersion: 2 },
+    { ...specified, eventId: 1 },
+    { ...specified, eventId: "bad" },
+    { ...specified, eventId: `x${specified.eventId}` },
+    { ...specified, eventId: `${specified.eventId}x` },
+    { ...specified, occurredAt: 1 },
+    { ...specified, occurredAt: "bad" },
+    { ...specified, taskId: 1 },
+    { ...specified, taskId: "bad" },
+    { ...specified, taskId: `x${specified.taskId}` },
+    { ...specified, taskId: `${specified.taskId}x` },
+    { ...specified, specificationDigest: 1 },
+    { ...specified, specificationDigest: "bad" },
+    { ...specified, specificationDigest: `x${digest}` },
+    { ...specified, specificationDigest: `${digest}x` },
+    { ...specified, specificationDigest: `sha256:${"b".repeat(64)}` },
+    {
+      ...ready,
+      specificationDigest: `x${digest}`,
+      review: { ...ready.review, reviewedSpecificationDigest: `x${digest}` },
+    },
+    {
+      ...ready,
+      specificationDigest: `${digest}x`,
+      review: { ...ready.review, reviewedSpecificationDigest: `${digest}x` },
+    },
+    { ...specified, specification: null },
+    { ...specified, kind: "unknown" },
+    { ...ready, kind: "unknown" },
+    { ...ready, review: null },
+    { ...ready, review: { ...ready.review, freshContext: false } },
+    { ...ready, review: { ...ready.review, reviewerRole: "other" } },
+    { ...ready, review: { ...ready.review, findingCount: "0" } },
+    { ...ready, review: { ...ready.review, findingCount: 1.5 } },
+    { ...ready, review: { ...ready.review, findingCount: -1 } },
+    {
+      ...ready,
+      review: {
+        ...ready.review,
+        reviewedSpecificationDigest: `sha256:${"b".repeat(64)}`,
+      },
+    },
+  ])("rejects malformed or stale shared readiness evidence %j", (candidate) => {
+    expect(parseTaskEvent(candidate)).toBeUndefined();
+  });
+
+  it("degrades when a shared event references an unknown task", () => {
+    const created = parseTaskCreatedEvent(event);
+    if (created === undefined) throw new Error("fixture must parse");
+    expect(
+      foldTaskEvents([
+        created,
+        { ...specified, taskId: "55555555-5555-4555-8555-555555555555" },
+      ]),
+    ).toEqual({
+      mode: "degraded-read-only",
+      tasks: [
+        {
+          id: created.task.id,
+          title: created.task.title,
+          description: created.task.description,
+          state: "Backlog",
+          blocked: false,
+        },
+      ],
+      failure: "task event references an unknown task",
+    });
   });
 });
 
@@ -94,8 +262,20 @@ describe("Kanban projection", () => {
       foldTaskEvents([
         parsed,
         { ...parsed, eventId: "33333333-3333-4333-8333-333333333333" },
-      ]).mode,
-    ).toBe("degraded-read-only");
+      ]),
+    ).toEqual({
+      mode: "degraded-read-only",
+      tasks: [
+        {
+          id: parsed.task.id,
+          title: parsed.task.title,
+          description: parsed.task.description,
+          state: "Backlog",
+          blocked: false,
+        },
+      ],
+      failure: "duplicate task authority event",
+    });
     expect(
       foldTaskEvents([
         parsed,

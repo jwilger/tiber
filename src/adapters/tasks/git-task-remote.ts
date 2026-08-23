@@ -1,20 +1,13 @@
 import { execFileSync } from "node:child_process";
-import {
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   foldTaskEvents,
-  parseTaskCreatedEvent,
+  parseTaskEvent,
   type TaskBoard,
-  type TaskCreatedEvent,
+  type TaskEvent,
 } from "../../core/tasks/task-board.js";
 
 const TASK_REF = "refs/heads/tiber/tasks/v1";
@@ -48,29 +41,51 @@ function copySigningConfiguration(source: string, target: string): void {
   }
 }
 
-function verifiedEvents(repository: string): TaskCreatedEvent[] | undefined {
+function verifiedEvents(repository: string): TaskEvent[] | undefined {
   const commits = git(repository, ["rev-list", "--reverse", "HEAD"])
     .split("\n")
     .filter(Boolean);
+  const events: TaskEvent[] = [];
   for (const commit of commits) {
     try {
       git(repository, ["verify-commit", commit]);
+      const changed = git(repository, [
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        commit,
+      ])
+        .split("\n")
+        .filter(Boolean);
+      const added = git(repository, [
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "--diff-filter=A",
+        "--name-only",
+        "-r",
+        commit,
+      ])
+        .split("\n")
+        .filter(Boolean);
+      if (
+        changed.length !== 1 ||
+        added.length !== 1 ||
+        changed[0] !== added[0] ||
+        !/^events\/[0-9a-f-]{36}\.json$/u.test(changed[0] ?? "")
+      )
+        return undefined;
+      const text = git(repository, ["show", `${commit}:${changed[0] ?? ""}`]);
+      const parsed: unknown = JSON.parse(text);
+      const event = parseTaskEvent(parsed);
+      if (event === undefined || `events/${event.eventId}.json` !== changed[0])
+        return undefined;
+      events.push(event);
     } catch {
       return undefined;
     }
-  }
-  const directory = join(repository, "events");
-  const events: TaskCreatedEvent[] = [];
-  for (const name of readdirSync(directory).sort()) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(join(directory, name), "utf8"));
-    } catch {
-      return undefined;
-    }
-    const event = parseTaskCreatedEvent(parsed);
-    if (event === undefined) return undefined;
-    events.push(event);
   }
   return events;
 }
@@ -124,7 +139,7 @@ export class GitTaskRemote {
     }
   }
 
-  public publish(event: TaskCreatedEvent): TaskBoard {
+  public publish(event: TaskEvent): TaskBoard {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       let repository: string | undefined;
       try {
@@ -163,7 +178,7 @@ export class GitTaskRemote {
           "--quiet",
           "-S",
           "-m",
-          `task: create ${event.task.id}`,
+          `task: ${event.kind} ${event.kind === "task-created" ? event.task.id : event.taskId}`,
           "-m",
           "Publish an append-only Tiber task event.",
         ]);
