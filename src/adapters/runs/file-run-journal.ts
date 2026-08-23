@@ -8,7 +8,9 @@ export interface RunJournalRecord {
   readonly claimId: string;
   readonly baselineRevision: string;
   readonly workflowDigest: string;
-  readonly state: "claim-intent" | "active" | "blocked-baseline-drift";
+  readonly state:
+    "claim-intent" | "active" | "blocked-baseline-drift" | "blocked-worktree";
+  readonly worktreePath?: string;
 }
 
 export class FileRunJournal {
