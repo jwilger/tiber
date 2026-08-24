@@ -175,6 +175,37 @@ describe("signed shared task ref", () => {
     expect(
       claimedBoard.tasks.find((task) => task.id === claim.taskId)?.state,
     ).toBe("In Progress");
+    const increment = requireTaskEvent(
+      {
+        schemaVersion: 1,
+        eventId: "00000000-0000-4000-8000-000000000009",
+        kind: "task-increment-preserved",
+        occurredAt: "2026-08-23T00:03:30.000Z",
+        taskId: claim.taskId,
+        specificationDigest: digest,
+        claimId: claim.claim.claimId,
+        increment: {
+          scenarioName: "ready",
+          testMapping: "shared-task-ref.test.ts",
+          baselineRevision: claim.claim.baselineRevision,
+          commandCatalogDigest: `sha256:${"f".repeat(64)}`,
+          commandName: "unit-tests",
+          redDiagnosticDigest: `sha256:${"b".repeat(64)}`,
+          greenDiagnosticDigest: `sha256:${"c".repeat(64)}`,
+          sourceDiffDigest: `sha256:${"d".repeat(64)}`,
+          reviewRationale: "The increment is minimal and scenario-focused.",
+        },
+      },
+      "task-increment-preserved",
+    );
+    const incrementBoard = new GitTaskRemote(clones[1] ?? "").publish(
+      increment,
+    );
+    expect(
+      incrementBoard.tasks.find((task) => task.id === claim.taskId)
+        ?.preservedIncrements,
+    ).toEqual([increment.increment]);
+
     const competingEvent = requireTaskEvent(
       {
         ...claim,

@@ -213,6 +213,8 @@ export async function handleRedCommand(
     redReceipt: some({
       scenarioName: decision.receipt.scenarioName,
       testMapping: decision.receipt.testMapping,
+      specificationDigest,
+      commandCatalogDigest: catalog.value.digest,
       diagnosticDigest: decision.receipt.diagnosticDigest,
       missingPublicSurface: decision.receipt.missingPublicSurface,
     }),

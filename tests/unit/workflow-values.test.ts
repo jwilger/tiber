@@ -10,6 +10,7 @@ import {
   parseRedReviewRationale,
   parseScenarioFeatureText,
   parseSourceDiffDigest,
+  parseSourceDiffText,
   parseWorkflowDefinitionId,
   parseWorkflowStepId,
   type CompiledWorkflowDigest,
@@ -17,6 +18,7 @@ import {
   type RedDiagnosticDigest,
   type ScenarioFeatureText,
   type SourceDiffDigest,
+  type SourceDiffText,
 } from "../../src/core/workflow/workflow-values.js";
 import { expectedSemanticFailure } from "../fixtures/failures.js";
 
@@ -25,6 +27,7 @@ describe("workflow semantic values", () => {
     expectTypeOf<RedDiagnosticDigest>().not.toEqualTypeOf<GreenDiagnosticDigest>();
     expectTypeOf<GreenDiagnosticDigest>().not.toEqualTypeOf<SourceDiffDigest>();
     expectTypeOf<CompiledWorkflowDigest>().not.toEqualTypeOf<SourceDiffDigest>();
+    expectTypeOf<SourceDiffText>().not.toEqualTypeOf<SourceDiffDigest>();
     expectTypeOf<ScenarioFeatureText>().not.toEqualTypeOf<SourceDiffDigest>();
   });
 
@@ -37,6 +40,7 @@ describe("workflow semantic values", () => {
     expect(parseRedDiagnosticDigest(digest).ok).toBe(true);
     expect(parseGreenDiagnosticDigest(digest).ok).toBe(true);
     expect(parseSourceDiffDigest(digest).ok).toBe(true);
+    expect(parseSourceDiffText("diff --git a/a b/a").ok).toBe(true);
     expect(parseScenarioFeatureText("Feature: account deletion").ok).toBe(true);
     expect(
       parseRedReviewRationale("A sufficiently detailed RED rationale.").ok,
@@ -57,6 +61,10 @@ describe("workflow semantic values", () => {
     expect(parseWorkflowStepId({ toString: () => "remote-claim" }).ok).toBe(
       false,
     );
+    expect(parseSourceDiffText({ length: 1 }).ok).toBe(false);
+    expect(parseSourceDiffText("x".repeat(65_536)).ok).toBe(true);
+    expect(parseSourceDiffText("").ok).toBe(false);
+    expect(parseSourceDiffText("x".repeat(65_537)).ok).toBe(false);
     expect(parseScenarioFeatureText({ length: 1 }).ok).toBe(false);
     expect(parseScenarioFeatureText("x".repeat(65_536)).ok).toBe(true);
     expect(parseScenarioFeatureText("x".repeat(65_537)).ok).toBe(false);
@@ -89,6 +97,7 @@ describe("workflow semantic values", () => {
     [parseRedDiagnosticDigest, "sha256:bad", "redDiagnosticDigest"],
     [parseGreenDiagnosticDigest, "sha256:bad", "greenDiagnosticDigest"],
     [parseSourceDiffDigest, "sha256:bad", "sourceDiffDigest"],
+    [parseSourceDiffText, "", "sourceDiffText"],
     [parseScenarioFeatureText, "", "scenarioFeatureText"],
     [parseRedReviewRationale, "short", "redReviewRationale"],
     [parseIncrementReviewRationale, "short", "incrementReviewRationale"],

@@ -1,0 +1,96 @@
+import { execFileSync } from "node:child_process";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
+
+import {
+  operationalFailure,
+  type TiberFailure,
+  type TiberResult,
+} from "../../core/failures/tiber-failure.js";
+import type { ClaimBaselineRevision } from "../../core/tasks/task-values.js";
+import {
+  parseSourceDiffText,
+  type SourceDiffText,
+} from "../../core/workflow/workflow-values.js";
+import type { OwnedWorktreePath } from "../../core/worktrees/worktree-values.js";
+
+type SourceDiffFailure = TiberFailure<
+  "TIBER_GREEN_DIFF_INVALID",
+  { readonly domain: "green-source-diff" },
+  "corrected-input" | "state-change" | "retry-operation"
+>;
+
+function git(cwd: OwnedWorktreePath, arguments_: readonly string[]): string {
+  return execFileSync("git", [...arguments_], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 70_000,
+  });
+}
+
+function failure(
+  message: string,
+  retryability: "retry-after-input" | "transient",
+): TiberResult<never, SourceDiffFailure> {
+  return {
+    ok: false,
+    failure: operationalFailure(
+      "TIBER_GREEN_DIFF_INVALID",
+      "green-source-diff",
+      message,
+      retryability,
+    ),
+  };
+}
+
+export function observeSourceDiff(
+  worktree: OwnedWorktreePath,
+  baseline: ClaimBaselineRevision,
+): TiberResult<SourceDiffText, SourceDiffFailure> {
+  try {
+    const tracked = git(worktree, [
+      "diff",
+      "--binary",
+      "--no-ext-diff",
+      baseline,
+      "--",
+    ]);
+    const additions: string[] = [];
+    let byteLength = Buffer.byteLength(tracked);
+    for (const path of git(worktree, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+    ])
+      .split("\n")
+      .filter((path) => path.length > 0 && !path.startsWith(".tiber/"))
+      .sort()) {
+      const canonical = realpathSync(join(worktree, path));
+      const fromRoot = relative(worktree, canonical);
+      const status = lstatSync(canonical);
+      if (
+        fromRoot.startsWith("..") ||
+        isAbsolute(fromRoot) ||
+        !status.isFile() ||
+        status.size > 65_536 - byteLength
+      )
+        return failure(
+          "source diff contains an unsafe or oversized untracked file",
+          "retry-after-input",
+        );
+      const addition = `--- /dev/null\n+++ b/${path}\n${readFileSync(canonical, "utf8")}`;
+      byteLength += Buffer.byteLength(addition);
+      additions.push(addition);
+    }
+    const parsed = parseSourceDiffText(`${tracked}${additions.join("\n")}`);
+    return parsed.ok
+      ? parsed
+      : failure(
+          "source diff is empty or exceeds its bound",
+          "retry-after-input",
+        );
+  } catch {
+    return failure("source diff could not be observed", "transient");
+  }
+}
