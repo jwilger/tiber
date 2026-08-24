@@ -173,6 +173,17 @@ defer; post-mutation blockers retain their work. Both remain as non-modal
 goal <title>` publishes a provenance-bearing ad-hoc Backlog task. Session
 shutdown records a restart-safe campaign checkpoint before process cleanup.
 
+When a consequential goal is genuinely blocked and no compliant route remains,
+`tiber_exception_request` obtains an independent tool-free necessity review and
+creates one deduplicated human attention item and prompts the human with the
+complete frozen claim. Confirmation approves it for five minutes and one use;
+`/tiber:exception` remains an optional inspection and recovery surface. Tiber
+consumes the approval durably before directly executing the exact
+shell-free executable, arguments, environment, directory, paths, preimages,
+revision, and state binding. Capability material is never exposed to the model;
+replay, near matches, drift, future use, expiry, and corrupt audit state fail
+closed.
+
 Only after an exact delivery and its complete CI receipt may
 `/tiber:done <task-id>` terminate that claim's processes, release the claim,
 preserve dirty source privately, remove its owned worktree, and publish Done.
