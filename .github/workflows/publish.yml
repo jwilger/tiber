@@ -62,4 +62,6 @@ jobs:
       - name: Use an OIDC-capable pinned npm CLI
         run: npm install --global npm@11.5.1
       - name: Publish with provenance
-        run: npm publish "$(node -p \"require('./npm-pack.json')[0].filename\")" --access public --provenance
+        run: |
+          PACKAGE_TARBALL="$(node -p "require('./npm-pack.json')[0].filename")"
+          npm publish "$PACKAGE_TARBALL" --access public --provenance
