@@ -45,7 +45,9 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Verify release tag and package version
-        run: test "$RELEASE_TAG" = "v$(node -p \"require('./package.json').version\")"
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          test "$RELEASE_TAG" = "v$PACKAGE_VERSION"
       - run: npm run verify
       - name: Build the exact publication tarball
         run: npm pack --json > npm-pack.json
