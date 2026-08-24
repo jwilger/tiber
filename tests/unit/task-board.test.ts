@@ -307,6 +307,55 @@ describe("signed final completion authority", () => {
       ],
     },
   };
+  const reviewOpenedDocument = {
+    schemaVersion: 1 as const,
+    eventId: "27272727-2727-4727-8727-272727272727",
+    kind: "task-review-opened" as const,
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    claimId: claimed.claim.claimId,
+    review: {
+      kind: "ordinary" as const,
+      request: {
+        repositoryOwner: "owner",
+        repositoryName: "repository",
+        headRef: deliveryDocument.receipt.destination.value,
+        headRevision: deliveryDocument.receipt.commit,
+        baseRef: "main",
+        title: "feat(review): add service delivery",
+        body: "Exact reviewed delivery.",
+      },
+      pullRequest: {
+        number: 42,
+        nodeId: "PR_node",
+        url: "https://github.com/owner/repository/pull/42",
+        author: "author",
+        headRevision: deliveryDocument.receipt.commit,
+      },
+    },
+  };
+  const reviewRecordedDocument = {
+    schemaVersion: 1 as const,
+    eventId: "28282828-2828-4828-8828-282828282828",
+    kind: "task-review-recorded" as const,
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    claimId: claimed.claim.claimId,
+    pullRequestNumber: 42,
+    receipt: {
+      observation: {
+        headRevision: deliveryDocument.receipt.commit,
+        reviewStatus: "approved" as const,
+        conversationStatus: "resolved" as const,
+        ciStatus: "success" as const,
+        authorMergePermission: "granted" as const,
+      },
+      mergeStatus: "open" as const,
+      disposition: "auto-merge-enabled" as const,
+    },
+  };
   const completed = parsedEvent({
     schemaVersion: 1,
     eventId: "fafafafa-fafa-4afa-8afa-fafafafafafa",
@@ -1073,6 +1122,315 @@ describe("signed final completion authority", () => {
     }
   });
 
+  it("records an exact opened review and authorized auto-merge disposition", () => {
+    const prefix = [
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+      secondIncrement,
+      review,
+      secondReview,
+      thirdReview,
+      parsedEvent({
+        ...deliveryDocument,
+        receipt: { ...deliveryDocument.receipt, mode: "review" },
+      }),
+      parsedEvent(ciDocument),
+    ];
+    const opened = parsedEvent(reviewOpenedDocument);
+    const recorded = parsedEvent(reviewRecordedDocument);
+    expect(opened).toEqual(reviewOpenedDocument);
+    expect(recorded).toEqual(reviewRecordedDocument);
+    if (recorded.kind !== "task-review-recorded")
+      throw new Error("fixture event invalid");
+    const board = foldTaskEvents([...prefix, opened, recorded]);
+    expect(board.mode).toBe("writable");
+    expect(board.tasks[0]).toMatchObject({
+      openedReview: { kind: "some", value: { kind: "ordinary" } },
+      reviewReceipt: {
+        kind: "some",
+        value: { disposition: "auto-merge-enabled" },
+      },
+    });
+    const merged = parsedEvent({
+      ...reviewRecordedDocument,
+      eventId: "33333333-aaaa-4333-8333-333333333333",
+      receipt: {
+        ...reviewRecordedDocument.receipt,
+        mergeStatus: "merged",
+        disposition: "merged",
+      },
+    });
+    const mergedBoard = foldTaskEvents([...prefix, opened, recorded, merged]);
+    expect(mergedBoard.mode).toBe("writable");
+    expect(mergedBoard.tasks[0]?.reviewReceipt).toMatchObject({
+      kind: "some",
+      value: { disposition: "merged" },
+    });
+    expect(foldTaskEvents([...prefix, completedRelease])).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "non-exact-claim-release" } },
+      },
+    });
+    expect(
+      foldTaskEvents([...prefix, opened, recorded, completedRelease]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "non-exact-claim-release" } },
+      },
+    });
+    expect(
+      foldTaskEvents([
+        ...prefix,
+        opened,
+        recorded,
+        merged,
+        completedRelease,
+        completed,
+      ]).tasks[0],
+    ).toMatchObject({ state: "Done" });
+
+    const missingPermission = parsedEvent({
+      ...reviewRecordedDocument,
+      eventId: "29292929-2929-4929-8929-292929292929",
+      receipt: {
+        observation: {
+          ...reviewRecordedDocument.receipt.observation,
+          authorMergePermission: "missing",
+        },
+        mergeStatus: "open",
+        disposition: "permission-missing",
+      },
+    });
+    expect(foldTaskEvents([...prefix, opened, missingPermission]).mode).toBe(
+      "writable",
+    );
+    const invalidDisposition = foldTaskEvents([
+      ...prefix,
+      opened,
+      {
+        ...recorded,
+        receipt: { ...recorded.receipt, disposition: "human-merge-required" },
+      },
+    ]);
+    expect(invalidDisposition.mode).toBe("degraded-read-only");
+    expect(invalidDisposition.tasks).toHaveLength(1);
+    expect(invalidDisposition.failure).toEqual(
+      some(
+        taskBoardFailure(
+          "invalid-review-receipt",
+          "review disposition is not authorized by exact gates",
+        ),
+      ),
+    );
+    const failedGate = parsedEvent({
+      ...reviewRecordedDocument,
+      eventId: "32323232-3232-4232-8232-323232323232",
+      receipt: {
+        observation: {
+          ...reviewRecordedDocument.receipt.observation,
+          ciStatus: "failure",
+        },
+        mergeStatus: "open",
+        disposition: "permission-missing",
+      },
+    });
+    expect(foldTaskEvents([...prefix, opened, failedGate])).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "invalid-review-receipt" } },
+      },
+    });
+
+    const releaseRef =
+      "refs/heads/release-please--branches--main--components--tiber";
+    const releaseDelivery = parsedEvent({
+      ...deliveryDocument,
+      receipt: {
+        ...deliveryDocument.receipt,
+        mode: "review",
+        destination: { kind: "some", value: releaseRef },
+      },
+    });
+    const releaseOpened = parsedEvent({
+      ...reviewOpenedDocument,
+      review: {
+        ...reviewOpenedDocument.review,
+        kind: "release",
+        request: {
+          ...reviewOpenedDocument.review.request,
+          headRef: releaseRef,
+          title: "chore(main): release tiber 1.2.3",
+        },
+      },
+    });
+    const releaseRecorded = parsedEvent({
+      ...reviewRecordedDocument,
+      receipt: {
+        ...reviewRecordedDocument.receipt,
+        disposition: "human-merge-required",
+      },
+    });
+    const releaseBoard = foldTaskEvents([
+      ...prefix.slice(0, -2),
+      releaseDelivery,
+      parsedEvent(ciDocument),
+      releaseOpened,
+      releaseRecorded,
+    ]);
+    expect(releaseBoard.mode).toBe("writable");
+    expect(releaseBoard.tasks[0]?.reviewReceipt).toMatchObject({
+      kind: "some",
+      value: { disposition: "human-merge-required" },
+    });
+    const releaseMerged = foldTaskEvents([
+      ...prefix.slice(0, -2),
+      releaseDelivery,
+      parsedEvent(ciDocument),
+      releaseOpened,
+      releaseRecorded,
+      merged,
+    ]);
+    expect(releaseMerged.mode).toBe("writable");
+    expect(releaseMerged.tasks[0]?.reviewReceipt).toMatchObject({
+      kind: "some",
+      value: { disposition: "merged" },
+    });
+
+    for (const malformed of [
+      { ...reviewOpenedDocument, claimId: "bad" },
+      { ...reviewOpenedDocument, review: null },
+      { ...reviewRecordedDocument, claimId: "bad" },
+      { ...reviewRecordedDocument, pullRequestNumber: 0 },
+      { ...reviewRecordedDocument, receipt: null },
+    ])
+      expect(parseTaskEvent(malformed).ok).toBe(false);
+
+    const wrongClaimOpened = parsedEvent({
+      ...reviewOpenedDocument,
+      claimId: "77777777-7777-4777-8777-777777777777",
+    });
+    const wrongSpecOpened = parsedEvent({
+      ...reviewOpenedDocument,
+      specificationDigest:
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+    const wrongRefOpened = parsedEvent({
+      ...reviewOpenedDocument,
+      review: {
+        ...reviewOpenedDocument.review,
+        request: {
+          ...reviewOpenedDocument.review.request,
+          headRef: "refs/heads/other",
+        },
+      },
+    });
+    const otherRevision = "7".repeat(40);
+    const wrongRevisionOpened = parsedEvent({
+      ...reviewOpenedDocument,
+      review: {
+        ...reviewOpenedDocument.review,
+        request: {
+          ...reviewOpenedDocument.review.request,
+          headRevision: otherRevision,
+        },
+        pullRequest: {
+          ...reviewOpenedDocument.review.pullRequest,
+          headRevision: otherRevision,
+        },
+      },
+    });
+    const duplicateOpened = parsedEvent({
+      ...reviewOpenedDocument,
+      eventId: "30303030-3030-4030-8030-303030303030",
+    });
+    const branchPrefix = [
+      ...prefix.slice(0, -2),
+      parsedEvent(deliveryDocument),
+      parsedEvent(ciDocument),
+    ];
+    const noCiPrefix = prefix.slice(0, -1);
+    const releasedPrefix = [...prefix, released];
+    for (const history of [
+      [...branchPrefix, opened],
+      [...noCiPrefix, opened],
+      [...prefix, wrongClaimOpened],
+      [...prefix, wrongSpecOpened],
+      [...prefix, wrongRefOpened],
+      [...prefix, wrongRevisionOpened],
+      [...prefix, opened, duplicateOpened],
+      [...releasedPrefix, opened],
+    ]) {
+      const invalid = foldTaskEvents(history);
+      expect(invalid.mode).toBe("degraded-read-only");
+      expect(invalid.tasks).toHaveLength(1);
+      expect(invalid.failure).toEqual(
+        some(
+          taskBoardFailure(
+            "invalid-review-receipt",
+            "opened review is duplicate, stale, or not state-bound",
+          ),
+        ),
+      );
+    }
+
+    const wrongClaimRecorded = parsedEvent({
+      ...reviewRecordedDocument,
+      claimId: "77777777-7777-4777-8777-777777777777",
+    });
+    const wrongSpecRecorded = parsedEvent({
+      ...reviewRecordedDocument,
+      specificationDigest:
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+    const wrongNumberRecorded = parsedEvent({
+      ...reviewRecordedDocument,
+      pullRequestNumber: 43,
+    });
+    const duplicateRecorded = parsedEvent({
+      ...reviewRecordedDocument,
+      eventId: "31313131-3131-4131-8131-313131313131",
+    });
+    const duplicateMerged = parsedEvent({
+      ...reviewRecordedDocument,
+      eventId: "34343434-3434-4434-8434-343434343434",
+      receipt: {
+        ...reviewRecordedDocument.receipt,
+        mergeStatus: "merged",
+        disposition: "merged",
+      },
+    });
+    for (const history of [
+      [...prefix, recorded],
+      [...prefix, opened, wrongClaimRecorded],
+      [...prefix, opened, wrongSpecRecorded],
+      [...prefix, opened, wrongNumberRecorded],
+      [...prefix, opened, recorded, duplicateRecorded],
+      [...prefix, opened, recorded, merged, duplicateRecorded],
+      [...prefix, opened, recorded, merged, duplicateMerged],
+      [...prefix, opened, released, recorded],
+    ]) {
+      const invalid = foldTaskEvents(history);
+      expect(invalid.mode).toBe("degraded-read-only");
+      expect(invalid.tasks).toHaveLength(1);
+      expect(invalid.failure).toEqual(
+        some(
+          taskBoardFailure(
+            "invalid-review-receipt",
+            "review gate receipt is duplicate, stale, or not state-bound",
+          ),
+        ),
+      );
+    }
+  });
+
   it.each([
     { ...deliveryDocument, kind: "unknown" },
     { ...deliveryDocument, receipt: null },
@@ -1201,8 +1559,44 @@ describe("signed final completion authority", () => {
       },
     });
     const reviewedButNotCi = [...events, thirdReview];
+    for (const incomplete of [
+      [...reviewedButNotCi, completedRelease],
+      [...reviewedButNotCi, parsedEvent(deliveryDocument), completedRelease],
+    ]) {
+      expect(foldTaskEvents(incomplete)).toMatchObject({
+        mode: "degraded-read-only",
+        failure: {
+          kind: "some",
+          value: { safeContext: { reason: "non-exact-claim-release" } },
+        },
+      });
+    }
+    const releasable = [
+      ...reviewedButNotCi,
+      parsedEvent(deliveryDocument),
+      parsedEvent(ciDocument),
+    ];
+    const changedSnapshot = `sha256:${"6".repeat(64)}`;
+    const changedReviews = [
+      "35353535-3535-4535-8535-353535353535",
+      "36363636-3636-4636-8636-363636363636",
+      "37373737-3737-4737-8737-373737373737",
+    ].map((eventId) =>
+      parsedEvent({
+        ...finalReviewDocument,
+        eventId,
+        verification: {
+          ...finalReviewDocument.verification,
+          sourceSnapshotDigest: changedSnapshot,
+        },
+        iteration: {
+          ...finalReviewDocument.iteration,
+          sourceSnapshotDigest: changedSnapshot,
+        },
+      }),
+    );
     expect(
-      foldTaskEvents([...reviewedButNotCi, completedRelease]),
+      foldTaskEvents([...releasable, ...changedReviews, completedRelease]),
     ).toMatchObject({
       mode: "degraded-read-only",
       failure: {
@@ -1210,11 +1604,6 @@ describe("signed final completion authority", () => {
         value: { safeContext: { reason: "non-exact-claim-release" } },
       },
     });
-    const releasable = [
-      ...reviewedButNotCi,
-      parsedEvent(deliveryDocument),
-      parsedEvent(ciDocument),
-    ];
     const releasedForCompletion = [...releasable, completedRelease];
     expect(
       foldTaskEvents([
@@ -1338,6 +1727,8 @@ describe("exclusive claims", () => {
       completionRelease: none,
       delivery: none,
       ci: none,
+      openedReview: none,
+      reviewReceipt: none,
     });
   });
 
@@ -1759,6 +2150,8 @@ describe("reviewed Ready events", () => {
           completionRelease: none,
           delivery: none,
           ci: none,
+          openedReview: none,
+          reviewReceipt: none,
         },
       ],
       failure: some(
@@ -1886,6 +2279,8 @@ describe("reviewed Ready events", () => {
           completionRelease: none,
           delivery: none,
           ci: none,
+          openedReview: none,
+          reviewReceipt: none,
         },
       ],
       failure: some(
@@ -1943,6 +2338,8 @@ describe("Kanban projection", () => {
           completionRelease: none,
           delivery: none,
           ci: none,
+          openedReview: none,
+          reviewReceipt: none,
         },
       ],
       failure: some(
@@ -1977,6 +2374,8 @@ describe("Kanban projection", () => {
           completionRelease: none,
           delivery: none,
           ci: none,
+          openedReview: none,
+          reviewReceipt: none,
         },
       ],
       failure: some(
