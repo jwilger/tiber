@@ -48,7 +48,15 @@ jobs:
         run: |
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
           test "$RELEASE_TAG" = "v$PACKAGE_VERSION"
-      - run: npm run verify
+      - name: Verify the exact release candidate
+        run: |
+          npm run format:check
+          npm run lint
+          npm run typecheck
+          npm run test:unit
+          npm run build
+          npm run test:acceptance
+          npm run verify:package
       - name: Build the exact publication tarball
         run: npm pack --json > npm-pack.json
       - name: Use an OIDC-capable pinned npm CLI
