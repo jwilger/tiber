@@ -5,7 +5,10 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { observeSourceDiff } from "../../src/adapters/git/git-source-diff.js";
+import {
+  observeSourceDiff,
+  observeSourceSnapshot,
+} from "../../src/adapters/git/git-source-diff.js";
 import { claimBaselineRevision } from "../fixtures/task-values.js";
 import { ownedWorktreePath } from "../fixtures/worktree-values.js";
 
@@ -33,7 +36,7 @@ describe("bounded GREEN source-diff observation", () => {
 
     expect(observeSourceDiff(worktree, baseline)).toMatchObject({
       ok: false,
-      failure: { code: "TIBER_GREEN_DIFF_INVALID" },
+      failure: { code: "TIBER_SOURCE_OBSERVATION_INVALID" },
     });
 
     writeFileSync(join(repository, "tracked.ts"), "export const value = 2;\n");
@@ -43,11 +46,16 @@ describe("bounded GREEN source-diff observation", () => {
     if (!observed.ok) return;
     expect(observed.value).toContain("tracked.ts");
     expect(observed.value).toContain("added.ts");
+    const snapshot = observeSourceSnapshot(worktree, baseline);
+    expect(snapshot).toMatchObject({ ok: true });
+    git(repository, ["add", "--all"]);
+    git(repository, ["commit", "-m", "test: preserve snapshot"]);
+    expect(observeSourceSnapshot(worktree, baseline)).toEqual(snapshot);
 
     writeFileSync(join(repository, "oversized.ts"), "x".repeat(65_537));
     expect(observeSourceDiff(worktree, baseline)).toMatchObject({
       ok: false,
-      failure: { code: "TIBER_GREEN_DIFF_INVALID" },
+      failure: { code: "TIBER_SOURCE_OBSERVATION_INVALID" },
     });
   });
 });

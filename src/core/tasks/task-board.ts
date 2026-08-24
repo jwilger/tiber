@@ -1,4 +1,14 @@
 import {
+  parseDeliveryCommitRevision,
+  parseDeliveryDestinationRef,
+  parseDeliveryTreeDigest,
+} from "../delivery/git-delivery-values.js";
+import {
+  validateGitDeliveryReceipt,
+  type GitDeliveryMode,
+  type GitDeliveryReceipt,
+} from "../delivery/git-delivery.js";
+import {
   parseCommandCatalogDigest,
   parseCommandName,
   type CommandCatalogDigest,
@@ -102,6 +112,7 @@ export interface Task {
   readonly preservedIncrements: readonly PreservedIncrement[];
   readonly finalReviewProgress: Option<FinalReviewProgress>;
   readonly completionRelease: Option<TaskClaimId>;
+  readonly delivery: Option<GitDeliveryReceipt>;
 }
 
 export interface TaskCreatedEvent {
@@ -168,6 +179,17 @@ export interface TaskIncrementPreservedEvent {
   readonly increment: PreservedIncrement;
 }
 
+export interface TaskDeliveryRecordedEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: TaskEventId;
+  readonly kind: "task-delivery-recorded";
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
+  readonly claimId: TaskClaimId;
+  readonly receipt: GitDeliveryReceipt;
+}
+
 export interface TaskFinalReviewRecordedEvent {
   readonly schemaVersion: 1;
   readonly eventId: TaskEventId;
@@ -212,6 +234,7 @@ export type TaskEvent =
   | TaskClaimedEvent
   | TaskClaimTakenOverEvent
   | TaskIncrementPreservedEvent
+  | TaskDeliveryRecordedEvent
   | TaskFinalReviewRecordedEvent
   | TaskClaimReleasedEvent
   | TaskCompletedEvent;
@@ -219,6 +242,7 @@ export type TaskEvent =
 export type TaskBoardFailureReason =
   | "duplicate-authority-event"
   | "incomplete-final-review"
+  | "invalid-delivery-receipt"
   | "invalid-preserved-increment"
   | "invalid-task-completion"
   | "non-exclusive-claim"
@@ -393,6 +417,15 @@ function parseFinalReviewIteration(
   };
 }
 
+function parseDeliveryMode(value: unknown): GitDeliveryMode | undefined {
+  return value === "local-only" ||
+    value === "branch-push" ||
+    value === "direct" ||
+    value === "review"
+    ? value
+    : undefined;
+}
+
 function parseTaskEventValue(value: unknown): TaskEvent | undefined {
   const created = parseTaskCreatedEventValue(value);
   if (created !== undefined) return created;
@@ -505,6 +538,70 @@ function parseTaskEventValue(value: unknown): TaskEvent | undefined {
         reviewRationale: reviewRationale.value,
       },
     };
+  }
+  if (value.kind === "task-delivery-recorded" && isRecord(value.receipt)) {
+    const claimId = parseTaskClaimId(value.claimId);
+    const mode = parseDeliveryMode(value.receipt.mode);
+    const baselineRevision = parseClaimBaselineRevision(
+      value.receipt.baselineRevision,
+    );
+    const commit = parseDeliveryCommitRevision(value.receipt.commit);
+    const tree = parseDeliveryTreeDigest(value.receipt.tree);
+    const sourceSnapshotDigest = parseSourceSnapshotDigest(
+      value.receipt.sourceSnapshotDigest,
+    );
+    const destinationValue = value.receipt.destination;
+    const remoteValue = value.receipt.observedRemoteCommit;
+    const destination =
+      isRecord(destinationValue) && destinationValue.kind === "none"
+        ? none
+        : isRecord(destinationValue) && destinationValue.kind === "some"
+          ? parseDeliveryDestinationRef(destinationValue.value)
+          : undefined;
+    const observedRemoteCommit =
+      isRecord(remoteValue) && remoteValue.kind === "none"
+        ? none
+        : isRecord(remoteValue) && remoteValue.kind === "some"
+          ? parseDeliveryCommitRevision(remoteValue.value)
+          : undefined;
+    if (
+      !claimId.ok ||
+      mode === undefined ||
+      !baselineRevision.ok ||
+      !commit.ok ||
+      !tree.ok ||
+      !sourceSnapshotDigest.ok ||
+      destination === undefined ||
+      observedRemoteCommit === undefined ||
+      ("ok" in destination && !destination.ok) ||
+      // Stryker disable next-line ConditionalExpression, StringLiteral: malformed remote revisions are independently rejected by exact receipt validation below; this check preserves boundary narrowing.
+      ("ok" in observedRemoteCommit && !observedRemoteCommit.ok)
+    )
+      return undefined;
+    const receipt: GitDeliveryReceipt = {
+      mode,
+      baselineRevision: baselineRevision.value,
+      commit: commit.value,
+      tree: tree.value,
+      sourceSnapshotDigest: sourceSnapshotDigest.value,
+      destination: "ok" in destination ? some(destination.value) : destination,
+      observedRemoteCommit:
+        "ok" in observedRemoteCommit
+          ? some(observedRemoteCommit.value)
+          : observedRemoteCommit,
+    };
+    return validateGitDeliveryReceipt(receipt).status === "authorized"
+      ? {
+          schemaVersion: 1,
+          eventId: common.eventId,
+          kind: "task-delivery-recorded",
+          occurredAt: common.occurredAt,
+          taskId: taskId.value,
+          specificationDigest: specificationDigest.value,
+          claimId: claimId.value,
+          receipt,
+        }
+      : undefined;
   }
   if (
     value.kind === "task-final-review-recorded" &&
@@ -692,6 +789,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         preservedIncrements: [],
         finalReviewProgress: none,
         completionRelease: none,
+        delivery: none,
       });
       continue;
     }
@@ -716,6 +814,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         preservedIncrements: [],
         finalReviewProgress: none,
         completionRelease: none,
+        delivery: none,
       });
       continue;
     }
@@ -746,6 +845,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         claim: some(event.claim),
         finalReviewProgress: none,
         completionRelease: none,
+        delivery: none,
       });
       continue;
     }
@@ -779,6 +879,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         claim: some(event.claim),
         finalReviewProgress: none,
         completionRelease: none,
+        delivery: none,
       });
       continue;
     }
@@ -823,7 +924,39 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         preservedIncrements: [...task.preservedIncrements, event.increment],
         finalReviewProgress: none,
         completionRelease: none,
+        delivery: none,
       });
+      continue;
+    }
+    if (event.kind === "task-delivery-recorded") {
+      if (
+        // Stryker disable next-line ConditionalExpression, LogicalOperator: In Progress atomically establishes active claim and specification digest; exact identities remain independently checked below.
+        task.state !== "In Progress" ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: In Progress atomically establishes claim presence; this check preserves explicit Option narrowing.
+        task.claim.kind === "none" ||
+        task.claim.value.claimId !== event.claimId ||
+        task.claim.value.baselineRevision !== event.receipt.baselineRevision ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: In Progress atomically establishes specification digest presence; this check preserves explicit Option narrowing.
+        task.specificationDigest.kind === "none" ||
+        task.specificationDigest.value !== event.specificationDigest ||
+        task.finalReviewProgress.kind === "none" ||
+        task.finalReviewProgress.value.cleanStreak !== 3 ||
+        task.finalReviewProgress.value.sourceSnapshotDigest !==
+          event.receipt.sourceSnapshotDigest ||
+        task.delivery.kind === "some"
+      ) {
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: some(
+            taskBoardFailure(
+              "invalid-delivery-receipt",
+              "delivery receipt is duplicate, stale, or not state-bound",
+            ),
+          ),
+        };
+      }
+      tasks.set(task.id, { ...task, delivery: some(event.receipt) });
       continue;
     }
     if (event.kind === "task-final-review-recorded") {
@@ -916,6 +1049,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
           event.reason === "completed" ? task.finalReviewProgress : none,
         completionRelease:
           event.reason === "completed" ? some(event.claimId) : none,
+        delivery: task.delivery,
       });
       continue;
     }

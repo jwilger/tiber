@@ -24,6 +24,7 @@ import {
   formatDoctorReport,
 } from "../core/doctor/report.js";
 import { handleCommandGrant } from "./command-grant.js";
+import { handleDeliveryCommand } from "./delivery-command.js";
 import { handleDoneCommand } from "./done-command.js";
 import { handleFinalReviewCommand } from "./final-review-command.js";
 import { handleGreenCommand } from "./green-command.js";
@@ -75,6 +76,11 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:commands", {
     description: "Grant the exact project structured command catalog",
     handler: handleCommandGrant,
+  });
+
+  pi.registerCommand("tiber:deliver", {
+    description: "Create and optionally push an exact signed Git delivery",
+    handler: handleDeliveryCommand,
   });
 
   pi.registerCommand("tiber:done", {

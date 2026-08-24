@@ -274,8 +274,12 @@ excluded by default.
 
 ## Delivery, CI, and release
 
-Git delivery, CI observation, and review service are independent. Every required
-CI authority must report terminal success for the exact delivered revision.
+Git delivery, CI observation, and review service are independent. Git delivery
+supports local-only, branch-push, direct, and review modes. It commits only the
+exact reviewed source snapshot with a signed Conventional Commit and non-empty
+body, never force-pushes, and records the exact commit, tree, destination, and
+observed remote revision in its receipt. Every required CI authority must report
+terminal success for the exact delivered revision.
 Generic CI commands are user-local, digest-pinned executable/argv templates
 returning validated JSON; mutable repository scripts cannot assert remote CI
 success.
