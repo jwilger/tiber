@@ -51,16 +51,19 @@ const editParameters = Type.Object({
   path: Type.String(),
   oldText: Type.String(),
   newText: Type.String(),
+  purpose: Type.Union([Type.Literal("production"), Type.Literal("refactor")]),
 });
 const writeParameters = Type.Object({
   path: Type.String(),
   content: Type.String(),
+  purpose: Type.Union([Type.Literal("production"), Type.Literal("refactor")]),
 });
 
 interface ActiveMutationAuthority {
   readonly root: OwnedWorktreePath;
   readonly claimStatus: "published";
   readonly redStatus: "accepted" | "required";
+  readonly refactorStatus: "allowed" | "revoked";
   readonly testMappings: readonly TestMappingPath[];
 }
 
@@ -91,7 +94,15 @@ function activeAuthority(
     const authority: ActiveMutationAuthority = {
       root: entry.path,
       claimStatus: "published",
-      redStatus: run.state === "red-accepted" ? "accepted" : "required",
+      redStatus:
+        run.state === "red-accepted" ||
+        run.state === "green-review-clean" ||
+        run.state === "green-rework-required" ||
+        run.state === "red-reinstated"
+          ? "accepted"
+          : "required",
+      refactorStatus:
+        run.state === "green-review-clean" ? "allowed" : "revoked",
       testMappings: task.specification.value.testMappings,
     };
     return [authority];
@@ -238,7 +249,11 @@ export function registerGovernedTools(pi: ExtensionAPI): void {
     async execute(_id, parameters, _signal, _update, context) {
       const authority = activeAuthority(context);
       if (authority === undefined) return deniedMutation();
-      const decision = authorizeWorkflowMutation(parameters.path, authority);
+      const decision = authorizeWorkflowMutation(
+        parameters.path,
+        parameters.purpose,
+        authority,
+      );
       if (!decision.allowed)
         return {
           content: [
@@ -302,7 +317,11 @@ export function registerGovernedTools(pi: ExtensionAPI): void {
     async execute(_id, parameters, _signal, _update, context) {
       const authority = activeAuthority(context);
       if (authority === undefined) return deniedMutation();
-      const decision = authorizeWorkflowMutation(parameters.path, authority);
+      const decision = authorizeWorkflowMutation(
+        parameters.path,
+        parameters.purpose,
+        authority,
+      );
       if (!decision.allowed)
         return {
           content: [

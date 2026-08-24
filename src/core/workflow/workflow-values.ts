@@ -31,6 +31,7 @@ export type GreenDiagnosticDigest = WorkflowValue<
   "green-diagnostic-digest"
 >;
 export type SourceDiffDigest = WorkflowValue<string, "source-diff-digest">;
+export type SourceDiffText = WorkflowValue<string, "source-diff-text">;
 export type ScenarioFeatureText = WorkflowValue<
   string,
   "scenario-feature-text"
@@ -53,6 +54,7 @@ type Field =
   | "redDiagnosticDigest"
   | "greenDiagnosticDigest"
   | "sourceDiffDigest"
+  | "sourceDiffText"
   | "scenarioFeatureText"
   | "redReviewRationale"
   | "incrementReviewRationale"
@@ -118,6 +120,14 @@ export const parseRedDiagnosticDigest = (
 export const parseGreenDiagnosticDigest = (
   value: unknown,
 ): Result<GreenDiagnosticDigest> => digest(value, "greenDiagnosticDigest");
+export function parseSourceDiffText(value: unknown): Result<SourceDiffText> {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value) <= 65_536
+    ? { ok: true, value: value as SourceDiffText }
+    : invalid("sourceDiffText");
+}
+
 export function parseScenarioFeatureText(
   value: unknown,
 ): Result<ScenarioFeatureText> {

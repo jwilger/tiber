@@ -1,7 +1,14 @@
 import {
+  parseCommandCatalogDigest,
+  parseCommandName,
+  type CommandCatalogDigest,
+  type CommandName,
+} from "../commands/command-values.js";
+import {
   parseClaimBaselineRevision,
   parseClaimOwnerIdentity,
   parseSpecificationDigest,
+  parseScenarioName,
   parseSpecificationReviewFindingCount,
   parseTaskClaimId,
   parseTaskDescription,
@@ -9,8 +16,10 @@ import {
   parseTaskEventOccurredAt,
   parseTaskId,
   parseTaskTitle,
+  parseTestMappingPath,
   type ClaimBaselineRevision,
   type ClaimOwnerIdentity,
+  type ScenarioName,
   type SpecificationDigest,
   type TaskClaimId,
   type TaskDescription,
@@ -18,10 +27,19 @@ import {
   type TaskEventOccurredAt,
   type TaskId,
   type TaskTitle,
+  type TestMappingPath,
 } from "./task-values.js";
 import {
   parseCompiledWorkflowDigest,
+  parseGreenDiagnosticDigest,
+  parseIncrementReviewRationale,
+  parseRedDiagnosticDigest,
+  parseSourceDiffDigest,
   type CompiledWorkflowDigest,
+  type GreenDiagnosticDigest,
+  type IncrementReviewRationale,
+  type RedDiagnosticDigest,
+  type SourceDiffDigest,
 } from "../workflow/workflow-values.js";
 import type { TiberFailure, TiberResult } from "../failures/tiber-failure.js";
 import { none, some, type Option } from "../types/option.js";
@@ -43,6 +61,18 @@ export interface TaskClaim {
   readonly workflowDigest: CompiledWorkflowDigest;
 }
 
+export interface PreservedIncrement {
+  readonly scenarioName: ScenarioName;
+  readonly testMapping: TestMappingPath;
+  readonly baselineRevision: ClaimBaselineRevision;
+  readonly commandCatalogDigest: CommandCatalogDigest;
+  readonly commandName: CommandName;
+  readonly redDiagnosticDigest: RedDiagnosticDigest;
+  readonly greenDiagnosticDigest: GreenDiagnosticDigest;
+  readonly sourceDiffDigest: SourceDiffDigest;
+  readonly reviewRationale: IncrementReviewRationale;
+}
+
 export interface Task {
   readonly id: TaskId;
   readonly title: TaskTitle;
@@ -52,6 +82,7 @@ export interface Task {
   readonly specification: Option<TaskSpecification>;
   readonly specificationDigest: Option<SpecificationDigest>;
   readonly claim: Option<TaskClaim>;
+  readonly preservedIncrements: readonly PreservedIncrement[];
 }
 
 export interface TaskCreatedEvent {
@@ -107,6 +138,17 @@ export interface TaskClaimTakenOverEvent {
   readonly claim: TaskClaim;
 }
 
+export interface TaskIncrementPreservedEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: TaskEventId;
+  readonly kind: "task-increment-preserved";
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
+  readonly claimId: TaskClaimId;
+  readonly increment: PreservedIncrement;
+}
+
 export interface TaskClaimReleasedEvent {
   readonly schemaVersion: 1;
   readonly eventId: TaskEventId;
@@ -124,10 +166,12 @@ export type TaskEvent =
   | TaskReadyEvent
   | TaskClaimedEvent
   | TaskClaimTakenOverEvent
+  | TaskIncrementPreservedEvent
   | TaskClaimReleasedEvent;
 
 export type TaskBoardFailureReason =
   | "duplicate-authority-event"
+  | "invalid-preserved-increment"
   | "non-exclusive-claim"
   | "non-exact-claim-release"
   | "non-exact-claim-takeover"
@@ -297,6 +341,63 @@ function parseTaskEventValue(value: unknown): TaskEvent | undefined {
           claim,
         };
   }
+  if (value.kind === "task-increment-preserved" && isRecord(value.increment)) {
+    const claimId = parseTaskClaimId(value.claimId);
+    const scenarioName = parseScenarioName(value.increment.scenarioName);
+    const testMapping = parseTestMappingPath(value.increment.testMapping);
+    const baselineRevision = parseClaimBaselineRevision(
+      value.increment.baselineRevision,
+    );
+    const commandCatalogDigest = parseCommandCatalogDigest(
+      value.increment.commandCatalogDigest,
+    );
+    const commandName = parseCommandName(value.increment.commandName);
+    const redDiagnosticDigest = parseRedDiagnosticDigest(
+      value.increment.redDiagnosticDigest,
+    );
+    const greenDiagnosticDigest = parseGreenDiagnosticDigest(
+      value.increment.greenDiagnosticDigest,
+    );
+    const sourceDiffDigest = parseSourceDiffDigest(
+      value.increment.sourceDiffDigest,
+    );
+    const reviewRationale = parseIncrementReviewRationale(
+      value.increment.reviewRationale,
+    );
+    if (
+      !claimId.ok ||
+      !scenarioName.ok ||
+      !testMapping.ok ||
+      !baselineRevision.ok ||
+      !commandCatalogDigest.ok ||
+      !commandName.ok ||
+      !redDiagnosticDigest.ok ||
+      !greenDiagnosticDigest.ok ||
+      !sourceDiffDigest.ok ||
+      !reviewRationale.ok
+    )
+      return undefined;
+    return {
+      schemaVersion: 1,
+      eventId: common.eventId,
+      kind: "task-increment-preserved",
+      occurredAt: common.occurredAt,
+      taskId: taskId.value,
+      specificationDigest: specificationDigest.value,
+      claimId: claimId.value,
+      increment: {
+        scenarioName: scenarioName.value,
+        testMapping: testMapping.value,
+        baselineRevision: baselineRevision.value,
+        commandCatalogDigest: commandCatalogDigest.value,
+        commandName: commandName.value,
+        redDiagnosticDigest: redDiagnosticDigest.value,
+        greenDiagnosticDigest: greenDiagnosticDigest.value,
+        sourceDiffDigest: sourceDiffDigest.value,
+        reviewRationale: reviewRationale.value,
+      },
+    };
+  }
   if (value.kind === "task-claim-released") {
     const claimId = parseTaskClaimId(value.claimId);
     if (
@@ -413,6 +514,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         specification: none,
         specificationDigest: none,
         claim: none,
+        preservedIncrements: [],
       });
       continue;
     }
@@ -493,6 +595,48 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
       tasks.set(task.id, { ...task, claim: some(event.claim) });
       continue;
     }
+    if (event.kind === "task-increment-preserved") {
+      if (
+        // Stryker disable next-line ConditionalExpression, LogicalOperator: claim and In Progress state are installed atomically; either check independently establishes the same lifecycle invariant.
+        task.state !== "In Progress" ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: claim and In Progress state are installed atomically; the state check already establishes presence.
+        task.claim.kind === "none" ||
+        task.claim.value.claimId !== event.claimId ||
+        task.claim.value.baselineRevision !==
+          event.increment.baselineRevision ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: an exact active claim is only installed after specification; this check documents the established Option invariant.
+        task.specification.kind === "none" ||
+        !task.specification.value.scenarios.some(
+          (scenario) => scenario.name === event.increment.scenarioName,
+        ) ||
+        !task.specification.value.testMappings.some(
+          (mapping) => mapping === event.increment.testMapping,
+        ) ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: digest absence yields undefined and exact comparison below independently rejects it; the kind check documents the Option rail.
+        task.specificationDigest.kind === "none" ||
+        task.specificationDigest.value !== event.specificationDigest ||
+        task.preservedIncrements.some(
+          (increment) =>
+            increment.scenarioName === event.increment.scenarioName,
+        )
+      ) {
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: some(
+            taskBoardFailure(
+              "invalid-preserved-increment",
+              "preserved increment is not unique or state-bound",
+            ),
+          ),
+        };
+      }
+      tasks.set(task.id, {
+        ...task,
+        preservedIncrements: [...task.preservedIncrements, event.increment],
+      });
+      continue;
+    }
     if (event.kind === "task-claim-released") {
       if (
         task.claim.kind === "none" ||
@@ -522,6 +666,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         specification: task.specification,
         specificationDigest: task.specificationDigest,
         claim: none,
+        preservedIncrements: task.preservedIncrements,
       });
       continue;
     }

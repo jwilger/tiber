@@ -69,11 +69,12 @@ const specification = requireTaskSpecification({
   outcome: "Deliver reviewed readiness",
   scenarios: [
     { name: "ready", given: ["complete"], when: ["reviewed"], then: ["Ready"] },
+    { name: "other", given: ["complete"], when: ["reviewed"], then: ["Other"] },
   ],
   acceptanceCriteria: ["shared Ready"],
   exclusions: ["no priority mutation"],
   dependencies: [],
-  testMappings: ["readiness.test.ts"],
+  testMappings: ["readiness.test.ts", "other.test.ts"],
   architectureImplications: "Deterministic authority consumes review evidence.",
 });
 const digest = digestTaskSpecification(specification);
@@ -124,6 +125,29 @@ const claimed = requireTaskEvent(
     },
   },
   "task-claimed",
+);
+const incrementPreserved = requireTaskEvent(
+  {
+    schemaVersion: 1,
+    eventId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    kind: "task-increment-preserved",
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    claimId: claimed.claim.claimId,
+    increment: {
+      scenarioName: "ready",
+      testMapping: "readiness.test.ts",
+      baselineRevision: claimed.claim.baselineRevision,
+      commandCatalogDigest: `sha256:${"f".repeat(64)}`,
+      commandName: "unit-tests",
+      redDiagnosticDigest: `sha256:${"b".repeat(64)}`,
+      greenDiagnosticDigest: `sha256:${"c".repeat(64)}`,
+      sourceDiffDigest: `sha256:${"d".repeat(64)}`,
+      reviewRationale: "The increment is minimal and scenario-focused.",
+    },
+  },
+  "task-increment-preserved",
 );
 const takenOver = requireTaskEvent(
   {
@@ -210,7 +234,147 @@ describe("exclusive claims", () => {
       specification: some(specification),
       specificationDigest: some(digest),
       claim: none,
+      preservedIncrements: [],
     });
+  });
+
+  it("preserves one signed scenario increment under the exact claim", () => {
+    expect(parsedEvent(incrementPreserved)).toEqual(incrementPreserved);
+    expect(
+      parsedEvent({ ...claimed, increment: incrementPreserved.increment }),
+    ).toEqual(claimed);
+    expect(
+      parsedEvent({ ...ready, increment: incrementPreserved.increment }),
+    ).toEqual(ready);
+    expect(
+      parseTaskEvent({ ...incrementPreserved, claimId: "bad" }),
+    ).toMatchObject({ ok: false });
+    for (const increment of [
+      { ...incrementPreserved.increment, scenarioName: "" },
+      { ...incrementPreserved.increment, testMapping: "../outside" },
+      { ...incrementPreserved.increment, baselineRevision: "bad" },
+      { ...incrementPreserved.increment, commandCatalogDigest: "bad" },
+      { ...incrementPreserved.increment, commandName: "Bad Command" },
+      { ...incrementPreserved.increment, sourceDiffDigest: "bad" },
+      { ...incrementPreserved.increment, redDiagnosticDigest: "bad" },
+      { ...incrementPreserved.increment, greenDiagnosticDigest: "bad" },
+      { ...incrementPreserved.increment, reviewRationale: "short" },
+    ]) {
+      expect(
+        parseTaskEvent({ ...incrementPreserved, increment }),
+      ).toMatchObject({
+        ok: false,
+      });
+    }
+    const prefix = [created, specified, ready, claimed] as const;
+    expect(
+      foldTaskEvents([created, specified, ready, incrementPreserved]),
+    ).toMatchObject({ mode: "degraded-read-only" });
+    for (const [eventId, candidate] of [
+      [
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        { ...incrementPreserved, claimId: takenOver.claim.claimId },
+      ],
+      [
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        {
+          ...incrementPreserved,
+          specificationDigest: `sha256:${"0".repeat(64)}`,
+        },
+      ],
+      [
+        "12121212-1212-4212-8212-121212121212",
+        {
+          ...incrementPreserved,
+          increment: {
+            ...incrementPreserved.increment,
+            baselineRevision: "0".repeat(40),
+          },
+        },
+      ],
+      [
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        {
+          ...incrementPreserved,
+          increment: {
+            ...incrementPreserved.increment,
+            scenarioName: "missing",
+          },
+        },
+      ],
+      [
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        {
+          ...incrementPreserved,
+          increment: {
+            ...incrementPreserved.increment,
+            testMapping: "missing.test.ts",
+          },
+        },
+      ],
+    ] as const) {
+      const invalid = requireTaskEvent(
+        { ...candidate, eventId },
+        "task-increment-preserved",
+      );
+      expect(foldTaskEvents([...prefix, invalid])).toMatchObject({
+        mode: "degraded-read-only",
+        failure: { kind: "some" },
+      });
+    }
+    const projected = foldTaskEvents([
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+    ]);
+    expect(projected.tasks[0]?.preservedIncrements).toEqual([
+      incrementPreserved.increment,
+    ]);
+    const otherScenario = requireTaskEvent(
+      {
+        ...incrementPreserved,
+        eventId: "99999999-9999-4999-8999-999999999998",
+        increment: {
+          ...incrementPreserved.increment,
+          scenarioName: "other",
+          testMapping: "other.test.ts",
+          sourceDiffDigest: `sha256:${"e".repeat(64)}`,
+        },
+      },
+      "task-increment-preserved",
+    );
+    expect(
+      foldTaskEvents([...prefix, incrementPreserved, otherScenario]).tasks[0]
+        ?.preservedIncrements,
+    ).toEqual([incrementPreserved.increment, otherScenario.increment]);
+
+    const duplicateScenario = requireTaskEvent(
+      {
+        ...incrementPreserved,
+        eventId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      },
+      "task-increment-preserved",
+    );
+    const duplicateBoard = foldTaskEvents([
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+      duplicateScenario,
+    ]);
+    expect(duplicateBoard).toMatchObject({
+      mode: "degraded-read-only",
+      failure: some(
+        taskBoardFailure(
+          "invalid-preserved-increment",
+          "preserved increment is not unique or state-bound",
+        ),
+      ),
+    });
+    expect(duplicateBoard.tasks).toEqual(projected.tasks);
   });
 
   it("allows only an exact human-published claim takeover", () => {
@@ -486,6 +650,7 @@ describe("reviewed Ready events", () => {
           specification: none,
           specificationDigest: none,
           claim: none,
+          preservedIncrements: [],
         },
       ],
       failure: some(
@@ -608,6 +773,7 @@ describe("reviewed Ready events", () => {
           specification: none,
           specificationDigest: none,
           claim: none,
+          preservedIncrements: [],
         },
       ],
       failure: some(
@@ -660,6 +826,7 @@ describe("Kanban projection", () => {
           specification: none,
           specificationDigest: none,
           claim: none,
+          preservedIncrements: [],
         },
       ],
       failure: some(
@@ -689,6 +856,7 @@ describe("Kanban projection", () => {
           specification: none,
           specificationDigest: none,
           claim: none,
+          preservedIncrements: [],
         },
       ],
       failure: some(

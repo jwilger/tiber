@@ -14,12 +14,18 @@ import {
   type TiberResult,
 } from "../../core/failures/tiber-failure.js";
 import {
+  parseCommandCatalogDigest,
+  type CommandCatalogDigest,
+} from "../../core/commands/command-values.js";
+import {
   parseClaimBaselineRevision,
   parseScenarioName,
+  parseSpecificationDigest,
   parseTaskClaimId,
   parseTestMappingPath,
   type ClaimBaselineRevision,
   type ScenarioName,
+  type SpecificationDigest,
   type TaskClaimId,
   type TaskId,
   type TestMappingPath,
@@ -47,11 +53,16 @@ export interface RunJournalRecord {
     | "active"
     | "blocked-baseline-drift"
     | "blocked-worktree"
-    | "red-accepted";
+    | "red-accepted"
+    | "green-review-clean"
+    | "green-rework-required"
+    | "red-reinstated";
   readonly worktreePath: Option<OwnedWorktreePath>;
   readonly redReceipt: Option<{
     readonly scenarioName: ScenarioName;
     readonly testMapping: TestMappingPath;
+    readonly specificationDigest: SpecificationDigest;
+    readonly commandCatalogDigest: CommandCatalogDigest;
     readonly diagnosticDigest: RedDiagnosticDigest;
     readonly missingPublicSurface: boolean;
   }>;
@@ -115,7 +126,10 @@ export class FileRunJournal {
           value.state !== "active" &&
           value.state !== "blocked-baseline-drift" &&
           value.state !== "blocked-worktree" &&
-          value.state !== "red-accepted")
+          value.state !== "red-accepted" &&
+          value.state !== "green-review-clean" &&
+          value.state !== "green-rework-required" &&
+          value.state !== "red-reinstated")
       )
         return failure(
           "TIBER_RUN_JOURNAL_INVALID",
@@ -149,19 +163,33 @@ export class FileRunJournal {
         !Array.isArray(red) &&
         "scenarioName" in red &&
         "testMapping" in red &&
+        "specificationDigest" in red &&
+        "commandCatalogDigest" in red &&
         "diagnosticDigest" in red &&
         "missingPublicSurface" in red &&
         typeof red.missingPublicSurface === "boolean"
           ? (() => {
               const scenarioName = parseScenarioName(red.scenarioName);
               const testMapping = parseTestMappingPath(red.testMapping);
+              const specificationDigest = parseSpecificationDigest(
+                red.specificationDigest,
+              );
+              const commandCatalogDigest = parseCommandCatalogDigest(
+                red.commandCatalogDigest,
+              );
               const diagnosticDigest = parseRedDiagnosticDigest(
                 red.diagnosticDigest,
               );
-              return scenarioName.ok && testMapping.ok && diagnosticDigest.ok
+              return scenarioName.ok &&
+                testMapping.ok &&
+                specificationDigest.ok &&
+                commandCatalogDigest.ok &&
+                diagnosticDigest.ok
                 ? {
                     scenarioName: scenarioName.value,
                     testMapping: testMapping.value,
+                    specificationDigest: specificationDigest.value,
+                    commandCatalogDigest: commandCatalogDigest.value,
                     diagnosticDigest: diagnosticDigest.value,
                     missingPublicSurface: red.missingPublicSurface,
                   }

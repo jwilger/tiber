@@ -10,11 +10,16 @@ function deny(code: ToolDecisionCode, detail: string): ToolDecision {
   return { allowed: false, code, detail };
 }
 
+export type MutationPurpose = "production" | "refactor";
+export type RefactorStatus = "allowed" | "revoked";
+
 export function authorizeWorkflowMutation(
   requestedPath: string,
+  purpose: MutationPurpose,
   authority: {
     readonly claimStatus: ClaimPublicationStatus;
     readonly redStatus: "accepted" | "required";
+    readonly refactorStatus: RefactorStatus;
     readonly testMappings: readonly TestMappingPath[];
   },
 ): ToolDecision {
@@ -39,6 +44,17 @@ export function authorizeWorkflowMutation(
       "TIBER_MUTATION_CLAIM_REQUIRED",
       "mutation requires an exact active remote claim",
     );
+  if (purpose === "refactor")
+    return authority.refactorStatus === "allowed"
+      ? {
+          allowed: true,
+          code: "TIBER_REFACTOR_ALLOWED",
+          detail: "exact observed GREEN authorizes refactoring",
+        }
+      : deny(
+          "TIBER_REFACTOR_REQUIRES_GREEN",
+          "refactoring requires a clean reviewed exact GREEN increment",
+        );
   if (authority.redStatus === "accepted")
     return {
       allowed: true,

@@ -24,6 +24,7 @@ import {
   formatDoctorReport,
 } from "../core/doctor/report.js";
 import { handleCommandGrant } from "./command-grant.js";
+import { handleGreenCommand } from "./green-command.js";
 import { registerCommandTools } from "./command-tools.js";
 import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
@@ -72,6 +73,12 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:commands", {
     description: "Grant the exact project structured command catalog",
     handler: handleCommandGrant,
+  });
+
+  pi.registerCommand("tiber:green", {
+    description:
+      "Observe exact GREEN, run fresh review, and preserve a signed increment",
+    handler: handleGreenCommand,
   });
 
   pi.registerCommand("tiber:red", {

@@ -6,13 +6,18 @@ import { testMappingPath } from "../fixtures/task-values.js";
 const authority = {
   claimStatus: "published" as const,
   redStatus: "required" as const,
+  refactorStatus: "revoked" as const,
   testMappings: [testMappingPath("tests/account-deletion.test.ts")],
 };
 
 describe("RED mutation gate", () => {
   it("allows only exact mapped test mutation before accepted RED", () => {
     expect(
-      authorizeWorkflowMutation("tests/account-deletion.test.ts", authority),
+      authorizeWorkflowMutation(
+        "tests/account-deletion.test.ts",
+        "production",
+        authority,
+      ),
     ).toEqual({
       allowed: true,
       code: "TIBER_TEST_MUTATION_ALLOWED",
@@ -24,7 +29,7 @@ describe("RED mutation gate", () => {
       "tests/account-deletion.test.ts/escape",
       ".tiber/commands.json",
     ]) {
-      expect(authorizeWorkflowMutation(path, authority)).toEqual({
+      expect(authorizeWorkflowMutation(path, "production", authority)).toEqual({
         allowed: false,
         code: "TIBER_RED_REQUIRED",
         detail: "production mutation requires an accepted exact scenario RED",
@@ -34,13 +39,17 @@ describe("RED mutation gate", () => {
 
   it("accepts any exact mapping in a multi-test specification", () => {
     expect(
-      authorizeWorkflowMutation("tests/account-deletion.test.ts", {
-        ...authority,
-        testMappings: [
-          testMappingPath("tests/other.test.ts"),
-          testMappingPath("tests/account-deletion.test.ts"),
-        ],
-      }),
+      authorizeWorkflowMutation(
+        "tests/account-deletion.test.ts",
+        "production",
+        {
+          ...authority,
+          testMappings: [
+            testMappingPath("tests/other.test.ts"),
+            testMappingPath("tests/account-deletion.test.ts"),
+          ],
+        },
+      ),
     ).toEqual({
       allowed: true,
       code: "TIBER_TEST_MUTATION_ALLOWED",
@@ -50,7 +59,7 @@ describe("RED mutation gate", () => {
 
   it("allows production mutation only after exact RED acceptance", () => {
     expect(
-      authorizeWorkflowMutation("src/account.ts", {
+      authorizeWorkflowMutation("src/account.ts", "production", {
         ...authority,
         redStatus: "accepted",
       }),
@@ -61,7 +70,7 @@ describe("RED mutation gate", () => {
         "accepted scenario RED authorizes a diagnostic production micro-step",
     });
     expect(
-      authorizeWorkflowMutation("src/account.ts", {
+      authorizeWorkflowMutation("src/account.ts", "production", {
         ...authority,
         claimStatus: "absent",
         redStatus: "accepted",
@@ -70,6 +79,30 @@ describe("RED mutation gate", () => {
       allowed: false,
       code: "TIBER_MUTATION_CLAIM_REQUIRED",
       detail: "mutation requires an exact active remote claim",
+    });
+  });
+
+  it("allows refactoring only after clean reviewed GREEN", () => {
+    expect(
+      authorizeWorkflowMutation("src/account.ts", "refactor", {
+        ...authority,
+        redStatus: "accepted",
+      }),
+    ).toEqual({
+      allowed: false,
+      code: "TIBER_REFACTOR_REQUIRES_GREEN",
+      detail: "refactoring requires a clean reviewed exact GREEN increment",
+    });
+    expect(
+      authorizeWorkflowMutation("src/account.ts", "refactor", {
+        ...authority,
+        redStatus: "accepted",
+        refactorStatus: "allowed",
+      }),
+    ).toEqual({
+      allowed: true,
+      code: "TIBER_REFACTOR_ALLOWED",
+      detail: "exact observed GREEN authorizes refactoring",
     });
   });
 
@@ -83,7 +116,7 @@ describe("RED mutation gate", () => {
     ".git",
     "src\0bad",
   ])("rejects non-canonical mutation path %j", (path) => {
-    const decision = authorizeWorkflowMutation(path, {
+    const decision = authorizeWorkflowMutation(path, "production", {
       ...authority,
       redStatus: "accepted",
     });

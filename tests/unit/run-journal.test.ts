@@ -6,10 +6,12 @@ import { describe, expect, it } from "vitest";
 
 import { FileRunJournal } from "../../src/adapters/runs/file-run-journal.js";
 import { some } from "../../src/core/types/option.js";
+import { commandCatalogDigest } from "../fixtures/command-values.js";
 import { parseOwnedWorktreePath } from "../../src/core/worktrees/worktree-values.js";
 import {
   claimBaselineRevision,
   scenarioName,
+  specificationDigest,
   taskClaimId,
   taskId as semanticTaskId,
   testMappingPath,
@@ -33,6 +35,8 @@ const record = {
   redReceipt: some({
     scenarioName: scenarioName("scenario"),
     testMapping: testMappingPath("tests/scenario.test.ts"),
+    specificationDigest: specificationDigest(`sha256:${"d".repeat(64)}`),
+    commandCatalogDigest: commandCatalogDigest(`sha256:${"e".repeat(64)}`),
     diagnosticDigest: redDiagnosticDigest(`sha256:${"c".repeat(64)}`),
     missingPublicSurface: true,
   }),
@@ -46,6 +50,20 @@ describe("durable RED run receipt", () => {
     expect(new FileRunJournal(root).read(taskId)).toEqual({
       ok: true,
       value: some(record),
+    });
+  });
+
+  it.each([
+    "green-review-clean",
+    "green-rework-required",
+    "red-reinstated",
+  ] as const)("round-trips %s workflow state", (state) => {
+    const root = mkdtempSync(join(tmpdir(), "tiber-run-"));
+    const journal = new FileRunJournal(root);
+    expect(journal.write({ ...record, state }).ok).toBe(true);
+    expect(journal.read(taskId)).toMatchObject({
+      ok: true,
+      value: { kind: "some", value: { state } },
     });
   });
 
