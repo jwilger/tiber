@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "eventId": "e34a5bf9-aad1-4331-9f3e-fdc44da567d1",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-24T12:24:17.869Z",
+  "taskId": "edea26e4-c973-4957-9b6b-30491dfbd6dd",
+  "specificationDigest": "sha256:56d01ac1f858a2864b353ec0ffc892037d6ba031c953252df2478916ff4fa80b",
+  "specification": {
+    "outcome": "A bounded campaign advances independent shared work without exceeding task, initiative, time, cost, token, or concurrency authority",
+    "scenarios": [
+      {
+        "name": "bounded deterministic scheduling",
+        "given": [
+          "a campaign with finite bounds and ranked eligible tasks"
+        ],
+        "when": [
+          "the coordinator schedules another campaign step"
+        ],
+        "then": [
+          "no configured bound is exceeded",
+          "eligible tasks are selected deterministically"
+        ]
+      },
+      {
+        "name": "blocker deferral",
+        "given": [
+          "pre-mutation and post-mutation blockers plus independent eligible work"
+        ],
+        "when": [
+          "the campaign schedules another step"
+        ],
+        "then": [
+          "pre-mutation work is released and deferred",
+          "post-mutation work is retained",
+          "independent work continues",
+          "attention remains non-modal"
+        ]
+      },
+      {
+        "name": "shutdown recovery",
+        "given": [
+          "a campaign has recorded scheduling decisions"
+        ],
+        "when": [
+          "the Pi session shuts down"
+        ],
+        "then": [
+          "a restart-safe checkpoint preserves exact consumption and pending attention"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "Ad-hoc goals publish provenance-bearing Backlog tasks",
+      "Campaign decisions are durable before effect requests are exposed"
+    ],
+    "exclusions": [
+      "Human exception capabilities",
+      "Cache epoch and compaction policy"
+    ],
+    "dependencies": [],
+    "testMappings": [
+      "tests/acceptance/campaign-checkpoint.test.ts"
+    ],
+    "architectureImplications": "Campaign scheduling is a deterministic functional core. The shell persists checkpoints and exposes only closed requests; workers cannot authorize effects."
+  }
+}
