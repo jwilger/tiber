@@ -36,6 +36,7 @@ export const GOVERNED_TOOL_NAMES = [
   "tiber_artifact_range",
   "tiber_artifact_search",
   "tiber_command",
+  "tiber_workflow_request",
   "write",
 ] as const;
 

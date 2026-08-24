@@ -198,9 +198,34 @@ and permit independent campaign work. Post-mutation blockers retain claim and
 worktree while other eligible work may proceed. A repository-wide CI hold
 blocks further delivery until causally resolved.
 
+Campaign authority is bounded simultaneously by total tasks, tasks per
+initiative, elapsed time, cost, tokens, and concurrency. The shell replaces
+proposed ranks and blocker phases with signed-board order, claim state, and run
+journal evidence; initiative and estimate bindings are immutable after first
+checkpoint. Candidate ordering is deterministic by shared rank and task
+identity. Scheduling returns closed
+start, release-and-defer, or retain-work requests; it does not itself grant
+workflow effects. Every decision and accumulated consumption is atomically
+checkpointed in repository-scoped private state before requests are exposed.
+Blockers create durable non-modal attention rather than stopping unrelated
+eligible work. Ad-hoc goals create provenance-bearing Backlog tasks, never
+implicitly Ready tasks. Session shutdown records an explicit checkpoint before
+owned-process termination so restart resumes from observed consumption rather
+than replaying work blindly.
+
 ## Model sessions and context
 
-The visible session coordinates and remains steerable. Each worker is an
+The visible session coordinates and remains steerable. Ordinary user intent is
+translated by Pi into a typed `tiber_workflow_request`; users do not need to
+issue transition commands. The request is untrusted semantic input. The host
+injects current signed workflow state as dynamic suffix context, parses each
+request once, and advances only transitions already authorized by deterministic
+state and evidence. Slash commands remain optional diagnostics and recovery
+surfaces. Bootstrap always leaves this effect-request path reachable, and human
+interaction is reserved for explicit trust, takeover, exception, authority
+loosening, and release-publication boundaries.
+
+Each worker is an
 isolated in-process Pi agent session with typed assignment input and completion
 output, one bounded initial context pack, a role-specific immutable prompt,
 fixed tool schemas, and hard token, cost, time, concurrency, and effect budgets.

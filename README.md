@@ -154,6 +154,25 @@ release-please branch or release title is always held for explicit human merge;
 Tiber never enables its auto-merge. Signed task events retain the exact PR,
 gates, disposition, and observed merge.
 
+Tiber follows normal Pi conversation without requiring users to memorize
+workflow commands. The active `tiber_workflow_request` tool lets Pi request a
+typed task or campaign operation inferred from ordinary intent. Tiber injects
+current signed task state as suffix context, validates every request against
+deterministic authority, and automatically performs clean readiness-to-claim
+progression when exact evidence permits it. A model request never grants
+mutation authority. `/tiber:*` commands remain optional inspection and explicit
+recovery surfaces; human input is reserved for genuine policy boundaries.
+
+`/tiber:campaign start <bounds-base64url>` creates a repository-local
+campaign checkpoint with task, per-initiative task, duration, cost, token, and
+concurrency limits. `/tiber:campaign tick <input-base64url>` deterministically
+ranks typed candidates, durably records consumption before returning start
+requests, and stops at the applicable bound. Pre-mutation blockers release and
+defer; post-mutation blockers retain their work. Both remain as non-modal
+`/tiber:attention` items while independent work continues. `/tiber:campaign
+goal <title>` publishes a provenance-bearing ad-hoc Backlog task. Session
+shutdown records a restart-safe campaign checkpoint before process cleanup.
+
 Only after an exact delivery and its complete CI receipt may
 `/tiber:done <task-id>` terminate that claim's processes, release the claim,
 preserve dirty source privately, remove its owned worktree, and publish Done.

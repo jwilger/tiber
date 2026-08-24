@@ -76,7 +76,14 @@ describe("governed tool policy", () => {
 
   it("accepts only the complete fixed governed inventory", () => {
     expect(
-      verifyToolInventory(["write", "read", "edit", "bash", "read"]),
+      verifyToolInventory([
+        "write",
+        "read",
+        "edit",
+        "bash",
+        "read",
+        "tiber_workflow_request",
+      ]),
     ).toEqual({
       allowed: true,
       code: "TIBER_TOOL_INVENTORY_COMPLETE",

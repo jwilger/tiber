@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import {
   getAgentDir,
-  type ExtensionCommandContext,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
 import { FileRunJournal } from "../adapters/runs/file-run-journal.js";
@@ -71,7 +71,7 @@ function projectWorkflow(cwd: string): unknown {
 
 export async function handleWorkCommand(
   argumentsText: string,
-  context: ExtensionCommandContext,
+  context: ExtensionContext,
 ): Promise<void> {
   const remote = new GitTaskRemote(context.cwd);
   const takeoverMatch = /^takeover\s+(\S+)$/u.exec(argumentsText.trim());
