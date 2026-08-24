@@ -3,6 +3,8 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   parseCanonicalWorkflowJson,
   parseCompiledWorkflowDigest,
+  parseFinalReviewFindingCount,
+  parseFinalReviewRationale,
   parseGreenDiagnosticDigest,
   parseIncrementReviewFindingCount,
   parseIncrementReviewRationale,
@@ -11,6 +13,8 @@ import {
   parseScenarioFeatureText,
   parseSourceDiffDigest,
   parseSourceDiffText,
+  parseSourceSnapshotDigest,
+  parseVerificationDiagnosticDigest,
   parseWorkflowDefinitionId,
   parseWorkflowStepId,
   type CompiledWorkflowDigest,
@@ -40,6 +44,8 @@ describe("workflow semantic values", () => {
     expect(parseRedDiagnosticDigest(digest).ok).toBe(true);
     expect(parseGreenDiagnosticDigest(digest).ok).toBe(true);
     expect(parseSourceDiffDigest(digest).ok).toBe(true);
+    expect(parseSourceSnapshotDigest(digest).ok).toBe(true);
+    expect(parseVerificationDiagnosticDigest(digest).ok).toBe(true);
     expect(parseSourceDiffText("diff --git a/a b/a").ok).toBe(true);
     expect(parseScenarioFeatureText("Feature: account deletion").ok).toBe(true);
     expect(
@@ -50,6 +56,10 @@ describe("workflow semantic values", () => {
         .ok,
     ).toBe(true);
     expect(parseIncrementReviewFindingCount(0).ok).toBe(true);
+    expect(parseFinalReviewFindingCount(0).ok).toBe(true);
+    expect(
+      parseFinalReviewRationale("A sufficiently detailed final rationale.").ok,
+    ).toBe(true);
   });
 
   it("rejects coercible and out-of-bound workflow values", () => {
@@ -97,11 +107,19 @@ describe("workflow semantic values", () => {
     [parseRedDiagnosticDigest, "sha256:bad", "redDiagnosticDigest"],
     [parseGreenDiagnosticDigest, "sha256:bad", "greenDiagnosticDigest"],
     [parseSourceDiffDigest, "sha256:bad", "sourceDiffDigest"],
+    [parseSourceSnapshotDigest, "sha256:bad", "sourceSnapshotDigest"],
+    [
+      parseVerificationDiagnosticDigest,
+      "sha256:bad",
+      "verificationDiagnosticDigest",
+    ],
     [parseSourceDiffText, "", "sourceDiffText"],
     [parseScenarioFeatureText, "", "scenarioFeatureText"],
     [parseRedReviewRationale, "short", "redReviewRationale"],
     [parseIncrementReviewRationale, "short", "incrementReviewRationale"],
+    [parseFinalReviewRationale, "short", "finalReviewRationale"],
     [parseIncrementReviewFindingCount, -1, "incrementReviewFindingCount"],
+    [parseFinalReviewFindingCount, -1, "finalReviewFindingCount"],
   ])("rejects malformed workflow values", (parse, value, field) => {
     expect(parse(value)).toEqual({
       ok: false,

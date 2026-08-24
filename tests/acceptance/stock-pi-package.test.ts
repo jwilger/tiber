@@ -186,6 +186,10 @@ describe("the packed stock-Pi package", () => {
     );
     expect(JSON.stringify(commandResponse?.data)).toContain("tiber:doctor");
     expect(JSON.stringify(commandResponse?.data)).toContain("tiber:green");
+    expect(JSON.stringify(commandResponse?.data)).toContain(
+      "tiber:final-review",
+    );
+    expect(JSON.stringify(commandResponse?.data)).toContain("tiber:done");
 
     const notification = messages.find(
       (message) =>

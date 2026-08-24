@@ -4,6 +4,7 @@ import {
 } from "../../core/failures/tiber-failure.js";
 
 export type ModelReviewFailureCode =
+  | "TIBER_FINAL_REVIEW_INVALID"
   | "TIBER_INCREMENT_REVIEW_INVALID"
   | "TIBER_READINESS_REVIEW_INVALID"
   | "TIBER_RED_REVIEW_INVALID"

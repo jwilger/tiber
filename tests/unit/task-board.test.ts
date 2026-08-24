@@ -149,6 +149,53 @@ const incrementPreserved = requireTaskEvent(
   },
   "task-increment-preserved",
 );
+const secondIncrement = requireTaskEvent(
+  {
+    ...incrementPreserved,
+    eventId: "abababab-abab-4bab-8bab-abababababab",
+    increment: {
+      ...incrementPreserved.increment,
+      scenarioName: "other",
+      testMapping: "other.test.ts",
+      sourceDiffDigest: `sha256:${"e".repeat(64)}`,
+    },
+  },
+  "task-increment-preserved",
+);
+const finalReviewDocument = {
+  schemaVersion: 1 as const,
+  eventId: "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc",
+  kind: "task-final-review-recorded" as const,
+  occurredAt: event.occurredAt,
+  taskId: event.task.id,
+  specificationDigest: digest,
+  verification: {
+    claimId: claimed.claim.claimId,
+    specificationDigest: digest,
+    commandCatalogDigest: `sha256:${"f".repeat(64)}`,
+    diagnosticDigest: `sha256:${"1".repeat(64)}`,
+    sourceSnapshotDigest: `sha256:${"2".repeat(64)}`,
+  },
+  iteration: {
+    sourceSnapshotDigest: `sha256:${"2".repeat(64)}`,
+    verificationDiagnosticDigest: `sha256:${"1".repeat(64)}`,
+    selectedLenses: ["behavior", "architecture"],
+    reviews: [
+      {
+        lens: "behavior",
+        contextFreshness: "fresh",
+        findingCount: 0,
+        rationale: "All acceptance behavior is complete and correct.",
+      },
+      {
+        lens: "architecture",
+        contextFreshness: "fresh",
+        findingCount: 0,
+        rationale: "The architecture remains coherent and compliant.",
+      },
+    ],
+  },
+};
 const takenOver = requireTaskEvent(
   {
     schemaVersion: 1,
@@ -193,11 +240,525 @@ function parsedEvent(value: unknown): TaskEvent {
   return parsed.value;
 }
 
+describe("signed final completion authority", () => {
+  const created = createdEvent(event);
+  const review = parsedEvent(finalReviewDocument);
+  const secondReview = parsedEvent({
+    ...finalReviewDocument,
+    eventId: "cacacaca-caca-4aca-8aca-cacacacacaca",
+  });
+  const thirdReview = parsedEvent({
+    ...finalReviewDocument,
+    eventId: "dadadada-dada-4ada-8ada-dadadadadada",
+  });
+  const completedRelease = parsedEvent({
+    ...released,
+    eventId: "eaeaeaea-eaea-4aea-8aea-eaeaeaeaeaea",
+    reason: "completed",
+  });
+  const completed = parsedEvent({
+    schemaVersion: 1,
+    eventId: "fafafafa-fafa-4afa-8afa-fafafafafafa",
+    kind: "task-completed",
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    claimId: claimed.claim.claimId,
+    sourceSnapshotDigest: finalReviewDocument.verification.sourceSnapshotDigest,
+    cleanup: {
+      processCleanupStatus: "clean",
+      worktreeCleanupStatus: "clean",
+    },
+  });
+
+  it.each(["behavior", "architecture", "security", "operability"] as const)(
+    "parses the closed %s final review lens",
+    (lens) => {
+      expect(
+        parseTaskEvent({
+          ...finalReviewDocument,
+          iteration: {
+            ...finalReviewDocument.iteration,
+            selectedLenses: [lens],
+            reviews: [
+              {
+                ...finalReviewDocument.iteration.reviews[0],
+                lens,
+              },
+            ],
+          },
+        }),
+      ).toMatchObject({
+        ok: true,
+        value: {
+          iteration: {
+            selectedLenses: [lens],
+            reviews: [{ lens }],
+          },
+        },
+      });
+    },
+  );
+
+  it("parses complete final review and cleanup authority exactly", () => {
+    expect(parsedEvent(finalReviewDocument)).toEqual(finalReviewDocument);
+    expect(completed).toEqual({
+      schemaVersion: 1,
+      eventId: "fafafafa-fafa-4afa-8afa-fafafafafafa",
+      kind: "task-completed",
+      occurredAt: event.occurredAt,
+      taskId: event.task.id,
+      specificationDigest: digest,
+      claimId: claimed.claim.claimId,
+      sourceSnapshotDigest:
+        finalReviewDocument.verification.sourceSnapshotDigest,
+      cleanup: {
+        processCleanupStatus: "clean",
+        worktreeCleanupStatus: "clean",
+      },
+    });
+  });
+
+  it.each([
+    { ...finalReviewDocument, verification: null },
+    {
+      ...finalReviewDocument,
+      verification: { ...finalReviewDocument.verification, claimId: "bad" },
+    },
+    {
+      ...finalReviewDocument,
+      verification: {
+        ...finalReviewDocument.verification,
+        specificationDigest: `sha256:${"9".repeat(64)}`,
+      },
+    },
+    {
+      ...finalReviewDocument,
+      verification: {
+        ...finalReviewDocument.verification,
+        commandCatalogDigest: "bad",
+      },
+    },
+    {
+      ...finalReviewDocument,
+      verification: {
+        ...finalReviewDocument.verification,
+        diagnosticDigest: "bad",
+      },
+    },
+    {
+      ...finalReviewDocument,
+      verification: {
+        ...finalReviewDocument.verification,
+        sourceSnapshotDigest: "bad",
+      },
+    },
+    { ...finalReviewDocument, iteration: null },
+    {
+      ...finalReviewDocument,
+      iteration: { ...finalReviewDocument.iteration, selectedLenses: null },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: { ...finalReviewDocument.iteration, reviews: null },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        sourceSnapshotDigest: "bad",
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        verificationDiagnosticDigest: "bad",
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        selectedLenses: ["behavior", "unknown"],
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        reviews: [null],
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        reviews: [
+          { ...finalReviewDocument.iteration.reviews[0], lens: "unknown" },
+        ],
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        reviews: [
+          {
+            ...finalReviewDocument.iteration.reviews[0],
+            contextFreshness: "stale",
+          },
+        ],
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        reviews: [
+          {
+            ...finalReviewDocument.iteration.reviews[0],
+            findingCount: -1,
+          },
+        ],
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        reviews: [
+          { ...finalReviewDocument.iteration.reviews[0], rationale: "short" },
+        ],
+      },
+    },
+  ])("rejects malformed final review evidence %#", (candidate) => {
+    expect(parseTaskEvent(candidate)).toMatchObject({ ok: false });
+  });
+
+  it.each([
+    { cleanup: null },
+    { claimId: "bad" },
+    { sourceSnapshotDigest: "bad" },
+    {
+      cleanup: {
+        processCleanupStatus: "dirty",
+        worktreeCleanupStatus: "clean",
+      },
+    },
+    {
+      cleanup: {
+        processCleanupStatus: "clean",
+        worktreeCleanupStatus: "dirty",
+      },
+    },
+  ])("rejects malformed completion evidence %#", (change) => {
+    expect(
+      parseTaskEvent({
+        schemaVersion: 1,
+        eventId: "fafafafa-fafa-4afa-8afa-fafafafafafa",
+        kind: "task-completed",
+        occurredAt: event.occurredAt,
+        taskId: event.task.id,
+        specificationDigest: digest,
+        claimId: claimed.claim.claimId,
+        sourceSnapshotDigest:
+          finalReviewDocument.verification.sourceSnapshotDigest,
+        cleanup: {
+          processCleanupStatus: "clean",
+          worktreeCleanupStatus: "clean",
+        },
+        ...change,
+      }),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("prevents partial scenario completion from entering final review", () => {
+    const result = foldTaskEvents([
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+      review,
+    ]);
+    expect(result.failure).toEqual(
+      some(
+        taskBoardFailure(
+          "incomplete-final-review",
+          "final review is incomplete, stale, or not state-bound",
+        ),
+      ),
+    );
+    expect(result.tasks).toHaveLength(1);
+    expect(result).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "incomplete-final-review" } },
+      },
+    });
+  });
+
+  it("resets the persisted streak on findings and source deltas", () => {
+    const finding = parsedEvent({
+      ...finalReviewDocument,
+      eventId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+      iteration: {
+        ...finalReviewDocument.iteration,
+        reviews: [
+          {
+            ...finalReviewDocument.iteration.reviews[0],
+            findingCount: 1,
+          },
+          finalReviewDocument.iteration.reviews[1],
+        ],
+      },
+    });
+    const changed = parsedEvent({
+      ...finalReviewDocument,
+      eventId: "dededede-dede-4ede-8ede-dededededede",
+      verification: {
+        ...finalReviewDocument.verification,
+        sourceSnapshotDigest: `sha256:${"3".repeat(64)}`,
+      },
+      iteration: {
+        ...finalReviewDocument.iteration,
+        sourceSnapshotDigest: `sha256:${"3".repeat(64)}`,
+      },
+    });
+    const prefix = [
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+      secondIncrement,
+      review,
+      secondReview,
+    ];
+    expect(foldTaskEvents([...prefix, finding]).tasks[0]).toMatchObject({
+      finalReviewProgress: { kind: "some", value: { cleanStreak: 0 } },
+    });
+    expect(foldTaskEvents([...prefix, changed]).tasks[0]).toMatchObject({
+      finalReviewProgress: { kind: "some", value: { cleanStreak: 1 } },
+    });
+  });
+
+  it.each([
+    {
+      ...finalReviewDocument,
+      verification: {
+        ...finalReviewDocument.verification,
+        claimId: "76767676-7676-4676-8676-767676767676",
+      },
+    },
+    {
+      ...finalReviewDocument,
+      verification: {
+        ...finalReviewDocument.verification,
+        sourceSnapshotDigest: `sha256:${"7".repeat(64)}`,
+      },
+    },
+    {
+      ...finalReviewDocument,
+      verification: {
+        ...finalReviewDocument.verification,
+        diagnosticDigest: `sha256:${"7".repeat(64)}`,
+      },
+    },
+    {
+      ...finalReviewDocument,
+      specificationDigest: `sha256:${"6".repeat(64)}`,
+      verification: {
+        ...finalReviewDocument.verification,
+        specificationDigest: `sha256:${"6".repeat(64)}`,
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        selectedLenses: ["behavior"],
+        reviews: [finalReviewDocument.iteration.reviews[0]],
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        selectedLenses: ["behavior", "architecture", "operability"],
+        reviews: [
+          ...finalReviewDocument.iteration.reviews,
+          {
+            ...finalReviewDocument.iteration.reviews[0],
+            lens: "operability",
+          },
+        ],
+      },
+    },
+    {
+      ...finalReviewDocument,
+      iteration: {
+        ...finalReviewDocument.iteration,
+        selectedLenses: ["behavior", "security"],
+        reviews: [
+          finalReviewDocument.iteration.reviews[0],
+          {
+            ...finalReviewDocument.iteration.reviews[1],
+            lens: "security",
+          },
+        ],
+      },
+    },
+  ])("rejects unbound final review authority %#", (candidate) => {
+    const badReview = parsedEvent(candidate);
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        ready,
+        claimed,
+        incrementPreserved,
+        secondIncrement,
+        badReview,
+      ]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "incomplete-final-review" } },
+      },
+    });
+  });
+
+  it("requires three clean exact iterations, completed release, and cleanup", () => {
+    const events = [
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+      secondIncrement,
+      review,
+      secondReview,
+    ];
+    expect(foldTaskEvents(events).tasks[0]?.finalReviewProgress).toMatchObject({
+      kind: "some",
+      value: { cleanStreak: 2 },
+    });
+    expect(foldTaskEvents([...events, released]).tasks[0]).toMatchObject({
+      state: "Ready",
+      finalReviewProgress: { kind: "none" },
+      completionRelease: { kind: "none" },
+    });
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        ready,
+        claimed,
+        incrementPreserved,
+        secondIncrement,
+        completedRelease,
+      ]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "non-exact-claim-release" } },
+      },
+    });
+    expect(foldTaskEvents([...events, completedRelease])).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "non-exact-claim-release" } },
+      },
+    });
+    const releasable = [...events, thirdReview];
+    const releasedForCompletion = [...releasable, completedRelease];
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        ready,
+        claimed,
+        incrementPreserved,
+        secondIncrement,
+        released,
+        completed,
+      ]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "invalid-task-completion" } },
+      },
+    });
+    const prematureCompletion = foldTaskEvents([...releasable, completed]);
+    expect(prematureCompletion.failure).toEqual(
+      some(
+        taskBoardFailure(
+          "invalid-task-completion",
+          "task completion lacks exact review, release, or cleanup evidence",
+        ),
+      ),
+    );
+    expect(prematureCompletion.tasks).toHaveLength(1);
+    expect(prematureCompletion).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "invalid-task-completion" } },
+      },
+    });
+    for (const invalidCompletion of [
+      parsedEvent({
+        ...completed,
+        eventId: "16161616-1616-4616-8616-161616161616",
+        specificationDigest: `sha256:${"6".repeat(64)}`,
+      }),
+      parsedEvent({
+        ...completed,
+        eventId: "17171717-1717-4717-8717-171717171717",
+        claimId: "18181818-1818-4818-8818-181818181818",
+      }),
+      parsedEvent({
+        ...completed,
+        eventId: "19191919-1919-4919-8919-191919191919",
+        sourceSnapshotDigest: `sha256:${"6".repeat(64)}`,
+      }),
+    ]) {
+      expect(
+        foldTaskEvents([...releasedForCompletion, invalidCompletion]),
+      ).toMatchObject({
+        mode: "degraded-read-only",
+        failure: {
+          kind: "some",
+          value: { safeContext: { reason: "invalid-task-completion" } },
+        },
+      });
+    }
+    expect(
+      foldTaskEvents([...releasedForCompletion, completed]).tasks[0],
+    ).toMatchObject({ state: "Done", claim: { kind: "none" } });
+  });
+});
+
 describe("exclusive claims", () => {
   const created = createdEvent(event);
 
   it("parses, publishes, and releases one state-bound claim", () => {
     expect(parsedEvent(claimed)).toEqual(claimed);
+    expect(parsedEvent({ ...released, reason: "released" })).toEqual({
+      ...released,
+      reason: "released",
+    });
+    expect(parsedEvent({ ...released, reason: "completed" })).toEqual({
+      ...released,
+      reason: "completed",
+    });
     expect(
       parsedEvent({
         ...claimed,
@@ -235,6 +796,8 @@ describe("exclusive claims", () => {
       specificationDigest: some(digest),
       claim: none,
       preservedIncrements: [],
+      finalReviewProgress: none,
+      completionRelease: none,
     });
   });
 
@@ -617,6 +1180,7 @@ describe("exclusive claims", () => {
     { ...released, claimId: `x${released.claimId}` },
     { ...released, claimId: `${released.claimId}x` },
     { ...released, reason: "stolen" },
+    { ...released, reason: "" },
   ])("rejects malformed claim event %j", (candidate) => {
     expect(parseTaskEvent(candidate)).toEqual({
       ok: false,
@@ -651,6 +1215,8 @@ describe("reviewed Ready events", () => {
           specificationDigest: none,
           claim: none,
           preservedIncrements: [],
+          finalReviewProgress: none,
+          completionRelease: none,
         },
       ],
       failure: some(
@@ -774,6 +1340,8 @@ describe("reviewed Ready events", () => {
           specificationDigest: none,
           claim: none,
           preservedIncrements: [],
+          finalReviewProgress: none,
+          completionRelease: none,
         },
       ],
       failure: some(
@@ -827,6 +1395,8 @@ describe("Kanban projection", () => {
           specificationDigest: none,
           claim: none,
           preservedIncrements: [],
+          finalReviewProgress: none,
+          completionRelease: none,
         },
       ],
       failure: some(
@@ -857,6 +1427,8 @@ describe("Kanban projection", () => {
           specificationDigest: none,
           claim: none,
           preservedIncrements: [],
+          finalReviewProgress: none,
+          completionRelease: none,
         },
       ],
       failure: some(

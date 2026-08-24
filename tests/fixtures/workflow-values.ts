@@ -1,11 +1,15 @@
 import {
   parseCompiledWorkflowDigest,
+  parseFinalReviewFindingCount,
+  parseFinalReviewRationale,
   parseGreenDiagnosticDigest,
   parseIncrementReviewFindingCount,
   parseIncrementReviewRationale,
   parseRedDiagnosticDigest,
   parseRedReviewRationale,
   parseSourceDiffDigest,
+  parseSourceSnapshotDigest,
+  parseVerificationDiagnosticDigest,
 } from "../../src/core/workflow/workflow-values.js";
 
 function required<Value>(
@@ -29,3 +33,11 @@ export const incrementReviewRationale = (value: string) =>
   required(parseIncrementReviewRationale(value));
 export const incrementReviewFindingCount = (value: number) =>
   required(parseIncrementReviewFindingCount(value));
+export const finalReviewRationale = (value: string) =>
+  required(parseFinalReviewRationale(value));
+export const finalReviewFindingCount = (value: number) =>
+  required(parseFinalReviewFindingCount(value));
+export const sourceSnapshotDigest = (value: string) =>
+  required(parseSourceSnapshotDigest(value));
+export const verificationDiagnosticDigest = (value: string) =>
+  required(parseVerificationDiagnosticDigest(value));

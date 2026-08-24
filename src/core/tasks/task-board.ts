@@ -31,17 +31,32 @@ import {
 } from "./task-values.js";
 import {
   parseCompiledWorkflowDigest,
+  parseFinalReviewFindingCount,
+  parseFinalReviewRationale,
   parseGreenDiagnosticDigest,
   parseIncrementReviewRationale,
   parseRedDiagnosticDigest,
   parseSourceDiffDigest,
+  parseSourceSnapshotDigest,
+  parseVerificationDiagnosticDigest,
   type CompiledWorkflowDigest,
   type GreenDiagnosticDigest,
   type IncrementReviewRationale,
   type RedDiagnosticDigest,
   type SourceDiffDigest,
+  type SourceSnapshotDigest,
 } from "../workflow/workflow-values.js";
 import type { TiberFailure, TiberResult } from "../failures/tiber-failure.js";
+import {
+  advanceFinalReview,
+  decideScopeCompletion,
+  finalReviewRiskSignals,
+  selectFinalReviewLenses,
+  type AcceptanceVerificationReceipt,
+  type FinalReviewIteration,
+  type FinalReviewLens,
+  type FinalReviewProgress,
+} from "../workflow/final-review.js";
 import { none, some, type Option } from "../types/option.js";
 import {
   decideReadiness,
@@ -52,6 +67,8 @@ import {
 } from "./readiness.js";
 
 export type TaskState = "Backlog" | "Ready" | "In Progress" | "Done";
+// Stryker disable next-line ArrayDeclaration: this constant is used only on lifecycle-invalid final review events, which are independently denied before it can influence authority.
+const NO_FINAL_REVIEW_LENSES: readonly FinalReviewLens[] = [];
 export type TaskBlockStatus = "blocked" | "unblocked";
 
 export interface TaskClaim {
@@ -83,6 +100,8 @@ export interface Task {
   readonly specificationDigest: Option<SpecificationDigest>;
   readonly claim: Option<TaskClaim>;
   readonly preservedIncrements: readonly PreservedIncrement[];
+  readonly finalReviewProgress: Option<FinalReviewProgress>;
+  readonly completionRelease: Option<TaskClaimId>;
 }
 
 export interface TaskCreatedEvent {
@@ -149,6 +168,32 @@ export interface TaskIncrementPreservedEvent {
   readonly increment: PreservedIncrement;
 }
 
+export interface TaskFinalReviewRecordedEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: TaskEventId;
+  readonly kind: "task-final-review-recorded";
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
+  readonly verification: AcceptanceVerificationReceipt;
+  readonly iteration: FinalReviewIteration;
+}
+
+export interface TaskCompletedEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: TaskEventId;
+  readonly kind: "task-completed";
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
+  readonly claimId: TaskClaimId;
+  readonly sourceSnapshotDigest: SourceSnapshotDigest;
+  readonly cleanup: {
+    readonly processCleanupStatus: "clean";
+    readonly worktreeCleanupStatus: "clean";
+  };
+}
+
 export interface TaskClaimReleasedEvent {
   readonly schemaVersion: 1;
   readonly eventId: TaskEventId;
@@ -167,11 +212,15 @@ export type TaskEvent =
   | TaskClaimedEvent
   | TaskClaimTakenOverEvent
   | TaskIncrementPreservedEvent
-  | TaskClaimReleasedEvent;
+  | TaskFinalReviewRecordedEvent
+  | TaskClaimReleasedEvent
+  | TaskCompletedEvent;
 
 export type TaskBoardFailureReason =
   | "duplicate-authority-event"
+  | "incomplete-final-review"
   | "invalid-preserved-increment"
+  | "invalid-task-completion"
   | "non-exclusive-claim"
   | "non-exact-claim-release"
   | "non-exact-claim-takeover"
@@ -285,6 +334,65 @@ function parseTaskClaim(value: unknown): TaskClaim | undefined {
     : undefined;
 }
 
+function parseFinalReviewLens(value: unknown): FinalReviewLens | undefined {
+  return value === "behavior" ||
+    value === "architecture" ||
+    value === "security" ||
+    value === "operability"
+    ? value
+    : undefined;
+}
+
+function parseFinalReviewIteration(
+  value: unknown,
+): FinalReviewIteration | undefined {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.selectedLenses) ||
+    !Array.isArray(value.reviews)
+  )
+    return undefined;
+  const sourceSnapshotDigest = parseSourceSnapshotDigest(
+    value.sourceSnapshotDigest,
+  );
+  const verificationDiagnosticDigest = parseVerificationDiagnosticDigest(
+    value.verificationDiagnosticDigest,
+  );
+  const selectedLenses = value.selectedLenses.map(parseFinalReviewLens);
+  if (
+    !sourceSnapshotDigest.ok ||
+    !verificationDiagnosticDigest.ok ||
+    selectedLenses.some((lens) => lens === undefined)
+  )
+    return undefined;
+  const reviews = value.reviews.map((review) => {
+    if (!isRecord(review)) return undefined;
+    const lens = parseFinalReviewLens(review.lens);
+    const findingCount = parseFinalReviewFindingCount(review.findingCount);
+    const rationale = parseFinalReviewRationale(review.rationale);
+    return lens === undefined ||
+      review.contextFreshness !== "fresh" ||
+      !findingCount.ok ||
+      !rationale.ok
+      ? undefined
+      : {
+          lens,
+          contextFreshness: "fresh" as const,
+          findingCount: findingCount.value,
+          rationale: rationale.value,
+        };
+  });
+  if (reviews.some((review) => review === undefined)) return undefined;
+  return {
+    sourceSnapshotDigest: sourceSnapshotDigest.value,
+    verificationDiagnosticDigest: verificationDiagnosticDigest.value,
+    // Stryker disable next-line MethodExpression, ConditionalExpression: the preceding undefined guard proves every selected lens; filter is the TypeScript narrowing step only.
+    selectedLenses: selectedLenses.filter((lens) => lens !== undefined),
+    // Stryker disable next-line MethodExpression, ConditionalExpression: the preceding undefined guard proves every review; filter is the TypeScript narrowing step only.
+    reviews: reviews.filter((review) => review !== undefined),
+  };
+}
+
 function parseTaskEventValue(value: unknown): TaskEvent | undefined {
   const created = parseTaskCreatedEventValue(value);
   if (created !== undefined) return created;
@@ -395,6 +503,73 @@ function parseTaskEventValue(value: unknown): TaskEvent | undefined {
         greenDiagnosticDigest: greenDiagnosticDigest.value,
         sourceDiffDigest: sourceDiffDigest.value,
         reviewRationale: reviewRationale.value,
+      },
+    };
+  }
+  if (
+    value.kind === "task-final-review-recorded" &&
+    isRecord(value.verification)
+  ) {
+    const claimId = parseTaskClaimId(value.verification.claimId);
+    const commandCatalogDigest = parseCommandCatalogDigest(
+      value.verification.commandCatalogDigest,
+    );
+    const diagnosticDigest = parseVerificationDiagnosticDigest(
+      value.verification.diagnosticDigest,
+    );
+    const sourceSnapshotDigest = parseSourceSnapshotDigest(
+      value.verification.sourceSnapshotDigest,
+    );
+    const iteration = parseFinalReviewIteration(value.iteration);
+    if (
+      !claimId.ok ||
+      value.verification.specificationDigest !== specificationDigest.value ||
+      !commandCatalogDigest.ok ||
+      !diagnosticDigest.ok ||
+      !sourceSnapshotDigest.ok ||
+      iteration === undefined
+    )
+      return undefined;
+    return {
+      schemaVersion: 1,
+      eventId: common.eventId,
+      kind: "task-final-review-recorded",
+      occurredAt: common.occurredAt,
+      taskId: taskId.value,
+      specificationDigest: specificationDigest.value,
+      verification: {
+        claimId: claimId.value,
+        specificationDigest: specificationDigest.value,
+        commandCatalogDigest: commandCatalogDigest.value,
+        diagnosticDigest: diagnosticDigest.value,
+        sourceSnapshotDigest: sourceSnapshotDigest.value,
+      },
+      iteration,
+    };
+  }
+  if (
+    value.kind === "task-completed" &&
+    isRecord(value.cleanup) &&
+    value.cleanup.processCleanupStatus === "clean" &&
+    value.cleanup.worktreeCleanupStatus === "clean"
+  ) {
+    const claimId = parseTaskClaimId(value.claimId);
+    const sourceSnapshotDigest = parseSourceSnapshotDigest(
+      value.sourceSnapshotDigest,
+    );
+    if (!claimId.ok || !sourceSnapshotDigest.ok) return undefined;
+    return {
+      schemaVersion: 1,
+      eventId: common.eventId,
+      kind: "task-completed",
+      occurredAt: common.occurredAt,
+      taskId: taskId.value,
+      specificationDigest: specificationDigest.value,
+      claimId: claimId.value,
+      sourceSnapshotDigest: sourceSnapshotDigest.value,
+      cleanup: {
+        processCleanupStatus: "clean",
+        worktreeCleanupStatus: "clean",
       },
     };
   }
@@ -515,6 +690,8 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         specificationDigest: none,
         claim: none,
         preservedIncrements: [],
+        finalReviewProgress: none,
+        completionRelease: none,
       });
       continue;
     }
@@ -536,6 +713,9 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         ...task,
         specification: some(event.specification),
         specificationDigest: some(event.specificationDigest),
+        preservedIncrements: [],
+        finalReviewProgress: none,
+        completionRelease: none,
       });
       continue;
     }
@@ -564,6 +744,8 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         ...task,
         state: "In Progress",
         claim: some(event.claim),
+        finalReviewProgress: none,
+        completionRelease: none,
       });
       continue;
     }
@@ -592,7 +774,12 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
           ),
         };
       }
-      tasks.set(task.id, { ...task, claim: some(event.claim) });
+      tasks.set(task.id, {
+        ...task,
+        claim: some(event.claim),
+        finalReviewProgress: none,
+        completionRelease: none,
+      });
       continue;
     }
     if (event.kind === "task-increment-preserved") {
@@ -634,6 +821,61 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
       tasks.set(task.id, {
         ...task,
         preservedIncrements: [...task.preservedIncrements, event.increment],
+        finalReviewProgress: none,
+        completionRelease: none,
+      });
+      continue;
+    }
+    if (event.kind === "task-final-review-recorded") {
+      const expectedLenses =
+        // Stryker disable next-line ConditionalExpression, ArrayDeclaration: In Progress is installed only with a parsed specification, so the absent branch is unreachable but preserves explicit Option narrowing.
+        task.specification.kind === "some"
+          ? selectFinalReviewLenses(
+              finalReviewRiskSignals(task.specification.value),
+            )
+          : NO_FINAL_REVIEW_LENSES;
+      if (
+        // Stryker disable next-line ConditionalExpression, LogicalOperator: In Progress, active claim, specification, and digest are installed atomically; exact claim identity below remains independently authoritative.
+        task.state !== "In Progress" ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: In Progress atomically establishes claim presence; this check preserves explicit Option narrowing.
+        task.claim.kind === "none" ||
+        task.claim.value.claimId !== event.verification.claimId ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: In Progress atomically establishes specification presence; this check preserves explicit Option narrowing.
+        task.specification.kind === "none" ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: In Progress atomically establishes digest presence; this check preserves explicit Option narrowing.
+        task.specificationDigest.kind === "none" ||
+        task.specificationDigest.value !== event.specificationDigest ||
+        // Stryker disable next-line ConditionalExpression: the task-event parser has already required these two signed digest fields to be identical.
+        event.verification.specificationDigest !== event.specificationDigest ||
+        event.verification.sourceSnapshotDigest !==
+          event.iteration.sourceSnapshotDigest ||
+        event.verification.diagnosticDigest !==
+          event.iteration.verificationDiagnosticDigest ||
+        expectedLenses.length !== event.iteration.selectedLenses.length ||
+        !expectedLenses.every(
+          (lens, index) => lens === event.iteration.selectedLenses[index],
+        ) ||
+        decideScopeCompletion(
+          task.specification.value,
+          task.preservedIncrements,
+        ).status !== "complete"
+      ) {
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: some(
+            taskBoardFailure(
+              "incomplete-final-review",
+              "final review is incomplete, stale, or not state-bound",
+            ),
+          ),
+        };
+      }
+      tasks.set(task.id, {
+        ...task,
+        finalReviewProgress: some(
+          advanceFinalReview(task.finalReviewProgress, event.iteration),
+        ),
       });
       continue;
     }
@@ -644,7 +886,10 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         // Stryker disable next-line ConditionalExpression, StringLiteral: active claims are installed only after specification and digest, so these checks document established invariants.
         task.specification.kind === "none" ||
         // Stryker disable next-line ConditionalExpression, StringLiteral: active claims are installed only after specification and digest, so these checks document established invariants.
-        task.specificationDigest.kind === "none"
+        task.specificationDigest.kind === "none" ||
+        (event.reason === "completed" &&
+          (task.finalReviewProgress.kind === "none" ||
+            task.finalReviewProgress.value.cleanStreak !== 3))
       ) {
         return {
           mode: "degraded-read-only",
@@ -667,6 +912,47 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         specificationDigest: task.specificationDigest,
         claim: none,
         preservedIncrements: task.preservedIncrements,
+        finalReviewProgress:
+          event.reason === "completed" ? task.finalReviewProgress : none,
+        completionRelease:
+          event.reason === "completed" ? some(event.claimId) : none,
+      });
+      continue;
+    }
+    if (event.kind === "task-completed") {
+      if (
+        // Stryker disable next-line ConditionalExpression, LogicalOperator: a completion release atomically establishes Ready with no claim, retained digest, exact release id, and a three-clean-review receipt.
+        task.state !== "Ready" ||
+        // Stryker disable next-line ConditionalExpression: a completion release atomically clears the active claim.
+        task.claim.kind !== "none" ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: a completion release atomically retains the specification digest; this check preserves explicit Option narrowing.
+        task.specificationDigest.kind === "none" ||
+        task.specificationDigest.value !== event.specificationDigest ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: Ready-with-completion authority is installed atomically with this Option; exact identity is checked next.
+        task.completionRelease.kind === "none" ||
+        task.completionRelease.value !== event.claimId ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: completion release is authorized only from a present three-clean-review receipt; this check preserves explicit Option narrowing.
+        task.finalReviewProgress.kind === "none" ||
+        // Stryker disable next-line ConditionalExpression: completion release cannot be installed unless the retained review streak is exactly three.
+        task.finalReviewProgress.value.cleanStreak !== 3 ||
+        task.finalReviewProgress.value.sourceSnapshotDigest !==
+          event.sourceSnapshotDigest
+      ) {
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: some(
+            taskBoardFailure(
+              "invalid-task-completion",
+              "task completion lacks exact review, release, or cleanup evidence",
+            ),
+          ),
+        };
+      }
+      tasks.set(task.id, {
+        ...task,
+        state: "Done",
+        completionRelease: none,
       });
       continue;
     }

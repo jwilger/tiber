@@ -100,15 +100,27 @@ model context. Results include only bounded UTF-8 head/tail previews and an
 artifact digest. `tiber_artifact_range` and `tiber_artifact_search` provide
 bounded verified access; age, count, and byte quotas reap old artifacts.
 
-`/tiber:red <task-id> <test-command> <exact-scenario-name>` projects the pinned
-scenario into deterministic Gherkin, runs only a locally granted test-purpose
+`/tiber:red <task-id> <test-command> <test-mapping> <exact-scenario-name>`
+projects the pinned scenario into deterministic Gherkin, runs only a locally
+granted test-purpose
 command in the owned worktree, stores the exact diagnostic by digest, and asks
 a fresh tool-free classifier whether that failure is scenario-specific.
 Unrelated, passing, stale, unbound, or malformed observations are rejected. A
 compile failure counts only when it specifically demonstrates the scenario's
 missing public surface. Before the resulting durable RED receipt, governed
 `edit` and `write` permit only exact task test mappings; production paths remain
-mechanically denied.
+mechanically denied. `/tiber:green` takes the same arguments, requires the exact
+RED receipt and a successful diagnostic observation, runs a fresh lightweight
+review, and publishes one signed scenario increment. Repeating this pair covers
+every scenario and mapped test without granting authority from model output.
+
+After all scenarios and mappings are preserved,
+`/tiber:final-review <task-id> <verification-command>` runs an exact granted
+verification-purpose command and fresh risk-selected, tool-free review lenses.
+Findings or source/verification deltas reset the signed clean streak; three
+consecutive complete clean iterations are required. `/tiber:done <task-id>`
+then terminates only that claim's processes, releases the claim, preserves dirty
+source privately, removes its owned worktree, and publishes local-only Done.
 
 ## Status and architecture
 

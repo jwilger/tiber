@@ -21,6 +21,7 @@ import {
   parseTaskEventId,
   parseTaskEventOccurredAt,
   parseTaskId,
+  parseTestMappingPath,
 } from "../core/tasks/task-values.js";
 import {
   decideGreenIncrement,
@@ -35,17 +36,18 @@ export async function handleGreenCommand(
   argumentsText: string,
   context: ExtensionCommandContext,
 ): Promise<void> {
-  const match = /^(\S+)\s+(\S+)\s+(.+)$/u.exec(argumentsText.trim());
+  const match = /^(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/u.exec(argumentsText.trim());
   if (match === null) {
     context.ui.notify(
-      "Usage: /tiber:green <task-id> <test-command> <exact-scenario-name>",
+      "Usage: /tiber:green <task-id> <test-command> <test-mapping> <exact-scenario-name>",
       "info",
     );
     return;
   }
   const taskId = parseTaskId(match[1]);
   const commandName = parseCommandName(match[2]);
-  const scenarioName = parseScenarioName(match[3]);
+  const testMapping = parseTestMappingPath(match[3]);
+  const scenarioName = parseScenarioName(match[4]);
   const remote = new GitTaskRemote(context.cwd);
   const board = remote.read();
   const task = taskId.ok
@@ -59,7 +61,8 @@ export async function handleGreenCommand(
     task.specificationDigest.kind !== "some" ||
     !commandName.ok ||
     !scenarioName.ok ||
-    task.specification.value.testMappings.length !== 1
+    !testMapping.ok ||
+    !task.specification.value.testMappings.includes(testMapping.value)
   ) {
     context.ui.notify("TIBER_GREEN_AUTHORITY_INVALID", "error");
     return;
@@ -67,7 +70,6 @@ export async function handleGreenCommand(
   const claim = task.claim.value;
   const specification = task.specification.value;
   const specificationDigest = task.specificationDigest.value;
-  const testMapping = specification.testMappings[0];
   const worktrees = new GitOwnedWorktrees(context.cwd, getAgentDir()).read();
   const worktree = worktrees.ok
     ? worktrees.value.worktrees.find(
@@ -76,7 +78,7 @@ export async function handleGreenCommand(
     : undefined;
   const journal = new FileRunJournal(getAgentDir());
   const runResult = journal.read(task.id);
-  if (testMapping === undefined || worktree === undefined || !runResult.ok) {
+  if (worktree === undefined || !runResult.ok) {
     context.ui.notify("TIBER_GREEN_RED_RECEIPT_REQUIRED", "error");
     return;
   }
@@ -89,7 +91,7 @@ export async function handleGreenCommand(
   if (
     run.redReceipt.kind === "none" ||
     run.redReceipt.value.scenarioName !== scenarioName.value ||
-    run.redReceipt.value.testMapping !== testMapping ||
+    run.redReceipt.value.testMapping !== testMapping.value ||
     run.redReceipt.value.specificationDigest !== specificationDigest ||
     run.claimId !== claim.claimId
   ) {
@@ -162,7 +164,7 @@ export async function handleGreenCommand(
     specificationDigest,
     baselineRevision: claim.baselineRevision,
     scenarioName: scenarioName.value,
-    testMapping,
+    testMapping: testMapping.value,
     commandCatalogDigest: catalog.value.digest,
     redDiagnosticDigest: redReceipt.diagnosticDigest,
     commandName: commandName.value,
@@ -187,7 +189,7 @@ export async function handleGreenCommand(
       specificationDigest,
       baselineRevision: claim.baselineRevision,
       scenarioName: scenarioName.value,
-      testMapping,
+      testMapping: testMapping.value,
       redDiagnosticDigest: redReceipt.diagnosticDigest,
       commandCatalogDigest: redReceipt.commandCatalogDigest,
     },

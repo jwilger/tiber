@@ -212,6 +212,51 @@ export class FileProcessGroupRegistry {
     return { ok: true, value: alive };
   }
 
+  public terminateTask(
+    taskId: TaskId,
+    claimId: TaskClaimId,
+  ): ProcessRegistryResult<readonly ProcessGroupId[]> {
+    const groups = this.read();
+    if (!groups.ok) return groups;
+    const owned = groups.value.filter(
+      (group) => group.taskId === taskId && group.claimId === claimId,
+    );
+    const terminated: ProcessGroupId[] = [];
+    for (const group of owned) {
+      try {
+        process.kill(
+          process.platform === "win32"
+            ? group.processGroupId
+            : -Number(group.processGroupId),
+          "SIGTERM",
+        );
+        terminated.push(group.processGroupId);
+      } catch (error) {
+        const code =
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          typeof error.code === "string"
+            ? error.code
+            : undefined;
+        if (code !== "ESRCH")
+          return failure(
+            "TIBER_PROCESS_TERMINATION_FAILED",
+            `owned process group ${String(group.processGroupId)} could not be terminated`,
+          );
+      }
+    }
+    const remaining = groups.value.filter(
+      (group) => group.taskId !== taskId || group.claimId !== claimId,
+    );
+    if (remaining.length !== groups.value.length && !this.write(remaining))
+      return failure(
+        "TIBER_PROCESS_REGISTRY_IO",
+        "task process cleanup receipt was not durable",
+      );
+    return { ok: true, value: terminated };
+  }
+
   public terminateAll(): ProcessRegistryResult<readonly ProcessGroupId[]> {
     const groups = this.read();
     if (!groups.ok) return groups;
