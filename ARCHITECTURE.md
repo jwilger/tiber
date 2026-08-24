@@ -313,12 +313,17 @@ payloads fail closed. Oversized documentation is content-addressed and returned
 through the ordinary bounded artifact preview/range/search surface. The optional
 API key is used only as an HTTP credential and never returned to model context.
 
-Hindsight is optional and uses separate user-global, private-repository, and
-opt-in shared-project banks with independent recall and retain permissions. A
-worker receives at most one bounded initial recall; later recall is explicit.
-Private banks receive selected checkpoints. Shared banks receive reviewed
-completion artifacts only. Raw output, source, diffs, and detected secrets are
-excluded by default.
+Hindsight is an optional first-party direct HTTP adapter using separate hashed
+user-global, hashed private-repository, and explicitly named opt-in
+shared-project banks. Every bank has independent recall and retain permissions;
+no configured endpoint means no memory effect. A session receives at most one
+bounded low-budget initial recall, while later recall requires the explicit
+`tiber_memory_recall` tool. Recalled facts are bounded, treated as untrusted
+context, and never grant workflow authority. Selected private/global checkpoints
+may be retained through `tiber_memory_checkpoint`; shared retention is not model
+requestable and occurs only after the host has published reviewed completion.
+Raw output, source, diffs, and detected credentials are denied before direct,
+time-bounded HTTP. Endpoint restrictions and bounded responses fail closed.
 
 ## Delivery, CI, and release
 

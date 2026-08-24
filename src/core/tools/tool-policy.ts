@@ -39,6 +39,8 @@ export const GOVERNED_TOOL_NAMES = [
   "tiber_artifact_search",
   "tiber_command",
   "tiber_exception_request",
+  "tiber_memory_checkpoint",
+  "tiber_memory_recall",
   "tiber_workflow_request",
   "write",
 ] as const;
