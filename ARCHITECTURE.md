@@ -282,7 +282,13 @@ observed remote revision in its receipt. Every required CI authority must report
 terminal success for the exact delivered revision.
 Generic CI commands are user-local, digest-pinned executable/argv templates
 returning validated JSON; mutable repository scripts cannot assert remote CI
-success.
+success. Tiber executes a private copy of the exact bytes whose SHA-256 digest
+was granted, without a shell, and requires closed observations naming both the
+configured authority and requested full commit revision. Pending observations
+remain incomplete. Terminal failure creates a Git-common-directory hold visible
+to every worktree; only a recorded causal diagnosis followed by terminal success
+for the exact failed revision releases that hold. CI success is also published
+as a signed task event and never inferred from a Git delivery receipt.
 
 The Tiber repository requires PRs, linear squash history, Conventional
 Commit-compatible titles, resolved conversations, and an aggregate full-CI

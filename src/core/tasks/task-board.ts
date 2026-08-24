@@ -1,4 +1,15 @@
 import {
+  decideCiEvaluation,
+  type CiAuthorityObservation,
+  type CiSuccessReceipt,
+} from "../ci/ci-authority.js";
+import {
+  parseCiAuthorityName,
+  parseCiExecutableDigest,
+  parseCiObservationDigest,
+  parseCiRevision,
+} from "../ci/ci-values.js";
+import {
   parseDeliveryCommitRevision,
   parseDeliveryDestinationRef,
   parseDeliveryTreeDigest,
@@ -113,6 +124,7 @@ export interface Task {
   readonly finalReviewProgress: Option<FinalReviewProgress>;
   readonly completionRelease: Option<TaskClaimId>;
   readonly delivery: Option<GitDeliveryReceipt>;
+  readonly ci: Option<CiSuccessReceipt>;
 }
 
 export interface TaskCreatedEvent {
@@ -190,6 +202,17 @@ export interface TaskDeliveryRecordedEvent {
   readonly receipt: GitDeliveryReceipt;
 }
 
+export interface TaskCiRecordedEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: TaskEventId;
+  readonly kind: "task-ci-recorded";
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
+  readonly claimId: TaskClaimId;
+  readonly receipt: CiSuccessReceipt;
+}
+
 export interface TaskFinalReviewRecordedEvent {
   readonly schemaVersion: 1;
   readonly eventId: TaskEventId;
@@ -235,6 +258,7 @@ export type TaskEvent =
   | TaskClaimTakenOverEvent
   | TaskIncrementPreservedEvent
   | TaskDeliveryRecordedEvent
+  | TaskCiRecordedEvent
   | TaskFinalReviewRecordedEvent
   | TaskClaimReleasedEvent
   | TaskCompletedEvent;
@@ -242,6 +266,7 @@ export type TaskEvent =
 export type TaskBoardFailureReason =
   | "duplicate-authority-event"
   | "incomplete-final-review"
+  | "invalid-ci-receipt"
   | "invalid-delivery-receipt"
   | "invalid-preserved-increment"
   | "invalid-task-completion"
@@ -603,6 +628,85 @@ function parseTaskEventValue(value: unknown): TaskEvent | undefined {
         }
       : undefined;
   }
+  if (value.kind === "task-ci-recorded" && isRecord(value.receipt)) {
+    if (
+      Object.keys(value.receipt).sort().join(",") !==
+      "observations,requiredAuthorities,revision"
+    )
+      return undefined;
+    const claimId = parseTaskClaimId(value.claimId);
+    const revision = parseCiRevision(value.receipt.revision);
+    if (
+      !claimId.ok ||
+      !revision.ok ||
+      !Array.isArray(value.receipt.requiredAuthorities) ||
+      !Array.isArray(value.receipt.observations)
+    )
+      return undefined;
+    const requiredAuthorities =
+      value.receipt.requiredAuthorities.map(parseCiAuthorityName);
+    // Stryker disable next-line ArrowFunction, ConditionalExpression, MethodExpression: malformed required names are also denied by exact authority-set validation below; this explicit guard preserves semantic-value narrowing.
+    if (requiredAuthorities.some((authority) => !authority.ok))
+      return undefined;
+    const semanticRequiredAuthorities = requiredAuthorities.flatMap(
+      // Stryker disable next-line ArrayDeclaration: the malformed branch is rejected above before this narrowing projection can execute.
+      (authority) => (authority.ok ? [authority.value] : []),
+    );
+    const observations: CiAuthorityObservation[] = [];
+    for (const observation of value.receipt.observations) {
+      if (
+        !isRecord(observation) ||
+        Object.keys(observation).sort().join(",") !==
+          "adapterDigest,authority,observationDigest,revision,status" ||
+        observation.status !== "success"
+      )
+        return undefined;
+      const authority = parseCiAuthorityName(observation.authority);
+      const observedRevision = parseCiRevision(observation.revision);
+      const adapterDigest = parseCiExecutableDigest(observation.adapterDigest);
+      const observationDigest = parseCiObservationDigest(
+        observation.observationDigest,
+      );
+      // Stryker disable next-line ConditionalExpression, LogicalOperator: malformed semantic values are also denied by exact authority/revision validation below; this explicit guard preserves narrowing.
+      if (
+        // Stryker disable next-line ConditionalExpression, LogicalOperator: malformed identity values are independently denied by exact receipt validation; this guard narrows the semantic values.
+        !authority.ok ||
+        !observedRevision.ok ||
+        !adapterDigest.ok ||
+        !observationDigest.ok
+      )
+        return undefined;
+      observations.push({
+        authority: authority.value,
+        revision: observedRevision.value,
+        status: "success",
+        adapterDigest: adapterDigest.value,
+        observationDigest: observationDigest.value,
+      });
+    }
+    const receipt: CiSuccessReceipt = {
+      revision: revision.value,
+      requiredAuthorities: semanticRequiredAuthorities,
+      observations,
+    };
+    const validation = decideCiEvaluation(
+      receipt.revision,
+      receipt.requiredAuthorities,
+      receipt.observations,
+    );
+    return validation.status === "succeeded" && receipt.observations.length > 0
+      ? {
+          schemaVersion: 1,
+          eventId: common.eventId,
+          kind: "task-ci-recorded",
+          occurredAt: common.occurredAt,
+          taskId: taskId.value,
+          specificationDigest: specificationDigest.value,
+          claimId: claimId.value,
+          receipt,
+        }
+      : undefined;
+  }
   if (
     value.kind === "task-final-review-recorded" &&
     isRecord(value.verification)
@@ -790,6 +894,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         finalReviewProgress: none,
         completionRelease: none,
         delivery: none,
+        ci: none,
       });
       continue;
     }
@@ -815,6 +920,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         finalReviewProgress: none,
         completionRelease: none,
         delivery: none,
+        ci: none,
       });
       continue;
     }
@@ -846,6 +952,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         finalReviewProgress: none,
         completionRelease: none,
         delivery: none,
+        ci: none,
       });
       continue;
     }
@@ -880,6 +987,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         finalReviewProgress: none,
         completionRelease: none,
         delivery: none,
+        ci: none,
       });
       continue;
     }
@@ -925,6 +1033,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         finalReviewProgress: none,
         completionRelease: none,
         delivery: none,
+        ci: none,
       });
       continue;
     }
@@ -956,7 +1065,39 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
           ),
         };
       }
-      tasks.set(task.id, { ...task, delivery: some(event.receipt) });
+      tasks.set(task.id, {
+        ...task,
+        delivery: some(event.receipt),
+        ci: none,
+      });
+      continue;
+    }
+    if (event.kind === "task-ci-recorded") {
+      if (
+        // Stryker disable next-line ConditionalExpression, LogicalOperator: delivery is installed only in In Progress with a claim, while claim release atomically changes state and clears the claim; either check documents the same closed lifecycle invariant.
+        task.state !== "In Progress" ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: delivery and In Progress establish claim presence atomically; this explicit Option check preserves narrowing.
+        task.claim.kind === "none" ||
+        task.claim.value.claimId !== event.claimId ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: a delivery can only be installed after the exact specification digest; this explicit Option check preserves narrowing.
+        task.specificationDigest.kind === "none" ||
+        task.specificationDigest.value !== event.specificationDigest ||
+        task.delivery.kind === "none" ||
+        task.delivery.value.commit !== event.receipt.revision ||
+        task.ci.kind === "some"
+      ) {
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: some(
+            taskBoardFailure(
+              "invalid-ci-receipt",
+              "CI receipt is duplicate, stale, or not state-bound",
+            ),
+          ),
+        };
+      }
+      tasks.set(task.id, { ...task, ci: some(event.receipt) });
       continue;
     }
     if (event.kind === "task-final-review-recorded") {
@@ -1021,8 +1162,11 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         // Stryker disable next-line ConditionalExpression, StringLiteral: active claims are installed only after specification and digest, so these checks document established invariants.
         task.specificationDigest.kind === "none" ||
         (event.reason === "completed" &&
+          // Stryker disable next-line ConditionalExpression: exact CI can only be recorded after delivery from a present three-clean review; this check documents the retained review invariant.
           (task.finalReviewProgress.kind === "none" ||
-            task.finalReviewProgress.value.cleanStreak !== 3))
+            // Stryker disable next-line ConditionalExpression: exact CI already establishes the three-clean streak; this check keeps release evidence explicit.
+            task.finalReviewProgress.value.cleanStreak !== 3 ||
+            task.ci.kind === "none"))
       ) {
         return {
           mode: "degraded-read-only",
@@ -1050,6 +1194,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         completionRelease:
           event.reason === "completed" ? some(event.claimId) : none,
         delivery: task.delivery,
+        ci: task.ci,
       });
       continue;
     }
@@ -1069,6 +1214,8 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         task.finalReviewProgress.kind === "none" ||
         // Stryker disable next-line ConditionalExpression: completion release cannot be installed unless the retained review streak is exactly three.
         task.finalReviewProgress.value.cleanStreak !== 3 ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: completed release now atomically establishes exact CI success; this explicit Option check documents completion authority.
+        task.ci.kind === "none" ||
         task.finalReviewProgress.value.sourceSnapshotDigest !==
           event.sourceSnapshotDigest
       ) {

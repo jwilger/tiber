@@ -51,6 +51,7 @@ function runDoneCommand(
     task.specificationDigest.kind === "none" ||
     task.finalReviewProgress.kind === "none" ||
     task.finalReviewProgress.value.cleanStreak !== 3 ||
+    task.ci.kind === "none" ||
     (task.claim.kind === "none" && task.completionRelease.kind === "none")
   ) {
     context.ui.notify("TIBER_DONE_AUTHORITY_INVALID", "error");

@@ -5,6 +5,7 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 
+import { FileCiAuthorityStore } from "../adapters/ci/file-ci-authority-store.js";
 import { deliverGit } from "../adapters/git/git-delivery.js";
 import { observeSourceSnapshot } from "../adapters/git/git-source-diff.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
@@ -14,6 +15,7 @@ import {
   parseDeliveryCommitSubject,
   parseDeliveryDestinationRef,
 } from "../core/delivery/git-delivery-values.js";
+import { authorizeDeliveryDuringCiHold } from "../core/ci/ci-authority.js";
 import {
   authorizeGitDelivery,
   type GitDeliveryMode,
@@ -47,6 +49,19 @@ function runDeliveryCommand(
       "Usage: /tiber:deliver <task-id> <mode> <destination-ref-or-> <subject> -- <body>",
       "info",
     );
+    return;
+  }
+  const ciState = new FileCiAuthorityStore(
+    context.cwd,
+    getAgentDir(),
+  ).readHold();
+  if (!ciState.ok) {
+    context.ui.notify(ciState.failure.code, "error");
+    return;
+  }
+  const holdDecision = authorizeDeliveryDuringCiHold(ciState.value);
+  if (holdDecision.status !== "authorized") {
+    context.ui.notify(holdDecision.code, "error");
     return;
   }
   const taskId = parseTaskId(match[1]);
