@@ -116,6 +116,23 @@ export class FileProcessGroupRegistry {
     return { ok: true, value: group };
   }
 
+  public unregister(pid: number): ProcessRegistryResult<boolean> {
+    const groups = this.read();
+    if (!groups.ok) return groups;
+    const remaining = groups.value.filter((group) => group.pid !== pid);
+    if (remaining.length === groups.value.length)
+      return { ok: true, value: false };
+    if (!this.write(remaining))
+      return {
+        ok: false,
+        failure: {
+          code: "TIBER_PROCESS_REGISTRY_IO",
+          message: "process completion was not durable",
+        },
+      };
+    return { ok: true, value: true };
+  }
+
   public reconcile(): ProcessRegistryResult<readonly OwnedProcessGroup[]> {
     const groups = this.read();
     if (!groups.ok) return groups;
@@ -145,7 +162,12 @@ export class FileProcessGroupRegistry {
     const terminated: number[] = [];
     for (const group of groups.value) {
       try {
-        process.kill(-group.processGroupId, "SIGTERM");
+        process.kill(
+          process.platform === "win32"
+            ? group.processGroupId
+            : -group.processGroupId,
+          "SIGTERM",
+        );
         terminated.push(group.processGroupId);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
