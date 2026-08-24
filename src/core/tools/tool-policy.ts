@@ -6,7 +6,15 @@ export interface ToolDecision {
   readonly detail: string;
 }
 
-export const GOVERNED_TOOL_NAMES = ["bash", "edit", "read", "write"] as const;
+export const GOVERNED_TOOL_NAMES = [
+  "bash",
+  "edit",
+  "read",
+  "tiber_artifact_range",
+  "tiber_artifact_search",
+  "tiber_command",
+  "write",
+] as const;
 
 function deny(code: string, detail: string): ToolDecision {
   return { allowed: false, code, detail };

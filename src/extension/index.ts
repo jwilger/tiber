@@ -18,6 +18,8 @@ import {
   createDoctorReport,
   formatDoctorReport,
 } from "../core/doctor/report.js";
+import { handleCommandGrant } from "./command-grant.js";
+import { registerCommandTools } from "./command-tools.js";
 import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
 import { handleSettingsCommand } from "./settings-command.js";
@@ -27,6 +29,7 @@ import { handleWorkCommand } from "./work-command.js";
 export default function registerTiber(pi: ExtensionAPI): void {
   const packageVersion = readPackageVersion();
   registerGovernedTools(pi);
+  registerCommandTools(pi);
   registerTaskCommands(pi);
   let containment: ContainmentStatus = {
     state: "lockdown",
@@ -54,6 +57,11 @@ export default function registerTiber(pi: ExtensionAPI): void {
     handler: handleSettingsCommand,
   });
 
+  pi.registerCommand("tiber:commands", {
+    description: "Grant the exact project structured command catalog",
+    handler: handleCommandGrant,
+  });
+
   pi.registerCommand("tiber:work", {
     description: "Claim a Ready task and pin its baseline workflow run",
     handler: handleWorkCommand,
@@ -68,7 +76,15 @@ export default function registerTiber(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", (_event, context) => {
-    pi.setActiveTools(["read", "bash", "edit", "write"]);
+    pi.setActiveTools([
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "tiber_command",
+      "tiber_artifact_range",
+      "tiber_artifact_search",
+    ]);
     const agentDirectory = getAgentDir();
     const processes = new FileProcessGroupRegistry(agentDirectory).reconcile();
     if (!processes.ok) {

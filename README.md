@@ -88,6 +88,18 @@ interactive exact task-and-claim confirmation, publishes a state-bound takeover
 event, and transfers durable worktree ownership; stale heartbeat alone never
 transfers authority.
 
+Projects may define closed, shell-free command data in
+`.tiber/commands.json`: a name, absolute executable, fixed argv, exact literal
+environment, worktree cwd, timeout, and inline-output bound. A human grants the
+canonical catalog digest with `/tiber:commands grant`; repository edits revoke
+the grant automatically. `tiber_command` runs only a granted name for an exact
+active task claim and records its detached process group.
+
+Oversized stdout/stderr is stored privately by SHA-256 instead of entering the
+model context. Results include only bounded UTF-8 head/tail previews and an
+artifact digest. `tiber_artifact_range` and `tiber_artifact_search` provide
+bounded verified access; age, count, and byte quotas reap old artifacts.
+
 ## Status and architecture
 
 The accepted replacement plan is in
