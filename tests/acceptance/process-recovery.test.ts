@@ -6,6 +6,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { FileProcessGroupRegistry } from "../../src/adapters/processes/file-process-group-registry.js";
+import {
+  processGroupId,
+  processId,
+  processStartedAt,
+} from "../fixtures/process-values.js";
+import { taskClaimId, taskId } from "../fixtures/task-values.js";
 
 describe("owned process-group recovery", () => {
   it.skipIf(process.platform === "win32")(
@@ -27,11 +33,11 @@ describe("owned process-group recovery", () => {
       expect(
         registry.register({
           schemaVersion: 1,
-          taskId: "2424c876-6180-4c64-976e-9ea4bd540744",
-          claimId: "00000000-0000-4000-8000-000000000001",
-          pid: child.pid,
-          processGroupId: child.pid,
-          startedAt: "2026-08-23T16:00:00.000Z",
+          taskId: taskId("2424c876-6180-4c64-976e-9ea4bd540744"),
+          claimId: taskClaimId("00000000-0000-4000-8000-000000000001"),
+          pid: processId(child.pid),
+          processGroupId: processGroupId(child.pid),
+          startedAt: processStartedAt("2026-08-23T16:00:00.000Z"),
         }),
       ).toMatchObject({ ok: true });
 

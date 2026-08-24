@@ -1,15 +1,54 @@
 import { spawn } from "node:child_process";
 
-import type { StructuredCommand } from "../../core/commands/structured-command.js";
+import {
+  parseCommandDurationMilliseconds,
+  parseCommandExitCode,
+  parseCommandStandardError,
+  parseCommandStandardOutput,
+  type CommandExitCode,
+} from "../../core/artifacts/artifact-values.js";
 import type { CommandOutput } from "../../core/artifacts/output-virtualization.js";
-import type { FileProcessGroupRegistry } from "../processes/file-process-group-registry.js";
+import type { StructuredCommand } from "../../core/commands/structured-command.js";
+import {
+  parseProcessGroupId,
+  parseProcessId,
+  parseProcessStartedAt,
+} from "../../core/processes/process-values.js";
+import type { TaskClaimId, TaskId } from "../../core/tasks/task-values.js";
+import { none, some, type Option } from "../../core/types/option.js";
+import {
+  operationalFailure,
+  type TiberFailure,
+} from "../../core/failures/tiber-failure.js";
+import type {
+  FileProcessGroupRegistry,
+  ProcessFailure,
+} from "../processes/file-process-group-registry.js";
+
+type CommandRunFailure = TiberFailure<
+  | "TIBER_COMMAND_RECEIPT_INVALID"
+  | "TIBER_COMMAND_START_FAILED"
+  | "TIBER_PROCESS_INVALID",
+  { readonly domain: "command-runner" },
+  "corrected-input" | "state-change" | "retry-operation"
+>;
 
 export type CommandRunResult =
   | { readonly ok: true; readonly output: CommandOutput }
   | {
       readonly ok: false;
-      readonly failure: { readonly code: string; readonly message: string };
+      readonly failure: CommandRunFailure | ProcessFailure;
     };
+
+function failure(
+  code: CommandRunFailure["code"],
+  message: string,
+): CommandRunResult {
+  return {
+    ok: false,
+    failure: operationalFailure(code, "command-runner", message, "transient"),
+  };
+}
 
 export class StructuredCommandRunner {
   public constructor(private readonly processes: FileProcessGroupRegistry) {}
@@ -17,7 +56,7 @@ export class StructuredCommandRunner {
   public run(
     command: StructuredCommand,
     worktree: string,
-    ownership: { readonly taskId: string; readonly claimId: string },
+    ownership: { readonly taskId: TaskId; readonly claimId: TaskClaimId },
     signal?: AbortSignal,
   ): Promise<CommandRunResult> {
     return new Promise((resolve) => {
@@ -31,22 +70,30 @@ export class StructuredCommandRunner {
       });
       const pid = child.pid;
       if (pid === undefined) {
-        resolve({
-          ok: false,
-          failure: {
-            code: "TIBER_COMMAND_START_FAILED",
-            message: "process id is unavailable",
-          },
-        });
+        resolve(
+          failure("TIBER_COMMAND_START_FAILED", "process id is unavailable"),
+        );
+        return;
+      }
+      const processId = parseProcessId(pid);
+      const processGroupId = parseProcessGroupId(pid);
+      const startedAt = parseProcessStartedAt(new Date(started).toISOString());
+      if (!processId.ok || !processGroupId.ok || !startedAt.ok) {
+        resolve(
+          failure(
+            "TIBER_PROCESS_INVALID",
+            "spawned process values violated semantic invariants",
+          ),
+        );
         return;
       }
       const registration = this.processes.register({
         schemaVersion: 1,
         taskId: ownership.taskId,
         claimId: ownership.claimId,
-        pid,
-        processGroupId: pid,
-        startedAt: new Date(started).toISOString(),
+        pid: processId.value,
+        processGroupId: processGroupId.value,
+        startedAt: startedAt.value,
       });
       if (!registration.ok) {
         try {
@@ -119,14 +166,8 @@ export class StructuredCommandRunner {
         clearTimeout(timer);
         if (forcedKill !== undefined) clearTimeout(forcedKill);
         signal?.removeEventListener("abort", abort);
-        this.processes.unregister(pid);
-        resolve({
-          ok: false,
-          failure: {
-            code: "TIBER_COMMAND_START_FAILED",
-            message: error.message,
-          },
-        });
+        this.processes.unregister(processId.value);
+        resolve(failure("TIBER_COMMAND_START_FAILED", error.message));
       });
       child.on("close", (code) => {
         if (settled) return;
@@ -134,20 +175,50 @@ export class StructuredCommandRunner {
         clearTimeout(timer);
         if (forcedKill !== undefined) clearTimeout(forcedKill);
         signal?.removeEventListener("abort", abort);
-        const receipt = this.processes.unregister(pid);
+        const receipt = this.processes.unregister(processId.value);
         if (!receipt.ok) {
           resolve({ ok: false, failure: receipt.failure });
+          return;
+        }
+        const parsedStdout = parseCommandStandardOutput(
+          Buffer.concat(stdout).toString("utf8"),
+        );
+        const parsedStderr = parseCommandStandardError(
+          exceeded
+            ? `${Buffer.concat(stderr).toString("utf8")}\nTIBER_COMMAND_OUTPUT_LIMIT: output exceeded 10485760 bytes`
+            : Buffer.concat(stderr).toString("utf8"),
+        );
+        let exitCode: Option<CommandExitCode> = none;
+        if (code !== null) {
+          const parsedExitCode = parseCommandExitCode(code);
+          if (parsedExitCode.ok) exitCode = some(parsedExitCode.value);
+          else {
+            resolve(
+              failure(
+                "TIBER_COMMAND_RECEIPT_INVALID",
+                "process exit code violated its semantic invariant",
+              ),
+            );
+            return;
+          }
+        }
+        const duration = parseCommandDurationMilliseconds(Date.now() - started);
+        if (!parsedStdout.ok || !parsedStderr.ok || !duration.ok) {
+          resolve(
+            failure(
+              "TIBER_COMMAND_RECEIPT_INVALID",
+              "process completion values violated semantic invariants",
+            ),
+          );
           return;
         }
         resolve({
           ok: true,
           output: {
-            stdout: Buffer.concat(stdout).toString("utf8"),
-            stderr: exceeded
-              ? `${Buffer.concat(stderr).toString("utf8")}\nTIBER_COMMAND_OUTPUT_LIMIT: output exceeded 10485760 bytes`
-              : Buffer.concat(stderr).toString("utf8"),
-            exitCode: code,
-            durationMs: Date.now() - started,
+            stdout: parsedStdout.value,
+            stderr: parsedStderr.value,
+            exitCode,
+            durationMs: duration.value,
           },
         });
       });

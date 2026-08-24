@@ -12,7 +12,12 @@ import {
   type ContainmentStatus,
 } from "../core/containment/containment.js";
 import { applyAssuranceCeiling } from "../core/configuration/authority.js";
+import { resolveSettings } from "../core/configuration/settings.js";
 import { authorizeBootstrapTool } from "../core/doctor/bootstrap-policy.js";
+import {
+  parseDoctorNodeVersion,
+  parseDoctorRepositoryPath,
+} from "../core/doctor/doctor-values.js";
 import { verifyToolInventory } from "../core/tools/tool-policy.js";
 import {
   createDoctorReport,
@@ -42,9 +47,15 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:doctor", {
     description: "Show Tiber installation and safety status",
     handler: (_args, context) => {
+      const cwd = parseDoctorRepositoryPath(context.cwd);
+      const nodeVersion = parseDoctorNodeVersion(process.version);
+      if (!cwd.ok || !nodeVersion.ok) {
+        context.ui.notify("TIBER_DOCTOR_VALUE_INVALID", "error");
+        return Promise.resolve();
+      }
       const report = createDoctorReport({
-        cwd: context.cwd,
-        nodeVersion: process.version,
+        cwd: cwd.value,
+        nodeVersion: nodeVersion.value,
         packageVersion,
       });
 
@@ -109,10 +120,10 @@ export default function registerTiber(pi: ExtensionAPI): void {
         detail: "Settings could not be parsed for containment evaluation",
       };
     } else {
-      const requested =
-        settings.value.projectValues.assuranceLevel ??
-        settings.value.globalValues.assuranceLevel ??
-        "host-trusted";
+      const requested = resolveSettings(
+        settings.value.globalValues,
+        settings.value.projectValues,
+      ).assuranceLevel.value;
       const effective = applyAssuranceCeiling(
         requested,
         authority.value.ceilings.minimumAssuranceLevel,
@@ -169,6 +180,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
         reason: `${containment.code}: effects are disabled during containment lockdown`,
       };
     }
-    return authorizeBootstrapTool(event.toolName);
+    const authorization = authorizeBootstrapTool(event.toolName);
+    return authorization.kind === "some" ? authorization.value : undefined;
   });
 }

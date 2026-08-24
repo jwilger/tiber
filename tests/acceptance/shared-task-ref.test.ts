@@ -12,17 +12,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { GitTaskRemote } from "../../src/adapters/tasks/git-task-remote.js";
-import type {
-  TaskClaimedEvent,
-  TaskClaimReleasedEvent,
-  TaskCreatedEvent,
-  TaskReadyEvent,
-  TaskSpecifiedEvent,
-} from "../../src/core/tasks/task-board.js";
-import {
-  digestTaskSpecification,
-  type TaskSpecification,
-} from "../../src/core/tasks/readiness.js";
+import type { TaskCreatedEvent } from "../../src/core/tasks/task-board.js";
+import { digestTaskSpecification } from "../../src/core/tasks/readiness.js";
+import { some } from "../../src/core/types/option.js";
+import { expectedTaskBoardFailure as taskBoardFailure } from "../fixtures/failures.js";
+import { requireTaskEvent } from "../fixtures/task-events.js";
+import { requireTaskSpecification } from "../fixtures/task-specification.js";
 
 const temporaryDirectories: string[] = [];
 afterEach(() => {
@@ -39,13 +34,16 @@ function event(
   taskId: string,
   title: string,
 ): TaskCreatedEvent {
-  return {
-    schemaVersion: 1,
-    eventId,
-    kind: "task-created",
-    occurredAt: "2026-08-23T00:00:00.000Z",
-    task: { id: taskId, title, description: "" },
-  };
+  return requireTaskEvent(
+    {
+      schemaVersion: 1,
+      eventId,
+      kind: "task-created",
+      occurredAt: "2026-08-23T00:00:00.000Z",
+      task: { id: taskId, title, description: "" },
+    },
+    "task-created",
+  );
 }
 
 describe("signed shared task ref", () => {
@@ -102,7 +100,7 @@ describe("signed shared task ref", () => {
       "Right",
     ]);
 
-    const specification: TaskSpecification = {
+    const specification = requireTaskSpecification({
       outcome: "Move Left to Ready",
       scenarios: [
         {
@@ -117,79 +115,102 @@ describe("signed shared task ref", () => {
       dependencies: [],
       testMappings: ["shared-task-ref.test.ts"],
       architectureImplications: "Signed review evidence remains deterministic.",
-    };
+    });
     const digest = digestTaskSpecification(specification);
-    const specified: TaskSpecifiedEvent = {
-      schemaVersion: 1,
-      eventId: "00000000-0000-4000-8000-000000000001",
-      kind: "task-specified",
-      occurredAt: "2026-08-23T00:01:00.000Z",
-      taskId: "22222222-2222-4222-8222-222222222222",
-      specificationDigest: digest,
-      specification,
-    };
+    const specified = requireTaskEvent(
+      {
+        schemaVersion: 1,
+        eventId: "00000000-0000-4000-8000-000000000001",
+        kind: "task-specified",
+        occurredAt: "2026-08-23T00:01:00.000Z",
+        taskId: "22222222-2222-4222-8222-222222222222",
+        specificationDigest: digest,
+        specification,
+      },
+      "task-specified",
+    );
     expect(new GitTaskRemote(clones[0] ?? "").publish(specified).mode).toBe(
       "writable",
     );
-    const readyEvent: TaskReadyEvent = {
-      schemaVersion: 1,
-      eventId: "00000000-0000-4000-8000-000000000002",
-      kind: "task-ready",
-      occurredAt: "2026-08-23T00:02:00.000Z",
-      taskId: specified.taskId,
-      specificationDigest: digest,
-      review: {
-        freshContext: true,
-        reviewerRole: "specification-reviewer",
-        findingCount: 0,
-        reviewedSpecificationDigest: digest,
+    const readyEvent = requireTaskEvent(
+      {
+        schemaVersion: 1,
+        eventId: "00000000-0000-4000-8000-000000000002",
+        kind: "task-ready",
+        occurredAt: "2026-08-23T00:02:00.000Z",
+        taskId: specified.taskId,
+        specificationDigest: digest,
+        review: {
+          contextFreshness: "fresh",
+          reviewerRole: "specification-reviewer",
+          findingCount: 0,
+          reviewedSpecificationDigest: digest,
+        },
       },
-    };
+      "task-ready",
+    );
     const readyBoard = new GitTaskRemote(clones[1] ?? "").publish(readyEvent);
     expect(
       readyBoard.tasks.find((task) => task.id === specified.taskId)?.state,
     ).toBe("Ready");
 
-    const claim: TaskClaimedEvent = {
-      schemaVersion: 1,
-      eventId: "00000000-0000-4000-8000-000000000003",
-      kind: "task-claimed",
-      occurredAt: "2026-08-23T00:03:00.000Z",
-      taskId: specified.taskId,
-      specificationDigest: digest,
-      claim: {
-        claimId: "00000000-0000-4000-8000-000000000004",
-        owner: "task@example.test",
-        baselineRevision: "a".repeat(40),
-        workflowDigest: `sha256:${"b".repeat(64)}`,
+    const claim = requireTaskEvent(
+      {
+        schemaVersion: 1,
+        eventId: "00000000-0000-4000-8000-000000000003",
+        kind: "task-claimed",
+        occurredAt: "2026-08-23T00:03:00.000Z",
+        taskId: specified.taskId,
+        specificationDigest: digest,
+        claim: {
+          claimId: "00000000-0000-4000-8000-000000000004",
+          owner: "task@example.test",
+          baselineRevision: "a".repeat(40),
+          workflowDigest: `sha256:${"b".repeat(64)}`,
+        },
       },
-    };
+      "task-claimed",
+    );
     const claimedBoard = new GitTaskRemote(clones[0] ?? "").publish(claim);
     expect(
       claimedBoard.tasks.find((task) => task.id === claim.taskId)?.state,
     ).toBe("In Progress");
-    const competing = new GitTaskRemote(clones[1] ?? "").publish({
-      ...claim,
-      eventId: "00000000-0000-4000-8000-000000000005",
-      claim: {
-        ...claim.claim,
-        claimId: "00000000-0000-4000-8000-000000000006",
+    const competingEvent = requireTaskEvent(
+      {
+        ...claim,
+        eventId: "00000000-0000-4000-8000-000000000005",
+        claim: {
+          ...claim.claim,
+          claimId: "00000000-0000-4000-8000-000000000006",
+        },
       },
-    });
+      "task-claimed",
+    );
+    const competing = new GitTaskRemote(clones[1] ?? "").publish(
+      competingEvent,
+    );
     expect(competing).toMatchObject({
       mode: "degraded-read-only",
-      failure: "task claim is not exclusive or state-bound",
+      failure: some(
+        taskBoardFailure(
+          "non-exclusive-claim",
+          "task claim is not exclusive or state-bound",
+        ),
+      ),
     });
-    const release: TaskClaimReleasedEvent = {
-      schemaVersion: 1,
-      eventId: "00000000-0000-4000-8000-000000000007",
-      kind: "task-claim-released",
-      occurredAt: "2026-08-23T00:04:00.000Z",
-      taskId: claim.taskId,
-      specificationDigest: digest,
-      claimId: claim.claim.claimId,
-      reason: "baseline-drift",
-    };
+    const release = requireTaskEvent(
+      {
+        schemaVersion: 1,
+        eventId: "00000000-0000-4000-8000-000000000007",
+        kind: "task-claim-released",
+        occurredAt: "2026-08-23T00:04:00.000Z",
+        taskId: claim.taskId,
+        specificationDigest: digest,
+        claimId: claim.claim.claimId,
+        reason: "baseline-drift",
+      },
+      "task-claim-released",
+    );
     const releasedBoard = new GitTaskRemote(clones[1] ?? "").publish(release);
     expect(
       releasedBoard.tasks.find((task) => task.id === claim.taskId)?.state,
@@ -219,7 +240,12 @@ describe("signed shared task ref", () => {
     ]);
     expect(new GitTaskRemote(clones[0] ?? "").read()).toMatchObject({
       mode: "degraded-read-only",
-      failure: "task history signature or event verification failed",
+      failure: some(
+        taskBoardFailure(
+          "task-history-verification",
+          "task history signature or event verification failed",
+        ),
+      ),
     });
   }, 30_000);
 });

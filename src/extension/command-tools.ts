@@ -10,7 +10,17 @@ import { StructuredCommandRunner } from "../adapters/commands/structured-command
 import { FileProcessGroupRegistry } from "../adapters/processes/file-process-group-registry.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
 import { GitOwnedWorktrees } from "../adapters/worktrees/git-owned-worktrees.js";
+import {
+  parseArtifactDigest,
+  parseArtifactRangeLimit,
+  parseArtifactRangeOffset,
+  parseArtifactReapAtMilliseconds,
+  parseArtifactSearchMaximumMatches,
+  parseArtifactSearchQuery,
+  parseInlineOutputMaximumBytes,
+} from "../core/artifacts/artifact-values.js";
 import { virtualizeCommandOutput } from "../core/artifacts/output-virtualization.js";
+import { parseCommandName } from "../core/commands/command-values.js";
 import { decideCommandExecution } from "../core/commands/structured-command.js";
 
 function text(value: unknown): string {
@@ -44,6 +54,13 @@ export function registerCommandTools(pi: ExtensionAPI): void {
           details: {},
           isError: true,
         };
+      const commandName = parseCommandName(parameters.name);
+      if (!commandName.ok)
+        return {
+          content: [{ type: "text", text: commandName.failure.code }],
+          details: {},
+          isError: true,
+        };
       const board = new GitTaskRemote(context.cwd).read();
       const task = board.tasks.find(
         (candidate) => candidate.id === parameters.taskId,
@@ -56,17 +73,33 @@ export function registerCommandTools(pi: ExtensionAPI): void {
         ? worktrees.value.worktrees.find(
             (entry) =>
               entry.taskId === parameters.taskId &&
-              entry.claimId === task?.claim?.claimId,
+              entry.claimId ===
+                (task?.claim.kind === "some"
+                  ? task.claim.value.claimId
+                  : undefined),
           )
         : undefined;
-      const decision = decideCommandExecution(catalog.value, parameters.name, {
-        activeClaim:
-          board.mode === "writable" &&
-          task?.state === "In Progress" &&
-          worktree !== undefined,
-        grantedCatalogDigest: authority.readGrant(),
-      });
-      if (!decision.ok || worktree === undefined || task?.claim === undefined)
+      const grant = authority.readGrant();
+      if (!grant.ok)
+        return {
+          content: [{ type: "text", text: grant.failure.code }],
+          details: {},
+          isError: true,
+        };
+      const decision = decideCommandExecution(
+        catalog.value,
+        commandName.value,
+        {
+          claimStatus:
+            board.mode === "writable" &&
+            task?.state === "In Progress" &&
+            worktree !== undefined
+              ? "published"
+              : "absent",
+          grantedCatalogDigest: grant.value,
+        },
+      );
+      if (!decision.ok || worktree === undefined || task?.claim.kind !== "some")
         return {
           content: [
             {
@@ -83,7 +116,7 @@ export function registerCommandTools(pi: ExtensionAPI): void {
       const run = await runner.run(
         decision.command,
         worktree.path,
-        { taskId: task.id, claimId: task.claim.claimId },
+        { taskId: task.id, claimId: task.claim.value.claimId },
         signal,
       );
       if (!run.ok)
@@ -97,10 +130,16 @@ export function registerCommandTools(pi: ExtensionAPI): void {
           details: {},
           isError: true,
         };
-      const result = virtualizeCommandOutput(
-        run.output,
+      const inlineLimit = parseInlineOutputMaximumBytes(
         decision.command.maxOutputBytes,
       );
+      if (!inlineLimit.ok)
+        return {
+          content: [{ type: "text", text: inlineLimit.failure.code }],
+          details: {},
+          isError: true,
+        };
+      const result = virtualizeCommandOutput(run.output, inlineLimit.value);
       const artifacts = new FileArtifactStore(getAgentDir());
       const stored = artifacts.put(result);
       if (!stored.ok)
@@ -114,7 +153,8 @@ export function registerCommandTools(pi: ExtensionAPI): void {
           details: {},
           isError: true,
         };
-      artifacts.reap(Date.now());
+      const reapAt = parseArtifactReapAtMilliseconds(Date.now());
+      if (reapAt.ok) artifacts.reap(reapAt.value);
       if (result.kind === "inline")
         return {
           content: [{ type: "text", text: text(result.output) }],
@@ -154,10 +194,21 @@ export function registerCommandTools(pi: ExtensionAPI): void {
       { additionalProperties: false },
     ),
     execute(_id, parameters) {
+      const digest = parseArtifactDigest(parameters.digest);
+      const offset = parseArtifactRangeOffset(parameters.offset);
+      const limit = parseArtifactRangeLimit(parameters.limit);
+      if (!digest.ok || !offset.ok || !limit.ok)
+        return Promise.resolve({
+          content: [
+            { type: "text" as const, text: "TIBER_ARTIFACT_RANGE_INVALID" },
+          ],
+          details: {},
+          isError: true,
+        });
       const result = new FileArtifactStore(getAgentDir()).range(
-        parameters.digest,
-        parameters.offset,
-        parameters.limit,
+        digest.value,
+        offset.value,
+        limit.value,
       );
       return Promise.resolve(
         result.ok
@@ -193,10 +244,23 @@ export function registerCommandTools(pi: ExtensionAPI): void {
       { additionalProperties: false },
     ),
     execute(_id, parameters) {
-      const result = new FileArtifactStore(getAgentDir()).search(
-        parameters.digest,
-        parameters.query,
+      const digest = parseArtifactDigest(parameters.digest);
+      const query = parseArtifactSearchQuery(parameters.query);
+      const maximumMatches = parseArtifactSearchMaximumMatches(
         parameters.maxMatches ?? 20,
+      );
+      if (!digest.ok || !query.ok || !maximumMatches.ok)
+        return Promise.resolve({
+          content: [
+            { type: "text" as const, text: "TIBER_ARTIFACT_SEARCH_INVALID" },
+          ],
+          details: {},
+          isError: true,
+        });
+      const result = new FileArtifactStore(getAgentDir()).search(
+        digest.value,
+        query.value,
+        maximumMatches.value,
       );
       return Promise.resolve(
         result.ok

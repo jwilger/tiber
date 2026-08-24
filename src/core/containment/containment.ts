@@ -1,18 +1,28 @@
 import type { AssuranceLevel } from "../configuration/settings.js";
+import type { Option } from "../types/option.js";
+import type {
+  AttestationExpiresAt,
+  AttestationIssuedAt,
+  ContainmentAttestationNonce,
+  ContainmentAttestationSignature,
+  ContainmentEvaluationAt,
+  ContainmentRepositoryPath,
+  ContainmentVerifierIdentity,
+} from "./containment-values.js";
 
 export interface ContainmentAttestation {
   readonly schemaVersion: 1;
   readonly level: Exclude<AssuranceLevel, "host-trusted">;
-  readonly repositoryPath: string;
-  readonly issuedAt: string;
-  readonly expiresAt: string;
-  readonly verifier: string;
-  readonly nonce: string;
-  readonly signature: string;
+  readonly repositoryPath: ContainmentRepositoryPath;
+  readonly issuedAt: AttestationIssuedAt;
+  readonly expiresAt: AttestationExpiresAt;
+  readonly verifier: ContainmentVerifierIdentity;
+  readonly nonce: ContainmentAttestationNonce;
+  readonly signature: ContainmentAttestationSignature;
 }
 
 export interface ContainmentEvidence {
-  readonly attestation?: ContainmentAttestation;
+  readonly attestation: Option<ContainmentAttestation>;
   readonly signatureValid: boolean;
   readonly linux: boolean;
   readonly mountNamespaceIsolated: boolean;
@@ -23,13 +33,28 @@ export interface ContainmentEvidence {
 export interface ContainmentStatus {
   readonly state: "verified" | "lockdown";
   readonly level: AssuranceLevel;
-  readonly code: string;
+  readonly code: ContainmentStatusCode;
   readonly detail: string;
 }
 
+export type ContainmentStatusCode =
+  | "TIBER_CONTAINMENT_ATTESTATION_EXPIRED"
+  | "TIBER_CONTAINMENT_ATTESTATION_MISMATCH"
+  | "TIBER_CONTAINMENT_ATTESTATION_MISSING"
+  | "TIBER_CONTAINMENT_HOST_TRUSTED"
+  | "TIBER_CONTAINMENT_CONFIGURATION_INVALID"
+  | "TIBER_CONTAINMENT_LINUX_UNVERIFIED"
+  | "TIBER_CONTAINMENT_NOT_INITIALIZED"
+  | "TIBER_CONTAINMENT_NETWORK_UNVERIFIED"
+  | "TIBER_CONTAINMENT_SECCOMP_UNVERIFIED"
+  | "TIBER_CONTAINMENT_SIGNATURE_INVALID"
+  | "TIBER_CONTAINMENT_VERIFIED"
+  | "TIBER_TOOL_INVENTORY_COMPLETE"
+  | "TIBER_TOOL_INVENTORY_INCOMPLETE";
+
 function lockdown(
   level: AssuranceLevel,
-  code: string,
+  code: ContainmentStatusCode,
   detail: string,
 ): ContainmentStatus {
   return { state: "lockdown", level, code, detail };
@@ -37,8 +62,8 @@ function lockdown(
 
 export function decideContainment(
   requested: AssuranceLevel,
-  repositoryPath: string,
-  now: string,
+  repositoryPath: ContainmentRepositoryPath,
+  now: ContainmentEvaluationAt,
   evidence: ContainmentEvidence,
 ): ContainmentStatus {
   if (requested === "host-trusted") {
@@ -50,7 +75,7 @@ export function decideContainment(
     };
   }
   const attestation = evidence.attestation;
-  if (attestation === undefined) {
+  if (attestation.kind === "none") {
     return lockdown(
       requested,
       "TIBER_CONTAINMENT_ATTESTATION_MISSING",
@@ -65,8 +90,8 @@ export function decideContainment(
     );
   }
   if (
-    attestation.repositoryPath !== repositoryPath ||
-    attestation.level !== requested
+    attestation.value.repositoryPath !== repositoryPath ||
+    attestation.value.level !== requested
   ) {
     return lockdown(
       requested,
@@ -75,12 +100,9 @@ export function decideContainment(
     );
   }
   const nowMilliseconds = Date.parse(now);
-  const issuedMilliseconds = Date.parse(attestation.issuedAt);
-  const expiryMilliseconds = Date.parse(attestation.expiresAt);
+  const issuedMilliseconds = Date.parse(attestation.value.issuedAt);
+  const expiryMilliseconds = Date.parse(attestation.value.expiresAt);
   if (
-    !Number.isFinite(nowMilliseconds) ||
-    !Number.isFinite(issuedMilliseconds) ||
-    !Number.isFinite(expiryMilliseconds) ||
     issuedMilliseconds > nowMilliseconds ||
     expiryMilliseconds <= nowMilliseconds
   ) {

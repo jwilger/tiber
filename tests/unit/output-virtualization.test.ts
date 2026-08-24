@@ -1,27 +1,56 @@
 import { describe, expect, it } from "vitest";
 
+import { parseInlineOutputMaximumBytes } from "../../src/core/artifacts/artifact-values.js";
+import { virtualizeCommandOutput } from "../../src/core/artifacts/output-virtualization.js";
 import {
-  virtualizeCommandOutput,
-  type CommandOutput,
-} from "../../src/core/artifacts/output-virtualization.js";
+  commandOutput,
+  inlineOutputMaximumBytes as limit,
+} from "../fixtures/artifact-values.js";
 
-function output(stdout: string, stderr = ""): CommandOutput {
-  return { stdout, stderr, exitCode: 0, durationMs: 10 };
+function output(stdout: string, stderr = "") {
+  return commandOutput({ stdout, stderr, exitCode: 0, durationMs: 10 });
 }
 
 describe("bounded command output", () => {
   it("returns small UTF-8 output inline", () => {
-    expect(virtualizeCommandOutput(output("passed\n"), 128)).toEqual({
+    expect(virtualizeCommandOutput(output("passed\n"), limit(128))).toEqual({
       kind: "inline",
       output: output("passed\n"),
       byteLength: 7,
     });
   });
 
+  it("records whether oversized output exited or was signaled", () => {
+    const exited = virtualizeCommandOutput(
+      commandOutput({
+        stdout: "x".repeat(200),
+        stderr: "",
+        exitCode: 7,
+        durationMs: 10,
+      }),
+      limit(64),
+    );
+    const signaled = virtualizeCommandOutput(
+      commandOutput({
+        stdout: "x".repeat(200),
+        stderr: "",
+        exitCode: null,
+        durationMs: 10,
+      }),
+      limit(64),
+    );
+    expect(exited.kind === "artifact" ? exited.content : "").toContain(
+      "exitCode: 7",
+    );
+    expect(signaled.kind === "artifact" ? signaled.content : "").toContain(
+      "exitCode: signal",
+    );
+  });
+
   it("virtualizes oversized output with bounded head and tail previews", () => {
     const result = virtualizeCommandOutput(
       output("0123456789".repeat(100)),
-      64,
+      limit(64),
     );
     expect(result.kind).toBe("artifact");
     if (result.kind === "artifact") {
@@ -38,7 +67,7 @@ describe("bounded command output", () => {
   it("counts stderr and metadata without breaking UTF-8 preview bounds", () => {
     const result = virtualizeCommandOutput(
       output("🙂".repeat(40), "failure"),
-      32,
+      limit(32),
     );
     expect(result.kind).toBe("artifact");
     if (result.kind === "artifact") {
@@ -56,7 +85,7 @@ describe("bounded command output", () => {
     for (let bound = 1; bound <= 160; bound += 1) {
       const result = virtualizeCommandOutput(
         output("🙂".repeat(100), "é"),
-        bound,
+        limit(bound),
       );
       expect(result.kind).toBe("artifact");
       if (result.kind === "artifact") {
@@ -78,7 +107,7 @@ describe("bounded command output", () => {
         `prefix-${"x".repeat(20)}-�-middle-${"y".repeat(160)}`,
         `tail-${"z".repeat(80)}-�-end`,
       ),
-      256,
+      limit(256),
     );
     expect(result.kind).toBe("artifact");
     if (result.kind === "artifact") {
@@ -88,17 +117,19 @@ describe("bounded command output", () => {
   });
 
   it("uses inclusive valid bounds and counts both streams", () => {
-    expect(virtualizeCommandOutput(output("x"), 1).kind).toBe("inline");
-    expect(virtualizeCommandOutput(output("x", "y"), 1).kind).toBe("artifact");
-    expect(virtualizeCommandOutput(output("x"), 1_048_576).kind).toBe("inline");
+    expect(virtualizeCommandOutput(output("x"), limit(1)).kind).toBe("inline");
+    expect(virtualizeCommandOutput(output("x", "y"), limit(1)).kind).toBe(
+      "artifact",
+    );
+    expect(virtualizeCommandOutput(output("x"), limit(1_048_576)).kind).toBe(
+      "inline",
+    );
   });
 
   it.each([0, -1, 1.5, 1_048_577])(
     "rejects invalid output bound %j",
     (bound) => {
-      expect(() => virtualizeCommandOutput(output("x"), bound)).toThrow(
-        "TIBER_OUTPUT_BOUND_INVALID",
-      );
+      expect(parseInlineOutputMaximumBytes(bound).ok).toBe(false);
     },
   );
 });

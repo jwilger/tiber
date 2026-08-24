@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { none, some } from "../../src/core/types/option.js";
+
 import { parseSettingsCommand } from "../../src/core/configuration/settings-command.js";
+import { expectedSettingsFailure } from "../fixtures/failures.js";
 
 const usage =
   "usage: /tiber:settings [show | set <global|project> <setting> <value|inherit> | lock assuranceLevel <value> | unlock assuranceLevel <exact-confirmation> | secret <key> <environment NAME|inherit>]";
@@ -61,26 +64,24 @@ describe("settings command", () => {
       value: {
         kind: "secret",
         key: "context7",
-        environmentName: "CONTEXT7_API_KEY",
+        environmentName: some("CONTEXT7_API_KEY"),
       },
     });
     expect(parseSettingsCommand("secret context7 inherit")).toEqual({
       ok: true,
-      value: { kind: "secret", key: "context7" },
+      value: { kind: "secret", key: "context7", environmentName: none },
     });
+  });
+
+  const invalid = (message: string) => ({
+    ok: false,
+    failure: expectedSettingsFailure("TIBER_SETTINGS_INVALID_VALUE", message),
   });
 
   it.each(["set", "set global", "set global assuranceLevel", "show extra"])(
     "rejects incomplete input %j with usage",
     (input) => {
-      expect(parseSettingsCommand(input)).toEqual({
-        ok: false,
-        failure: {
-          code: "TIBER_SETTINGS_INVALID_VALUE",
-          message: usage,
-          retryable: false,
-        },
-      });
+      expect(parseSettingsCommand(input)).toEqual(invalid(usage));
     },
   );
 
@@ -93,50 +94,32 @@ describe("settings command", () => {
     "secret context7",
     "secret context7 literal value",
     "secret context7 environment",
+    "secret context7 environment invalid-value",
+    "secret Invalid environment VALID",
+    "secret context7 other VALUE",
+    "secret context7 environment VALUE extra",
     "secret context7 inherit extra",
     "other context7 inherit",
     "other context7 environment VALUE",
   ])("rejects malformed authority command %j", (input) => {
-    expect(parseSettingsCommand(input)).toEqual({
-      ok: false,
-      failure: {
-        code: "TIBER_SETTINGS_INVALID_VALUE",
-        message: usage,
-        retryable: false,
-      },
-    });
+    expect(parseSettingsCommand(input)).toEqual(invalid(usage));
   });
 
   it("rejects an unknown operation", () => {
-    expect(parseSettingsCommand("remove global assuranceLevel value")).toEqual({
-      ok: false,
-      failure: {
-        code: "TIBER_SETTINGS_INVALID_VALUE",
-        message: usage,
-        retryable: false,
-      },
-    });
+    expect(parseSettingsCommand("remove global assuranceLevel value")).toEqual(
+      invalid(usage),
+    );
   });
 
   it("rejects an invalid scope precisely", () => {
-    expect(parseSettingsCommand("set user assuranceLevel hermetic")).toEqual({
-      ok: false,
-      failure: {
-        code: "TIBER_SETTINGS_INVALID_VALUE",
-        message: "settings scope must be global or project",
-        retryable: false,
-      },
-    });
+    expect(parseSettingsCommand("set user assuranceLevel hermetic")).toEqual(
+      invalid("settings scope must be global or project"),
+    );
   });
 
   it("rejects an invalid key precisely", () => {
-    expect(parseSettingsCommand("set global unknown value")).toEqual({
-      ok: false,
-      failure: {
-        code: "TIBER_SETTINGS_INVALID_VALUE",
-        message: "unknown setting: unknown",
-        retryable: false,
-      },
-    });
+    expect(parseSettingsCommand("set global unknown value")).toEqual(
+      invalid("unknown setting: unknown"),
+    );
   });
 });

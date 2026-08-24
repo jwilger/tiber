@@ -9,50 +9,114 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
+import {
+  operationalFailure,
+  type TiberFailure,
+} from "../../core/failures/tiber-failure.js";
+import {
+  parseProcessGroupId,
+  parseProcessId,
+  parseProcessStartedAt,
+  type ProcessGroupId,
+  type ProcessId,
+  type ProcessStartedAt,
+} from "../../core/processes/process-values.js";
+import {
+  parseTaskClaimId,
+  parseTaskId,
+  type TaskClaimId,
+  type TaskId,
+} from "../../core/tasks/task-values.js";
+
 export interface OwnedProcessGroup {
   readonly schemaVersion: 1;
-  readonly taskId: string;
-  readonly claimId: string;
-  readonly pid: number;
-  readonly processGroupId: number;
-  readonly startedAt: string;
+  readonly taskId: TaskId;
+  readonly claimId: TaskClaimId;
+  readonly pid: ProcessId;
+  readonly processGroupId: ProcessGroupId;
+  readonly startedAt: ProcessStartedAt;
 }
+
+type ProcessFailureCode =
+  | "TIBER_PROCESS_INVALID"
+  | "TIBER_PROCESS_QUOTA"
+  | "TIBER_PROCESS_REGISTRY_INVALID"
+  | "TIBER_PROCESS_REGISTRY_IO"
+  | "TIBER_PROCESS_TERMINATION_FAILED";
+export type ProcessFailure = TiberFailure<
+  ProcessFailureCode,
+  { readonly domain: "process-registry" },
+  "corrected-input" | "state-change" | "retry-operation"
+>;
 
 export type ProcessRegistryResult<T> =
   | { readonly ok: true; readonly value: T }
   | {
       readonly ok: false;
-      readonly failure: { readonly code: string; readonly message: string };
+      readonly failure: ProcessFailure;
     };
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-
-function valid(value: unknown): value is OwnedProcessGroup {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    return false;
-  return (
-    Object.keys(value).sort().join(",") ===
-      "claimId,pid,processGroupId,schemaVersion,startedAt,taskId" &&
-    "schemaVersion" in value &&
-    value.schemaVersion === 1 &&
-    "taskId" in value &&
-    typeof value.taskId === "string" &&
-    UUID.test(value.taskId) &&
-    "claimId" in value &&
-    typeof value.claimId === "string" &&
-    UUID.test(value.claimId) &&
-    "pid" in value &&
-    typeof value.pid === "number" &&
-    Number.isSafeInteger(value.pid) &&
-    value.pid > 1 &&
-    "processGroupId" in value &&
-    value.processGroupId === value.pid &&
-    "startedAt" in value &&
-    typeof value.startedAt === "string" &&
-    Number.isFinite(Date.parse(value.startedAt))
-  );
+function failure(
+  code: ProcessFailureCode,
+  message: string,
+): ProcessRegistryResult<never> {
+  const retryability =
+    code === "TIBER_PROCESS_REGISTRY_IO" ||
+    code === "TIBER_PROCESS_TERMINATION_FAILED"
+      ? "transient"
+      : code === "TIBER_PROCESS_INVALID" ||
+          code === "TIBER_PROCESS_REGISTRY_INVALID"
+        ? "retry-after-input"
+        : "retry-after-state-change";
+  return {
+    ok: false,
+    failure: operationalFailure(
+      code,
+      "process-registry",
+      message,
+      retryability,
+    ),
+  };
 }
+
+function parseGroup(value: unknown): OwnedProcessGroup | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return undefined;
+  if (
+    Object.keys(value).sort().join(",") !==
+      "claimId,pid,processGroupId,schemaVersion,startedAt,taskId" ||
+    !("schemaVersion" in value) ||
+    value.schemaVersion !== 1 ||
+    !("taskId" in value) ||
+    !("claimId" in value) ||
+    !("pid" in value) ||
+    !("processGroupId" in value) ||
+    !("startedAt" in value)
+  )
+    return undefined;
+  const taskId = parseTaskId(value.taskId);
+  const claimId = parseTaskClaimId(value.claimId);
+  const pid = parseProcessId(value.pid);
+  const processGroupId = parseProcessGroupId(value.processGroupId);
+  const startedAt = parseProcessStartedAt(value.startedAt);
+  return taskId.ok &&
+    claimId.ok &&
+    pid.ok &&
+    processGroupId.ok &&
+    Number(processGroupId.value) === Number(pid.value) &&
+    startedAt.ok
+    ? {
+        schemaVersion: 1,
+        taskId: taskId.value,
+        claimId: claimId.value,
+        pid: pid.value,
+        processGroupId: processGroupId.value,
+        startedAt: startedAt.value,
+      }
+    : undefined;
+}
+
+export type ProcessUnregisterOutcome = "absent" | "unregistered";
 
 export class FileProcessGroupRegistry {
   private readonly path: string;
@@ -65,72 +129,68 @@ export class FileProcessGroupRegistry {
     if (!existsSync(this.path)) return { ok: true, value: [] };
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.path, "utf8"));
+      if (!Array.isArray(parsed) || parsed.length > 16)
+        return failure(
+          "TIBER_PROCESS_REGISTRY_INVALID",
+          "owned process-group registry is malformed",
+        );
+      const groups = parsed.map(parseGroup);
       if (
-        !Array.isArray(parsed) ||
-        parsed.length > 16 ||
-        !parsed.every(valid) ||
-        new Set(parsed.map((item) => item.pid)).size !== parsed.length
+        groups.some((group) => group === undefined) ||
+        new Set(groups.map((group) => group?.pid)).size !== groups.length
       )
-        throw new Error("invalid process registry");
-      return { ok: true, value: parsed };
-    } catch {
+        return failure(
+          "TIBER_PROCESS_REGISTRY_INVALID",
+          "owned process-group registry is malformed",
+        );
       return {
-        ok: false,
-        failure: {
-          code: "TIBER_PROCESS_REGISTRY_INVALID",
-          message: "owned process-group registry is malformed",
-        },
+        ok: true,
+        value: groups.filter((group) => group !== undefined),
       };
+    } catch (error) {
+      return error instanceof SyntaxError
+        ? failure(
+            "TIBER_PROCESS_REGISTRY_INVALID",
+            "owned process-group registry is malformed",
+          )
+        : failure(
+            "TIBER_PROCESS_REGISTRY_IO",
+            "owned process-group registry could not be read",
+          );
     }
   }
 
   public register(
     group: OwnedProcessGroup,
   ): ProcessRegistryResult<OwnedProcessGroup> {
-    if (!valid(group))
-      return {
-        ok: false,
-        failure: {
-          code: "TIBER_PROCESS_INVALID",
-          message: "process ownership is invalid",
-        },
-      };
+    if (parseGroup(group) === undefined)
+      return failure("TIBER_PROCESS_INVALID", "process ownership is invalid");
     const groups = this.read();
     if (!groups.ok) return groups;
     if (groups.value.length >= 16)
-      return {
-        ok: false,
-        failure: {
-          code: "TIBER_PROCESS_QUOTA",
-          message: "owned process quota is exhausted",
-        },
-      };
+      return failure("TIBER_PROCESS_QUOTA", "owned process quota is exhausted");
     if (!this.write([...groups.value, group]))
-      return {
-        ok: false,
-        failure: {
-          code: "TIBER_PROCESS_REGISTRY_IO",
-          message: "process ownership was not durable",
-        },
-      };
+      return failure(
+        "TIBER_PROCESS_REGISTRY_IO",
+        "process ownership was not durable",
+      );
     return { ok: true, value: group };
   }
 
-  public unregister(pid: number): ProcessRegistryResult<boolean> {
+  public unregister(
+    pid: ProcessId,
+  ): ProcessRegistryResult<ProcessUnregisterOutcome> {
     const groups = this.read();
     if (!groups.ok) return groups;
     const remaining = groups.value.filter((group) => group.pid !== pid);
     if (remaining.length === groups.value.length)
-      return { ok: true, value: false };
+      return { ok: true, value: "absent" };
     if (!this.write(remaining))
-      return {
-        ok: false,
-        failure: {
-          code: "TIBER_PROCESS_REGISTRY_IO",
-          message: "process completion was not durable",
-        },
-      };
-    return { ok: true, value: true };
+      return failure(
+        "TIBER_PROCESS_REGISTRY_IO",
+        "process completion was not durable",
+      );
+    return { ok: true, value: "unregistered" };
   }
 
   public reconcile(): ProcessRegistryResult<readonly OwnedProcessGroup[]> {
@@ -145,50 +205,47 @@ export class FileProcessGroupRegistry {
       }
     });
     if (alive.length !== groups.value.length && !this.write(alive))
-      return {
-        ok: false,
-        failure: {
-          code: "TIBER_PROCESS_REGISTRY_IO",
-          message: "reconciliation was not durable",
-        },
-      };
+      return failure(
+        "TIBER_PROCESS_REGISTRY_IO",
+        "reconciliation was not durable",
+      );
     return { ok: true, value: alive };
   }
 
-  public terminateAll(): ProcessRegistryResult<readonly number[]> {
+  public terminateAll(): ProcessRegistryResult<readonly ProcessGroupId[]> {
     const groups = this.read();
     if (!groups.ok) return groups;
     if (groups.value.length === 0) return { ok: true, value: [] };
-    const terminated: number[] = [];
+    const terminated: ProcessGroupId[] = [];
     for (const group of groups.value) {
       try {
         process.kill(
           process.platform === "win32"
             ? group.processGroupId
-            : -group.processGroupId,
+            : -Number(group.processGroupId),
           "SIGTERM",
         );
         terminated.push(group.processGroupId);
       } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
+        const code =
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          typeof error.code === "string"
+            ? error.code
+            : undefined;
         if (code !== "ESRCH")
-          return {
-            ok: false,
-            failure: {
-              code: "TIBER_PROCESS_TERMINATION_FAILED",
-              message: `owned process group ${String(group.processGroupId)} could not be terminated`,
-            },
-          };
+          return failure(
+            "TIBER_PROCESS_TERMINATION_FAILED",
+            `owned process group ${String(group.processGroupId)} could not be terminated`,
+          );
       }
     }
     if (!this.write([]))
-      return {
-        ok: false,
-        failure: {
-          code: "TIBER_PROCESS_REGISTRY_IO",
-          message: "termination receipt was not durable",
-        },
-      };
+      return failure(
+        "TIBER_PROCESS_REGISTRY_IO",
+        "termination receipt was not durable",
+      );
     return { ok: true, value: terminated };
   }
 

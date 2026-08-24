@@ -11,7 +11,13 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
+  parseProjectId,
+  type ProjectId,
+} from "../../core/configuration/configuration-values.js";
+import { none } from "../../core/types/option.js";
+import {
   parseSettingsDocument,
+  settingsFailure,
   type SettingsDocument,
   type SettingsFailure,
   type SettingsOverrides,
@@ -19,7 +25,7 @@ import {
 } from "../../core/configuration/settings.js";
 
 export interface SettingsSnapshot {
-  readonly projectId: string;
+  readonly projectId: ProjectId;
   readonly globalValues: SettingsOverrides;
   readonly projectValues: SettingsOverrides;
 }
@@ -27,11 +33,10 @@ export interface SettingsSnapshot {
 function failed(
   code: SettingsFailure["code"],
   message: string,
-  retryable = false,
 ): SettingsResult<never> {
   return {
     ok: false,
-    failure: { code, message, retryable },
+    failure: settingsFailure(code, message),
   };
 }
 
@@ -53,18 +58,21 @@ function parseJson(
 
 function readValues(path: string): SettingsResult<SettingsOverrides> {
   if (!existsSync(path)) {
-    return { ok: true, value: {} };
+    return {
+      ok: true,
+      value: {
+        assuranceLevel: none,
+        outputPreviewBytes: none,
+        worktreeMode: none,
+      },
+    };
   }
 
   try {
     const document = parseJson(readFileSync(path, "utf8"), path);
     return document.ok ? { ok: true, value: document.value.values } : document;
   } catch {
-    return failed(
-      "TIBER_SETTINGS_IO",
-      `could not read settings: ${path}`,
-      true,
-    );
+    return failed("TIBER_SETTINGS_IO", `could not read settings: ${path}`);
   }
 }
 
@@ -80,7 +88,20 @@ function writeValues(
   path: string,
   values: SettingsOverrides,
 ): SettingsResult<void> {
-  const document: SettingsDocument = { schemaVersion: 1, values };
+  const document = {
+    schemaVersion: 1,
+    values: {
+      ...(values.assuranceLevel.kind === "some"
+        ? { assuranceLevel: values.assuranceLevel.value }
+        : {}),
+      ...(values.outputPreviewBytes.kind === "some"
+        ? { outputPreviewBytes: values.outputPreviewBytes.value }
+        : {}),
+      ...(values.worktreeMode.kind === "some"
+        ? { worktreeMode: values.worktreeMode.value }
+        : {}),
+    },
+  };
   const temporaryPath = `${path}.${String(process.pid)}.${randomUUID()}.tmp`;
 
   try {
@@ -94,11 +115,7 @@ function writeValues(
     return { ok: true, value: undefined };
   } catch {
     removeTemporaryFile(temporaryPath);
-    return failed(
-      "TIBER_SETTINGS_IO",
-      `could not write settings: ${path}`,
-      true,
-    );
+    return failed("TIBER_SETTINGS_IO", `could not write settings: ${path}`);
   }
 }
 
@@ -119,16 +136,11 @@ function gitCommonDirectory(cwd: string): SettingsResult<string> {
   }
 }
 
-function readIdentity(identityPath: string): SettingsResult<string> {
+function readIdentity(identityPath: string): SettingsResult<ProjectId> {
   try {
     const identity = readFileSync(identityPath, "utf8").trim();
-    if (
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
-        identity,
-      )
-    ) {
-      return { ok: true, value: identity };
-    }
+    const parsed = parseProjectId(identity);
+    if (parsed.ok) return parsed;
     return failed(
       "TIBER_SETTINGS_INVALID_DOCUMENT",
       `repository identity is malformed: ${identityPath}`,
@@ -137,12 +149,11 @@ function readIdentity(identityPath: string): SettingsResult<string> {
     return failed(
       "TIBER_SETTINGS_IO",
       `could not read repository identity: ${identityPath}`,
-      true,
     );
   }
 }
 
-function projectIdentity(cwd: string): SettingsResult<string> {
+function projectIdentity(cwd: string): SettingsResult<ProjectId> {
   const commonDirectory = gitCommonDirectory(cwd);
   if (!commonDirectory.ok) {
     return commonDirectory;
@@ -153,22 +164,26 @@ function projectIdentity(cwd: string): SettingsResult<string> {
     return readIdentity(identityPath);
   }
 
-  const identity = randomUUID();
+  const identity = parseProjectId(randomUUID());
+  if (!identity.ok)
+    return failed(
+      "TIBER_SETTINGS_INVALID_DOCUMENT",
+      "generated repository identity is invalid",
+    );
   try {
     mkdirSync(dirname(identityPath), { recursive: true, mode: 0o700 });
-    writeFileSync(identityPath, `${identity}\n`, {
+    writeFileSync(identityPath, `${identity.value}\n`, {
       encoding: "utf8",
       mode: 0o600,
       flag: "wx",
     });
-    return { ok: true, value: identity };
+    return identity;
   } catch {
     return existsSync(identityPath)
       ? readIdentity(identityPath)
       : failed(
           "TIBER_SETTINGS_IO",
           `could not create repository identity: ${identityPath}`,
-          true,
         );
   }
 }
@@ -183,7 +198,7 @@ export class FileSettingsStore {
     return join(this.agentDirectory, "tiber", "settings.json");
   }
 
-  private projectPath(projectId: string): string {
+  private projectPath(projectId: ProjectId): string {
     return join(
       this.agentDirectory,
       "tiber",
@@ -224,7 +239,7 @@ export class FileSettingsStore {
   }
 
   public saveProject(
-    projectId: string,
+    projectId: ProjectId,
     values: SettingsOverrides,
   ): SettingsResult<void> {
     return writeValues(this.projectPath(projectId), values);

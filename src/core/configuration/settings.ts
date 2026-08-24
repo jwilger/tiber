@@ -1,3 +1,10 @@
+import type { TiberFailure } from "../failures/tiber-failure.js";
+import { none, some, type Option } from "../types/option.js";
+import {
+  parseOutputPreviewBytes,
+  type OutputPreviewBytes,
+} from "./configuration-values.js";
+
 export const ASSURANCE_LEVELS = [
   "host-trusted",
   "workspace-isolated",
@@ -14,9 +21,9 @@ export type SettingKey =
 export type SettingSource = "built-in" | "user-global" | "project";
 
 export interface SettingsOverrides {
-  readonly assuranceLevel?: AssuranceLevel;
-  readonly outputPreviewBytes?: number;
-  readonly worktreeMode?: WorktreeMode;
+  readonly assuranceLevel: Option<AssuranceLevel>;
+  readonly outputPreviewBytes: Option<OutputPreviewBytes>;
+  readonly worktreeMode: Option<WorktreeMode>;
 }
 
 export interface EffectiveSetting<T> {
@@ -26,7 +33,7 @@ export interface EffectiveSetting<T> {
 
 export interface EffectiveSettings {
   readonly assuranceLevel: EffectiveSetting<AssuranceLevel>;
-  readonly outputPreviewBytes: EffectiveSetting<number>;
+  readonly outputPreviewBytes: EffectiveSetting<OutputPreviewBytes>;
   readonly worktreeMode: EffectiveSetting<WorktreeMode>;
 }
 
@@ -35,26 +42,59 @@ export interface SettingsDocument {
   readonly values: SettingsOverrides;
 }
 
-export interface SettingsFailure {
-  readonly code:
-    | "TIBER_SETTINGS_INVALID_DOCUMENT"
-    | "TIBER_SETTINGS_INVALID_KEY"
-    | "TIBER_SETTINGS_INVALID_VALUE"
-    | "TIBER_SETTINGS_IO"
-    | "TIBER_SETTINGS_REPOSITORY_REQUIRED";
-  readonly message: string;
-  readonly retryable: boolean;
+type SettingsFailureCode =
+  | "TIBER_SETTINGS_INVALID_DOCUMENT"
+  | "TIBER_SETTINGS_INVALID_KEY"
+  | "TIBER_SETTINGS_INVALID_VALUE"
+  | "TIBER_SETTINGS_IO"
+  | "TIBER_SETTINGS_REPOSITORY_REQUIRED";
+
+export type SettingsFailure = TiberFailure<
+  SettingsFailureCode,
+  { readonly domain: "settings" },
+  "corrected-settings" | "repository-required" | "retry-operation"
+>;
+
+export function settingsFailure(
+  code: SettingsFailureCode,
+  message: string,
+): SettingsFailure {
+  const retryable = code === "TIBER_SETTINGS_IO";
+  return {
+    code,
+    message,
+    safeContext: { domain: "settings" },
+    causes: [],
+    retryability: retryable
+      ? "transient"
+      : code === "TIBER_SETTINGS_REPOSITORY_REQUIRED"
+        ? "retry-after-state-change"
+        : "retry-after-input",
+    requiredRecoveryEvidence: retryable
+      ? ["retry-operation"]
+      : code === "TIBER_SETTINGS_REPOSITORY_REQUIRED"
+        ? ["repository-required"]
+        : ["corrected-settings"],
+    redaction: "public",
+  };
 }
 
 export type SettingsResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly failure: SettingsFailure };
 
+const builtInPreview = parseOutputPreviewBytes(16_384);
+// Stryker disable next-line ConditionalExpression, BooleanLiteral, BlockStatement: the literal built-in lies within the parser's bounds; rejection is an internal defect.
+if (!builtInPreview.ok) {
+  // Stryker disable next-line StringLiteral, CallExpression: the validated literal makes this defect throw unreachable.
+  throw new Error("built-in output preview violated its invariant");
+}
+
 export const BUILT_IN_SETTINGS = {
   assuranceLevel: "host-trusted",
-  outputPreviewBytes: 16_384,
+  outputPreviewBytes: builtInPreview.value,
   worktreeMode: "isolated",
-} as const satisfies Required<SettingsOverrides>;
+} as const;
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   // Stryker disable next-line ConditionalExpression: removing the typeof guard is behaviorally equivalent because every primitive subsequently fails the required document-shape check; the guard exists to establish the TypeScript predicate.
@@ -72,11 +112,7 @@ function isWorktreeMode(value: unknown): value is WorktreeMode {
 function invalidDocument(message: string): SettingsResult<never> {
   return {
     ok: false,
-    failure: {
-      code: "TIBER_SETTINGS_INVALID_DOCUMENT",
-      message,
-      retryable: false,
-    },
+    failure: settingsFailure("TIBER_SETTINGS_INVALID_DOCUMENT", message),
   };
 }
 
@@ -111,17 +147,14 @@ export function parseSettingsDocument(
   }
 
   const outputPreviewBytes = input.values.outputPreviewBytes;
-  if (
-    outputPreviewBytes !== undefined &&
-    // Stryker disable next-line ConditionalExpression: Number.isInteger also rejects every non-number, so removing only the typeof term is an equivalent mutant; the explicit guard narrows unknown before numeric comparisons.
-    (typeof outputPreviewBytes !== "number" ||
-      !Number.isInteger(outputPreviewBytes) ||
-      outputPreviewBytes < 1024 ||
-      outputPreviewBytes > 1_048_576)
-  ) {
-    return invalidDocument(
-      "outputPreviewBytes must be an integer from 1024 to 1048576",
-    );
+  let semanticPreview: Option<OutputPreviewBytes> = none;
+  if (outputPreviewBytes !== undefined) {
+    const parsedPreview = parseOutputPreviewBytes(outputPreviewBytes);
+    if (!parsedPreview.ok)
+      return invalidDocument(
+        "outputPreviewBytes must be an integer from 1024 to 1048576",
+      );
+    semanticPreview = some(parsedPreview.value);
   }
 
   const worktreeMode = input.values.worktreeMode;
@@ -134,9 +167,10 @@ export function parseSettingsDocument(
     value: {
       schemaVersion: 1,
       values: {
-        ...(assuranceLevel === undefined ? {} : { assuranceLevel }),
-        ...(outputPreviewBytes === undefined ? {} : { outputPreviewBytes }),
-        ...(worktreeMode === undefined ? {} : { worktreeMode }),
+        assuranceLevel:
+          assuranceLevel === undefined ? none : some(assuranceLevel),
+        outputPreviewBytes: semanticPreview,
+        worktreeMode: worktreeMode === undefined ? none : some(worktreeMode),
       },
     },
   };
@@ -144,14 +178,14 @@ export function parseSettingsDocument(
 
 function effective<T>(
   builtIn: T,
-  globalValue: T | undefined,
-  projectValue: T | undefined,
+  globalValue: Option<T>,
+  projectValue: Option<T>,
 ): EffectiveSetting<T> {
-  if (projectValue !== undefined) {
-    return { value: projectValue, source: "project" };
+  if (projectValue.kind === "some") {
+    return { value: projectValue.value, source: "project" };
   }
-  if (globalValue !== undefined) {
-    return { value: globalValue, source: "user-global" };
+  if (globalValue.kind === "some") {
+    return { value: globalValue.value, source: "user-global" };
   }
   return { value: builtIn, source: "built-in" };
 }
@@ -182,22 +216,20 @@ export function resolveSettings(
 function invalidKey(key: string): SettingsResult<never> {
   return {
     ok: false,
-    failure: {
-      code: "TIBER_SETTINGS_INVALID_KEY",
-      message: `unknown setting: ${key}`,
-      retryable: false,
-    },
+    failure: settingsFailure(
+      "TIBER_SETTINGS_INVALID_KEY",
+      `unknown setting: ${key}`,
+    ),
   };
 }
 
 function invalidValue(key: SettingKey, value: string): SettingsResult<never> {
   return {
     ok: false,
-    failure: {
-      code: "TIBER_SETTINGS_INVALID_VALUE",
-      message: `invalid value for ${key}: ${value}`,
-      retryable: false,
-    },
+    failure: settingsFailure(
+      "TIBER_SETTINGS_INVALID_VALUE",
+      `invalid value for ${key}: ${value}`,
+    ),
   };
 }
 
@@ -206,15 +238,10 @@ function withoutSetting(
   key: SettingKey,
 ): SettingsOverrides {
   return {
-    ...(key === "assuranceLevel" || current.assuranceLevel === undefined
-      ? {}
-      : { assuranceLevel: current.assuranceLevel }),
-    ...(key === "outputPreviewBytes" || current.outputPreviewBytes === undefined
-      ? {}
-      : { outputPreviewBytes: current.outputPreviewBytes }),
-    ...(key === "worktreeMode" || current.worktreeMode === undefined
-      ? {}
-      : { worktreeMode: current.worktreeMode }),
+    assuranceLevel: key === "assuranceLevel" ? none : current.assuranceLevel,
+    outputPreviewBytes:
+      key === "outputPreviewBytes" ? none : current.outputPreviewBytes,
+    worktreeMode: key === "worktreeMode" ? none : current.worktreeMode,
   };
 }
 
@@ -230,18 +257,22 @@ export function setSetting(
     if (!isAssuranceLevel(rawValue)) {
       return invalidValue(key, rawValue);
     }
-    return { ok: true, value: { ...current, assuranceLevel: rawValue } };
+    return {
+      ok: true,
+      value: { ...current, assuranceLevel: some(rawValue) },
+    };
   }
 
   if (key === "outputPreviewBytes") {
     if (rawValue === "inherit") {
       return { ok: true, value: withoutSetting(current, key) };
     }
-    const parsed = Number(rawValue);
-    if (!Number.isSafeInteger(parsed) || parsed < 1024 || parsed > 1_048_576) {
-      return invalidValue(key, rawValue);
-    }
-    return { ok: true, value: { ...current, outputPreviewBytes: parsed } };
+    const parsed = parseOutputPreviewBytes(Number(rawValue));
+    if (!parsed.ok) return invalidValue(key, rawValue);
+    return {
+      ok: true,
+      value: { ...current, outputPreviewBytes: some(parsed.value) },
+    };
   }
 
   if (key === "worktreeMode") {
@@ -251,7 +282,10 @@ export function setSetting(
     if (!isWorktreeMode(rawValue)) {
       return invalidValue(key, rawValue);
     }
-    return { ok: true, value: { ...current, worktreeMode: rawValue } };
+    return {
+      ok: true,
+      value: { ...current, worktreeMode: some(rawValue) },
+    };
   }
 
   return invalidKey(key);
@@ -262,13 +296,14 @@ export function formatSettingsTable(
   projectValues: SettingsOverrides,
 ): string {
   const resolved = resolveSettings(globalValues, projectValues);
-  const display = (value: string | number | undefined): string =>
-    value === undefined ? "inherit" : String(value);
+  const display = <Value extends string | number>(
+    value: Option<Value>,
+  ): string => (value.kind === "none" ? "inherit" : String(value.value));
 
   return [
     "Setting | Built-in | User global | Project | Effective (source)",
     `assuranceLevel | ${BUILT_IN_SETTINGS.assuranceLevel} | ${display(globalValues.assuranceLevel)} | ${display(projectValues.assuranceLevel)} | ${resolved.assuranceLevel.value} (${resolved.assuranceLevel.source})`,
-    `outputPreviewBytes | ${display(BUILT_IN_SETTINGS.outputPreviewBytes)} | ${display(globalValues.outputPreviewBytes)} | ${display(projectValues.outputPreviewBytes)} | ${display(resolved.outputPreviewBytes.value)} (${resolved.outputPreviewBytes.source})`,
+    `outputPreviewBytes | ${String(BUILT_IN_SETTINGS.outputPreviewBytes)} | ${display(globalValues.outputPreviewBytes)} | ${display(projectValues.outputPreviewBytes)} | ${String(resolved.outputPreviewBytes.value)} (${resolved.outputPreviewBytes.source})`,
     `worktreeMode | ${BUILT_IN_SETTINGS.worktreeMode} | ${display(globalValues.worktreeMode)} | ${display(projectValues.worktreeMode)} | ${resolved.worktreeMode.value} (${resolved.worktreeMode.source})`,
   ].join("\n");
 }

@@ -18,6 +18,7 @@ import {
 import {
   ASSURANCE_LEVELS,
   formatSettingsTable,
+  resolveSettings,
   setSetting,
   WORKTREE_MODES,
   type SettingKey,
@@ -238,10 +239,10 @@ export async function handleSettingsCommand(
     );
     return;
   }
-  const requested =
-    refreshed.value.projectValues.assuranceLevel ??
-    refreshed.value.globalValues.assuranceLevel ??
-    "host-trusted";
+  const requested = resolveSettings(
+    refreshed.value.globalValues,
+    refreshed.value.projectValues,
+  ).assuranceLevel.value;
   context.ui.notify(
     `${formatSettingsTable(
       refreshed.value.globalValues,

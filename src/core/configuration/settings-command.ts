@@ -1,7 +1,18 @@
-import type {
-  SettingKey,
-  SettingsFailure,
-  SettingsResult,
+import { none, some, type Option } from "../types/option.js";
+import {
+  parseAuthorityUnlockConfirmation,
+  parseSecretEnvironmentVariableName,
+  parseSecretReferenceName,
+  parseSettingsCommandValue,
+  type AuthorityUnlockConfirmation,
+  type SecretEnvironmentVariableName,
+  type SecretReferenceName,
+  type SettingsCommandValue,
+} from "./configuration-values.js";
+import {
+  settingsFailure,
+  type SettingKey,
+  type SettingsResult,
 } from "./settings.js";
 
 export type SettingsScope = "global" | "project";
@@ -12,22 +23,21 @@ export type SettingsCommand =
       readonly kind: "set";
       readonly scope: SettingsScope;
       readonly key: SettingKey;
-      readonly value: string;
+      readonly value: SettingsCommandValue;
     }
-  | { readonly kind: "lock"; readonly value: string }
-  | { readonly kind: "unlock"; readonly confirmation: string }
+  | { readonly kind: "lock"; readonly value: SettingsCommandValue }
+  | {
+      readonly kind: "unlock";
+      readonly confirmation: AuthorityUnlockConfirmation;
+    }
   | {
       readonly kind: "secret";
-      readonly key: string;
-      readonly environmentName?: string;
+      readonly key: SecretReferenceName;
+      readonly environmentName: Option<SecretEnvironmentVariableName>;
     };
 
 function invalid(message: string): SettingsResult<never> {
-  const failure: SettingsFailure = {
-    code: "TIBER_SETTINGS_INVALID_VALUE",
-    message,
-    retryable: false,
-  };
+  const failure = settingsFailure("TIBER_SETTINGS_INVALID_VALUE", message);
   return { ok: false, failure };
 }
 
@@ -61,53 +71,74 @@ export function parseSettingsCommand(
     parts.length === 3 &&
     parts[1] === "assuranceLevel"
   ) {
-    const [, , value] = parts as [string, string, string];
-    return { ok: true, value: { kind: "lock", value } };
+    const value = parseSettingsCommandValue(parts[2]);
+    return value.ok
+      ? { ok: true, value: { kind: "lock", value: value.value } }
+      : invalid(USAGE);
   }
   if (
     operation === "unlock" &&
     parts.length === 4 &&
     parts[1] === "assuranceLevel"
   ) {
-    return {
-      ok: true,
-      value: { kind: "unlock", confirmation: parts.slice(2).join(" ") },
-    };
+    const confirmation = parseAuthorityUnlockConfirmation(
+      parts.slice(2).join(" "),
+    );
+    return confirmation.ok
+      ? {
+          ok: true,
+          value: { kind: "unlock", confirmation: confirmation.value },
+        }
+      : invalid(USAGE);
   }
   if (operation === "secret" && parts.length === 3 && parts[2] === "inherit") {
-    const [, key] = parts as [string, string, string];
-    return { ok: true, value: { kind: "secret", key } };
+    const key = parseSecretReferenceName(parts[1]);
+    return key.ok
+      ? {
+          ok: true,
+          value: { kind: "secret", key: key.value, environmentName: none },
+        }
+      : invalid(USAGE);
   }
   if (
     operation === "secret" &&
     parts.length === 4 &&
     parts[2] === "environment"
   ) {
-    const [, key, , environmentName] = parts as [
-      string,
-      string,
-      string,
-      string,
-    ];
-    return {
-      ok: true,
-      value: { kind: "secret", key, environmentName },
-    };
+    const key = parseSecretReferenceName(parts[1]);
+    const environmentName = parseSecretEnvironmentVariableName(parts[3]);
+    return key.ok && environmentName.ok
+      ? {
+          ok: true,
+          value: {
+            kind: "secret",
+            key: key.value,
+            environmentName: some(environmentName.value),
+          },
+        }
+      : invalid(USAGE);
   }
   if (parts.length !== 4 || operation !== "set") {
     return invalid(USAGE);
   }
 
-  const [, scope, key, value] = parts as [string, string, string, string];
-  if (!isScope(scope)) {
+  const scope = parts[1];
+  const key = parts[2];
+  const value = parseSettingsCommandValue(parts[3]);
+  // Stryker disable next-line ConditionalExpression: the exact four-part shape check establishes this index; undefined is also rejected by isScope.
+  if (scope === undefined || !isScope(scope)) {
     return invalid("settings scope must be global or project");
   }
-  if (!isKey(key)) {
-    return invalid(`unknown setting: ${key}`);
+  // Stryker disable next-line ConditionalExpression, StringLiteral: the exact four-part shape check establishes this index; undefined is also rejected by isKey, so the missing-label fallback cannot be observed.
+  if (key === undefined || !isKey(key)) {
+    // Stryker disable next-line StringLiteral: exact four-part parsing makes the missing-key label unreachable; malformed present keys are observed verbatim.
+    return invalid(`unknown setting: ${key ?? "(missing)"}`);
   }
 
-  return {
-    ok: true,
-    value: { kind: "set", scope, key, value },
-  };
+  return value.ok
+    ? {
+        ok: true,
+        value: { kind: "set", scope, key, value: value.value },
+      }
+    : invalid(USAGE);
 }

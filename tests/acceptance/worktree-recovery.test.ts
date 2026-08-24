@@ -6,6 +6,13 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 
 import { GitOwnedWorktrees } from "../../src/adapters/worktrees/git-owned-worktrees.js";
+import {
+  claimBaselineRevision,
+  taskClaimId,
+  taskEventOccurredAt,
+  taskId,
+} from "../fixtures/task-values.js";
+import { worktreeAbandonedAt } from "../fixtures/worktree-values.js";
 
 function git(cwd: string, args: readonly string[]): string {
   return execFileSync("git", [...args], {
@@ -28,10 +35,10 @@ describe("owned Git worktree recovery", () => {
     git(repository, ["commit", "-m", "test: baseline"]);
     const baseline = git(repository, ["rev-parse", "HEAD"]);
     const input = {
-      taskId: "2424c876-6180-4c64-976e-9ea4bd540744",
-      claimId: "00000000-0000-4000-8000-000000000001",
-      baselineRevision: baseline,
-      occurredAt: "2026-08-23T16:00:00.000Z",
+      taskId: taskId("2424c876-6180-4c64-976e-9ea4bd540744"),
+      claimId: taskClaimId("00000000-0000-4000-8000-000000000001"),
+      baselineRevision: claimBaselineRevision(baseline),
+      occurredAt: taskEventOccurredAt("2026-08-23T16:00:00.000Z"),
     };
 
     const created = new GitOwnedWorktrees(repository, agent).create(input);
@@ -54,8 +61,8 @@ describe("owned Git worktree recovery", () => {
 
     const denied = new GitOwnedWorktrees(repository, agent).abandon({
       taskId: input.taskId,
-      claimActive: true,
-      timestamp: "2026-08-23T17:00:00.000Z",
+      claimStatus: "active",
+      timestamp: worktreeAbandonedAt("2026-08-23T17:00:00.000Z"),
     });
     expect(denied).toMatchObject({
       ok: false,
@@ -64,23 +71,24 @@ describe("owned Git worktree recovery", () => {
 
     const abandoned = new GitOwnedWorktrees(repository, agent).abandon({
       taskId: input.taskId,
-      claimActive: false,
-      timestamp: "2026-08-23T17:00:00.000Z",
+      claimStatus: "released",
+      timestamp: worktreeAbandonedAt("2026-08-23T17:00:00.000Z"),
     });
     expect(abandoned, JSON.stringify(abandoned)).toMatchObject({ ok: true });
-    if (!abandoned.ok || abandoned.value.recoveryRef === undefined) return;
-    expect(
-      git(repository, ["show", `${abandoned.value.recoveryRef}:tracked.ts`]),
-    ).toBe("export const value = 2;");
+    if (!abandoned.ok || abandoned.value.recoveryRef.kind === "none") return;
+    const recoveryRef = abandoned.value.recoveryRef.value;
+    expect(git(repository, ["show", `${recoveryRef}:tracked.ts`])).toBe(
+      "export const value = 2;",
+    );
     expect(
       readFileSync(
         join(repository, ".git", "tiber", "owned-worktrees.v1.json"),
         "utf8",
       ),
     ).toContain('"worktrees": []');
-    expect(
-      git(repository, ["show", `${abandoned.value.recoveryRef}:new-source.ts`]),
-    ).toBe("export const added = true;");
+    expect(git(repository, ["show", `${recoveryRef}:new-source.ts`])).toBe(
+      "export const added = true;",
+    );
     expect(git(repository, ["remote"])).toBe("");
   });
 });

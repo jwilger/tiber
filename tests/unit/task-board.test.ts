@@ -3,21 +3,19 @@ import { describe, expect, it } from "vitest";
 import {
   foldTaskEvents,
   formatTaskBoard,
-  parseTaskCreatedEvent,
   parseTaskEvent,
-  type TaskCreatedEvent,
-  type TaskClaimedEvent,
-  type TaskClaimReleasedEvent,
-  type TaskClaimTakenOverEvent,
-  type TaskReadyEvent,
-  type TaskSpecifiedEvent,
+  type TaskEvent,
 } from "../../src/core/tasks/task-board.js";
+import { digestTaskSpecification } from "../../src/core/tasks/readiness.js";
+import { none, some } from "../../src/core/types/option.js";
 import {
-  digestTaskSpecification,
-  type TaskSpecification,
-} from "../../src/core/tasks/readiness.js";
+  expectedTaskBoardFailure as taskBoardFailure,
+  expectedTaskEventParseFailure,
+} from "../fixtures/failures.js";
+import { requireTaskEvent } from "../fixtures/task-events.js";
+import { requireTaskSpecification } from "../fixtures/task-specification.js";
 
-const event: TaskCreatedEvent = {
+const eventDocument = {
   schemaVersion: 1,
   eventId: "11111111-1111-4111-8111-111111111111",
   kind: "task-created",
@@ -28,12 +26,13 @@ const event: TaskCreatedEvent = {
     description: "Publish append-only events",
   },
 };
+const event = requireTaskEvent(eventDocument, "task-created");
 
 describe("signed task event boundary", () => {
   it("parses and canonicalizes a task creation", () => {
-    expect(parseTaskCreatedEvent(event)).toEqual({
-      ...event,
-      task: { ...event.task, title: "Build shared board" },
+    expect(parseTaskEvent(eventDocument)).toEqual({
+      ok: true,
+      value: event,
     });
   });
 
@@ -57,11 +56,16 @@ describe("signed task event boundary", () => {
     { ...event, task: { ...event.task, title: 1 } },
     { ...event, task: { ...event.task, description: 1 } },
   ])("rejects malformed authority %j", (input) => {
-    expect(parseTaskCreatedEvent(input)).toBeUndefined();
+    expect(parseTaskEvent(input)).toEqual({
+      ok: false,
+      failure: expectedTaskEventParseFailure(
+        "Task event is malformed or violates its semantic invariants",
+      ),
+    });
   });
 });
 
-const specification: TaskSpecification = {
+const specification = requireTaskSpecification({
   outcome: "Deliver reviewed readiness",
   scenarios: [
     { name: "ready", given: ["complete"], when: ["reviewed"], then: ["Ready"] },
@@ -71,97 +75,124 @@ const specification: TaskSpecification = {
   dependencies: [],
   testMappings: ["readiness.test.ts"],
   architectureImplications: "Deterministic authority consumes review evidence.",
-};
+});
 const digest = digestTaskSpecification(specification);
 
-const specified: TaskSpecifiedEvent = {
-  schemaVersion: 1,
-  eventId: "33333333-3333-4333-8333-333333333333",
-  kind: "task-specified",
-  occurredAt: event.occurredAt,
-  taskId: event.task.id,
-  specificationDigest: digest,
-  specification,
-};
-const ready: TaskReadyEvent = {
-  schemaVersion: 1,
-  eventId: "44444444-4444-4444-8444-444444444444",
-  kind: "task-ready",
-  occurredAt: event.occurredAt,
-  taskId: event.task.id,
-  specificationDigest: digest,
-  review: {
-    freshContext: true,
-    reviewerRole: "specification-reviewer",
-    findingCount: 0,
-    reviewedSpecificationDigest: digest,
+const specified = requireTaskEvent(
+  {
+    schemaVersion: 1,
+    eventId: "33333333-3333-4333-8333-333333333333",
+    kind: "task-specified",
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    specification,
   },
-};
+  "task-specified",
+);
+const ready = requireTaskEvent(
+  {
+    schemaVersion: 1,
+    eventId: "44444444-4444-4444-8444-444444444444",
+    kind: "task-ready",
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    review: {
+      contextFreshness: "fresh",
+      reviewerRole: "specification-reviewer",
+      findingCount: 0,
+      reviewedSpecificationDigest: digest,
+    },
+  },
+  "task-ready",
+);
 
-const claimed: TaskClaimedEvent = {
-  schemaVersion: 1,
-  eventId: "55555555-5555-4555-8555-555555555555",
-  kind: "task-claimed",
-  occurredAt: event.occurredAt,
-  taskId: event.task.id,
-  specificationDigest: digest,
-  claim: {
-    claimId: "66666666-6666-4666-8666-666666666666",
-    owner: "developer@example.test",
-    baselineRevision: "a".repeat(40),
-    workflowDigest: `sha256:${"b".repeat(64)}`,
+const claimed = requireTaskEvent(
+  {
+    schemaVersion: 1,
+    eventId: "55555555-5555-4555-8555-555555555555",
+    kind: "task-claimed",
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    claim: {
+      claimId: "66666666-6666-4666-8666-666666666666",
+      owner: "developer@example.test",
+      baselineRevision: "a".repeat(40),
+      workflowDigest: `sha256:${"b".repeat(64)}`,
+    },
   },
-};
-const takenOver: TaskClaimTakenOverEvent = {
-  schemaVersion: 1,
-  eventId: "88888888-8888-4888-8888-888888888888",
-  kind: "task-claim-taken-over",
-  occurredAt: event.occurredAt,
-  taskId: event.task.id,
-  specificationDigest: digest,
-  previousClaimId: claimed.claim.claimId,
-  claim: {
-    ...claimed.claim,
-    claimId: "99999999-9999-4999-8999-999999999999",
-    owner: "takeover@example.test",
+  "task-claimed",
+);
+const takenOver = requireTaskEvent(
+  {
+    schemaVersion: 1,
+    eventId: "88888888-8888-4888-8888-888888888888",
+    kind: "task-claim-taken-over",
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    previousClaimId: claimed.claim.claimId,
+    claim: {
+      ...claimed.claim,
+      claimId: "99999999-9999-4999-8999-999999999999",
+      owner: "takeover@example.test",
+    },
   },
-};
-const released: TaskClaimReleasedEvent = {
-  schemaVersion: 1,
-  eventId: "77777777-7777-4777-8777-777777777777",
-  kind: "task-claim-released",
-  occurredAt: event.occurredAt,
-  taskId: event.task.id,
-  specificationDigest: digest,
-  claimId: claimed.claim.claimId,
-  reason: "baseline-drift",
-};
+  "task-claim-taken-over",
+);
+const released = requireTaskEvent(
+  {
+    schemaVersion: 1,
+    eventId: "77777777-7777-4777-8777-777777777777",
+    kind: "task-claim-released",
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    claimId: claimed.claim.claimId,
+    reason: "baseline-drift",
+  },
+  "task-claim-released",
+);
+
+function createdEvent(value: unknown) {
+  const parsed = parseTaskEvent(value);
+  if (!parsed.ok || parsed.value.kind !== "task-created")
+    throw new Error("task creation fixture must parse");
+  return parsed.value;
+}
+
+function parsedEvent(value: unknown): TaskEvent {
+  const parsed = parseTaskEvent(value);
+  if (!parsed.ok) throw new Error("task event fixture must parse");
+  return parsed.value;
+}
 
 describe("exclusive claims", () => {
-  const created = parseTaskCreatedEvent(event);
-  if (created === undefined) throw new Error("fixture must parse");
+  const created = createdEvent(event);
 
   it("parses, publishes, and releases one state-bound claim", () => {
-    expect(parseTaskEvent(claimed)).toEqual(claimed);
+    expect(parsedEvent(claimed)).toEqual(claimed);
     expect(
-      parseTaskEvent({
+      parsedEvent({
         ...claimed,
         claim: { ...claimed.claim, owner: "  developer@example.test  " },
       }),
     ).toEqual(claimed);
-    expect(parseTaskEvent(released)).toEqual(released);
-    expect(parseTaskEvent({ ...released, reason: "released" })).toEqual({
+    expect(parsedEvent(released)).toEqual(released);
+    expect(parsedEvent({ ...released, reason: "released" })).toEqual({
       ...released,
       reason: "released",
     });
-    expect(parseTaskEvent({ ...released, reason: "completed" })).toEqual({
+    expect(parsedEvent({ ...released, reason: "completed" })).toEqual({
       ...released,
       reason: "completed",
     });
     const inProgress = foldTaskEvents([created, specified, ready, claimed]);
     expect(inProgress.tasks[0]).toMatchObject({
       state: "In Progress",
-      claim: claimed.claim,
+      claim: some(claimed.claim),
     });
     const backToReady = foldTaskEvents([
       created,
@@ -175,16 +206,17 @@ describe("exclusive claims", () => {
       title: created.task.title,
       description: created.task.description,
       state: "Ready",
-      blocked: false,
-      specification,
-      specificationDigest: digest,
+      blockStatus: "unblocked",
+      specification: some(specification),
+      specificationDigest: some(digest),
+      claim: none,
     });
   });
 
   it("allows only an exact human-published claim takeover", () => {
-    expect(parseTaskEvent(takenOver)).toEqual(takenOver);
+    expect(parsedEvent(takenOver)).toEqual(takenOver);
     expect(
-      parseTaskEvent({
+      parsedEvent({
         ...takenOver,
         claim: { ...takenOver.claim, owner: "  takeover@example.test  " },
       }),
@@ -198,7 +230,7 @@ describe("exclusive claims", () => {
     ]);
     expect(board.tasks[0]).toMatchObject({
       state: "In Progress",
-      claim: takenOver.claim,
+      claim: some(takenOver.claim),
     });
     for (const invalid of [
       { ...takenOver, previousClaimId: takenOver.claim.claimId },
@@ -228,12 +260,17 @@ describe("exclusive claims", () => {
         specified,
         ready,
         claimed,
-        invalid,
+        requireTaskEvent(invalid, "task-claim-taken-over"),
       ]);
       expect(denied.tasks).toHaveLength(1);
       expect(denied).toMatchObject({
         mode: "degraded-read-only",
-        failure: "task claim takeover is not exact or state-bound",
+        failure: some(
+          taskBoardFailure(
+            "non-exact-claim-takeover",
+            "task claim takeover is not exact or state-bound",
+          ),
+        ),
       });
     }
   });
@@ -290,7 +327,12 @@ describe("exclusive claims", () => {
     },
     { ...takenOver, claim: { ...takenOver.claim, workflowDigest: 1 } },
   ])("rejects malformed takeover authority %j", (input) => {
-    expect(parseTaskEvent(input)).toBeUndefined();
+    expect(parseTaskEvent(input)).toEqual({
+      ok: false,
+      failure: expectedTaskEventParseFailure(
+        "Task event is malformed or violates its semantic invariants",
+      ),
+    });
   });
 
   it("denies a second, stale, or mismatched claim transition", () => {
@@ -299,19 +341,30 @@ describe("exclusive claims", () => {
       specified,
       ready,
       claimed,
-      { ...claimed, eventId: "88888888-8888-4888-8888-888888888888" },
+      requireTaskEvent(
+        { ...claimed, eventId: "88888888-8888-4888-8888-888888888888" },
+        "task-claimed",
+      ),
     ]);
     expect(duplicateClaim.tasks).toHaveLength(1);
     expect(duplicateClaim).toMatchObject({
       mode: "degraded-read-only",
-      failure: "task claim is not exclusive or state-bound",
+      failure: some(
+        taskBoardFailure(
+          "non-exclusive-claim",
+          "task claim is not exclusive or state-bound",
+        ),
+      ),
     });
     expect(
       foldTaskEvents([
         created,
         specified,
         ready,
-        { ...claimed, specificationDigest: `sha256:${"c".repeat(64)}` },
+        requireTaskEvent(
+          { ...claimed, specificationDigest: `sha256:${"c".repeat(64)}` },
+          "task-claimed",
+        ),
       ]),
     ).toMatchObject({ mode: "degraded-read-only" });
     const releaseWithoutClaim = foldTaskEvents([
@@ -323,7 +376,12 @@ describe("exclusive claims", () => {
     expect(releaseWithoutClaim.tasks).toHaveLength(1);
     expect(releaseWithoutClaim).toMatchObject({
       mode: "degraded-read-only",
-      failure: "task claim release does not match the active claim",
+      failure: some(
+        taskBoardFailure(
+          "non-exact-claim-release",
+          "task claim release does not match the active claim",
+        ),
+      ),
     });
     expect(
       foldTaskEvents([
@@ -331,11 +389,19 @@ describe("exclusive claims", () => {
         specified,
         ready,
         claimed,
-        { ...released, claimId: "99999999-9999-4999-8999-999999999999" },
+        requireTaskEvent(
+          { ...released, claimId: "99999999-9999-4999-8999-999999999999" },
+          "task-claim-released",
+        ),
       ]),
     ).toMatchObject({
       mode: "degraded-read-only",
-      failure: "task claim release does not match the active claim",
+      failure: some(
+        taskBoardFailure(
+          "non-exact-claim-release",
+          "task claim release does not match the active claim",
+        ),
+      ),
     });
   });
 
@@ -388,19 +454,23 @@ describe("exclusive claims", () => {
     { ...released, claimId: `${released.claimId}x` },
     { ...released, reason: "stolen" },
   ])("rejects malformed claim event %j", (candidate) => {
-    expect(parseTaskEvent(candidate)).toBeUndefined();
+    expect(parseTaskEvent(candidate)).toEqual({
+      ok: false,
+      failure: expectedTaskEventParseFailure(
+        "Task event is malformed or violates its semantic invariants",
+      ),
+    });
   });
 });
 
 describe("reviewed Ready events", () => {
   it("parses specification and exact clean review events", () => {
-    expect(parseTaskEvent(specified)).toEqual(specified);
-    expect(parseTaskEvent(ready)).toEqual(ready);
+    expect(parsedEvent(specified)).toEqual(specified);
+    expect(parsedEvent(ready)).toEqual(ready);
   });
 
   it("projects Ready only after the canonical specification and clean review", () => {
-    const created = parseTaskCreatedEvent(event);
-    if (created === undefined) throw new Error("fixture must parse");
+    const created = createdEvent(event);
     expect(foldTaskEvents([created, specified, ready]).tasks[0]?.state).toBe(
       "Ready",
     );
@@ -412,16 +482,27 @@ describe("reviewed Ready events", () => {
           title: created.task.title,
           description: created.task.description,
           state: "Backlog",
-          blocked: false,
+          blockStatus: "unblocked",
+          specification: none,
+          specificationDigest: none,
+          claim: none,
         },
       ],
-      failure: "Ready event lacks an exact clean specification review",
+      failure: some(
+        taskBoardFailure(
+          "stale-readiness-review",
+          "Ready event lacks an exact clean specification review",
+        ),
+      ),
     });
     expect(
       foldTaskEvents([
         created,
         specified,
-        { ...ready, review: { ...ready.review, findingCount: 1 } },
+        requireTaskEvent(
+          { ...ready, review: { ...ready.review, findingCount: 1 } },
+          "task-ready",
+        ),
       ]),
     ).toMatchObject({ mode: "degraded-read-only" });
     const staleDigest = `sha256:${"b".repeat(64)}`;
@@ -429,18 +510,26 @@ describe("reviewed Ready events", () => {
       foldTaskEvents([
         created,
         specified,
-        {
-          ...ready,
-          specificationDigest: staleDigest,
-          review: {
-            ...ready.review,
-            reviewedSpecificationDigest: staleDigest,
+        requireTaskEvent(
+          {
+            ...ready,
+            specificationDigest: staleDigest,
+            review: {
+              ...ready.review,
+              reviewedSpecificationDigest: staleDigest,
+            },
           },
-        },
+          "task-ready",
+        ),
       ]),
     ).toMatchObject({
       mode: "degraded-read-only",
-      failure: "Ready event lacks an exact clean specification review",
+      failure: some(
+        taskBoardFailure(
+          "stale-readiness-review",
+          "Ready event lacks an exact clean specification review",
+        ),
+      ),
     });
   });
 
@@ -476,7 +565,7 @@ describe("reviewed Ready events", () => {
     { ...specified, kind: "unknown" },
     { ...ready, kind: "unknown" },
     { ...ready, review: null },
-    { ...ready, review: { ...ready.review, freshContext: false } },
+    { ...ready, review: { ...ready.review, contextFreshness: "stale" } },
     { ...ready, review: { ...ready.review, reviewerRole: "other" } },
     { ...ready, review: { ...ready.review, findingCount: "0" } },
     { ...ready, review: { ...ready.review, findingCount: 1.5 } },
@@ -489,16 +578,23 @@ describe("reviewed Ready events", () => {
       },
     },
   ])("rejects malformed or stale shared readiness evidence %j", (candidate) => {
-    expect(parseTaskEvent(candidate)).toBeUndefined();
+    expect(parseTaskEvent(candidate)).toEqual({
+      ok: false,
+      failure: expectedTaskEventParseFailure(
+        "Task event is malformed or violates its semantic invariants",
+      ),
+    });
   });
 
   it("degrades when a shared event references an unknown task", () => {
-    const created = parseTaskCreatedEvent(event);
-    if (created === undefined) throw new Error("fixture must parse");
+    const created = createdEvent(event);
     expect(
       foldTaskEvents([
         created,
-        { ...specified, taskId: "55555555-5555-4555-8555-555555555555" },
+        requireTaskEvent(
+          { ...specified, taskId: "55555555-5555-4555-8555-555555555555" },
+          "task-specified",
+        ),
       ]),
     ).toEqual({
       mode: "degraded-read-only",
@@ -508,28 +604,38 @@ describe("reviewed Ready events", () => {
           title: created.task.title,
           description: created.task.description,
           state: "Backlog",
-          blocked: false,
+          blockStatus: "unblocked",
+          specification: none,
+          specificationDigest: none,
+          claim: none,
         },
       ],
-      failure: "task event references an unknown task",
+      failure: some(
+        taskBoardFailure(
+          "unknown-task",
+          "task event references an unknown task",
+        ),
+      ),
     });
   });
 });
 
 describe("Kanban projection", () => {
-  const parsed = parseTaskCreatedEvent(event);
-  if (parsed === undefined) throw new Error("fixture must parse");
+  const parsed = createdEvent(event);
 
   it("projects shared tasks deterministically in Backlog", () => {
-    const second = {
-      ...parsed,
-      eventId: "33333333-3333-4333-8333-333333333333",
-      task: {
-        ...parsed.task,
-        id: "00000000-0000-4000-8000-000000000000",
-        title: "First by identity",
+    const second = requireTaskEvent(
+      {
+        ...parsed,
+        eventId: "33333333-3333-4333-8333-333333333333",
+        task: {
+          ...parsed.task,
+          id: "00000000-0000-4000-8000-000000000000",
+          title: "First by identity",
+        },
       },
-    };
+      "task-created",
+    );
     const board = foldTaskEvents([parsed, second]);
     expect(board.mode).toBe("writable");
     expect(board.tasks.map((task) => task.title)).toEqual([
@@ -550,15 +656,26 @@ describe("Kanban projection", () => {
           title: parsed.task.title,
           description: parsed.task.description,
           state: "Backlog",
-          blocked: false,
+          blockStatus: "unblocked",
+          specification: none,
+          specificationDigest: none,
+          claim: none,
         },
       ],
-      failure: "duplicate task authority event",
+      failure: some(
+        taskBoardFailure(
+          "duplicate-authority-event",
+          "duplicate task authority event",
+        ),
+      ),
     });
     expect(
       foldTaskEvents([
         parsed,
-        { ...parsed, eventId: "33333333-3333-4333-8333-333333333333" },
+        requireTaskEvent(
+          { ...parsed, eventId: "33333333-3333-4333-8333-333333333333" },
+          "task-created",
+        ),
       ]),
     ).toEqual({
       mode: "degraded-read-only",
@@ -568,39 +685,53 @@ describe("Kanban projection", () => {
           title: parsed.task.title,
           description: parsed.task.description,
           state: "Backlog",
-          blocked: false,
+          blockStatus: "unblocked",
+          specification: none,
+          specificationDigest: none,
+          claim: none,
         },
       ],
-      failure: "duplicate task authority event",
+      failure: some(
+        taskBoardFailure(
+          "duplicate-authority-event",
+          "duplicate task authority event",
+        ),
+      ),
     });
     expect(
       foldTaskEvents([
         parsed,
-        {
-          ...parsed,
-          task: {
-            ...parsed.task,
-            id: "33333333-3333-4333-8333-333333333333",
+        requireTaskEvent(
+          {
+            ...parsed,
+            task: {
+              ...parsed.task,
+              id: "33333333-3333-4333-8333-333333333333",
+            },
           },
-        },
+          "task-created",
+        ),
       ]).mode,
     ).toBe("degraded-read-only");
   });
 
   it("formats degraded and blocked board evidence", () => {
+    const blocked = requireTaskEvent(
+      {
+        ...parsed,
+        task: { ...parsed.task, title: "Blocked task" },
+      },
+      "task-created",
+    );
+    const blockedTask = foldTaskEvents([blocked]).tasks[0];
+    if (blockedTask === undefined) throw new Error("missing blocked fixture");
     expect(
       formatTaskBoard({
         mode: "degraded-read-only",
-        failure: "signature invalid",
-        tasks: [
-          {
-            id: "22222222-2222-4222-8222-222222222222",
-            title: "Blocked task",
-            description: "",
-            state: "Backlog",
-            blocked: true,
-          },
-        ],
+        failure: some(
+          taskBoardFailure("task-history-verification", "signature invalid"),
+        ),
+        tasks: [{ ...blockedTask, blockStatus: "blocked" }],
       }),
     ).toBe(
       "Task board: degraded-read-only\nFailure: signature invalid\nState | ID | Title\nBacklog [Blocked] | 22222222-2222-4222-8222-222222222222 | Blocked task",

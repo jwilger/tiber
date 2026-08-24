@@ -1,4 +1,31 @@
 import {
+  parseClaimBaselineRevision,
+  parseClaimOwnerIdentity,
+  parseSpecificationDigest,
+  parseSpecificationReviewFindingCount,
+  parseTaskClaimId,
+  parseTaskDescription,
+  parseTaskEventId,
+  parseTaskEventOccurredAt,
+  parseTaskId,
+  parseTaskTitle,
+  type ClaimBaselineRevision,
+  type ClaimOwnerIdentity,
+  type SpecificationDigest,
+  type TaskClaimId,
+  type TaskDescription,
+  type TaskEventId,
+  type TaskEventOccurredAt,
+  type TaskId,
+  type TaskTitle,
+} from "./task-values.js";
+import {
+  parseCompiledWorkflowDigest,
+  type CompiledWorkflowDigest,
+} from "../workflow/workflow-values.js";
+import type { TiberFailure, TiberResult } from "../failures/tiber-failure.js";
+import { none, some, type Option } from "../types/option.js";
+import {
   decideReadiness,
   digestTaskSpecification,
   parseTaskSpecification,
@@ -7,86 +34,87 @@ import {
 } from "./readiness.js";
 
 export type TaskState = "Backlog" | "Ready" | "In Progress" | "Done";
+export type TaskBlockStatus = "blocked" | "unblocked";
 
 export interface TaskClaim {
-  readonly claimId: string;
-  readonly owner: string;
-  readonly baselineRevision: string;
-  readonly workflowDigest: string;
+  readonly claimId: TaskClaimId;
+  readonly owner: ClaimOwnerIdentity;
+  readonly baselineRevision: ClaimBaselineRevision;
+  readonly workflowDigest: CompiledWorkflowDigest;
 }
 
 export interface Task {
-  readonly id: string;
-  readonly title: string;
-  readonly description: string;
+  readonly id: TaskId;
+  readonly title: TaskTitle;
+  readonly description: TaskDescription;
   readonly state: TaskState;
-  readonly blocked: boolean;
-  readonly specification?: TaskSpecification;
-  readonly specificationDigest?: string;
-  readonly claim?: TaskClaim;
+  readonly blockStatus: TaskBlockStatus;
+  readonly specification: Option<TaskSpecification>;
+  readonly specificationDigest: Option<SpecificationDigest>;
+  readonly claim: Option<TaskClaim>;
 }
 
 export interface TaskCreatedEvent {
   readonly schemaVersion: 1;
-  readonly eventId: string;
+  readonly eventId: TaskEventId;
   readonly kind: "task-created";
-  readonly occurredAt: string;
+  readonly occurredAt: TaskEventOccurredAt;
   readonly task: {
-    readonly id: string;
-    readonly title: string;
-    readonly description: string;
+    readonly id: TaskId;
+    readonly title: TaskTitle;
+    readonly description: TaskDescription;
   };
 }
 
 export interface TaskSpecifiedEvent {
   readonly schemaVersion: 1;
-  readonly eventId: string;
+  readonly eventId: TaskEventId;
   readonly kind: "task-specified";
-  readonly occurredAt: string;
-  readonly taskId: string;
-  readonly specificationDigest: string;
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
   readonly specification: TaskSpecification;
 }
 
 export interface TaskReadyEvent {
   readonly schemaVersion: 1;
-  readonly eventId: string;
+  readonly eventId: TaskEventId;
   readonly kind: "task-ready";
-  readonly occurredAt: string;
-  readonly taskId: string;
-  readonly specificationDigest: string;
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
   readonly review: ReadinessReview;
 }
 
 export interface TaskClaimedEvent {
   readonly schemaVersion: 1;
-  readonly eventId: string;
+  readonly eventId: TaskEventId;
   readonly kind: "task-claimed";
-  readonly occurredAt: string;
-  readonly taskId: string;
-  readonly specificationDigest: string;
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
   readonly claim: TaskClaim;
 }
 
 export interface TaskClaimTakenOverEvent {
   readonly schemaVersion: 1;
-  readonly eventId: string;
+  readonly eventId: TaskEventId;
   readonly kind: "task-claim-taken-over";
-  readonly occurredAt: string;
-  readonly taskId: string;
-  readonly specificationDigest: string;
-  readonly previousClaimId: string;
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
+  readonly previousClaimId: TaskClaimId;
   readonly claim: TaskClaim;
 }
 
 export interface TaskClaimReleasedEvent {
   readonly schemaVersion: 1;
-  readonly eventId: string;
+  readonly eventId: TaskEventId;
   readonly kind: "task-claim-released";
-  readonly occurredAt: string;
-  readonly taskId: string;
-  readonly specificationDigest: string;
-  readonly claimId: string;
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
+  readonly claimId: TaskClaimId;
   readonly reason: "baseline-drift" | "released" | "completed";
 }
 
@@ -98,10 +126,42 @@ export type TaskEvent =
   | TaskClaimTakenOverEvent
   | TaskClaimReleasedEvent;
 
+export type TaskBoardFailureReason =
+  | "duplicate-authority-event"
+  | "non-exclusive-claim"
+  | "non-exact-claim-release"
+  | "non-exact-claim-takeover"
+  | "stale-readiness-review"
+  | "task-history-verification"
+  | "unknown-task";
+export type TaskBoardFailure = TiberFailure<
+  "TIBER_TASK_BOARD_INVALID",
+  {
+    readonly domain: "task-board";
+    readonly reason: TaskBoardFailureReason;
+  },
+  "corrected-task-history"
+>;
+
+export function taskBoardFailure(
+  reason: TaskBoardFailureReason,
+  message: string,
+): TaskBoardFailure {
+  return {
+    code: "TIBER_TASK_BOARD_INVALID",
+    message,
+    safeContext: { domain: "task-board", reason },
+    causes: [],
+    retryability: "retry-after-state-change",
+    requiredRecoveryEvidence: ["corrected-task-history"],
+    redaction: "public",
+  };
+}
+
 export interface TaskBoard {
   readonly mode: "writable" | "degraded-read-only";
   readonly tasks: readonly Task[];
-  readonly failure?: string;
+  readonly failure: Option<TaskBoardFailure>;
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -109,7 +169,7 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function parseTaskCreatedEvent(
+function parseTaskCreatedEventValue(
   value: unknown,
 ): TaskCreatedEvent | undefined {
   if (
@@ -119,150 +179,128 @@ export function parseTaskCreatedEvent(
     !isRecord(value.task)
   )
     return undefined;
+  const eventId = parseTaskEventId(value.eventId);
+  const occurredAt = parseTaskEventOccurredAt(value.occurredAt);
+  const taskId = parseTaskId(value.task.id);
+  const title = parseTaskTitle(
+    typeof value.task.title === "string"
+      ? value.task.title.trim()
+      : value.task.title,
+  );
+  const description = parseTaskDescription(value.task.description);
   if (
-    // Stryker disable next-line ConditionalExpression: the following UUID regex string-coerces and rejects every non-string JSON value; this explicit guard establishes the semantic string type.
-    typeof value.eventId !== "string" ||
-    typeof value.occurredAt !== "string" ||
-    // Stryker disable next-line ConditionalExpression: the following UUID regex string-coerces and rejects every non-string JSON value; this explicit guard establishes the semantic string type.
-    typeof value.task.id !== "string" ||
-    typeof value.task.title !== "string" ||
-    typeof value.task.description !== "string" ||
-    !/^[0-9a-f-]{36}$/u.test(value.eventId) ||
-    !/^[0-9a-f-]{36}$/u.test(value.task.id) ||
-    value.task.title.trim().length === 0 ||
-    !Number.isFinite(Date.parse(value.occurredAt))
+    !eventId.ok ||
+    !occurredAt.ok ||
+    !taskId.ok ||
+    !title.ok ||
+    !description.ok
   )
     return undefined;
   return {
     schemaVersion: 1,
-    eventId: value.eventId,
+    eventId: eventId.value,
     kind: "task-created",
-    occurredAt: value.occurredAt,
+    occurredAt: occurredAt.value,
     task: {
-      id: value.task.id,
-      title: value.task.title.trim(),
-      description: value.task.description,
+      id: taskId.value,
+      title: title.value,
+      description: description.value,
     },
   };
 }
 
-function parseCommonEvent(
-  value: Readonly<Record<string, unknown>>,
-): { readonly eventId: string; readonly occurredAt: string } | undefined {
-  if (
-    value.schemaVersion !== 1 ||
-    // Stryker disable next-line ConditionalExpression: the UUID grammar string-coerces and rejects every non-string JSON value; this guard narrows the semantic type.
-    typeof value.eventId !== "string" ||
-    !/^[0-9a-f-]{36}$/u.test(value.eventId) ||
-    typeof value.occurredAt !== "string" ||
-    !Number.isFinite(Date.parse(value.occurredAt))
-  )
-    return undefined;
-  return { eventId: value.eventId, occurredAt: value.occurredAt };
+function parseCommonEvent(value: Readonly<Record<string, unknown>>):
+  | {
+      readonly eventId: TaskEventId;
+      readonly occurredAt: TaskEventOccurredAt;
+    }
+  | undefined {
+  if (value.schemaVersion !== 1) return undefined;
+  const eventId = parseTaskEventId(value.eventId);
+  const occurredAt = parseTaskEventOccurredAt(value.occurredAt);
+  return eventId.ok && occurredAt.ok
+    ? { eventId: eventId.value, occurredAt: occurredAt.value }
+    : undefined;
 }
 
-export function parseTaskEvent(value: unknown): TaskEvent | undefined {
-  const created = parseTaskCreatedEvent(value);
+function parseTaskClaim(value: unknown): TaskClaim | undefined {
+  if (!isRecord(value)) return undefined;
+  const claimId = parseTaskClaimId(value.claimId);
+  const owner = parseClaimOwnerIdentity(
+    typeof value.owner === "string" ? value.owner.trim() : value.owner,
+  );
+  const baselineRevision = parseClaimBaselineRevision(value.baselineRevision);
+  const workflowDigest = parseCompiledWorkflowDigest(value.workflowDigest);
+  return claimId.ok && owner.ok && baselineRevision.ok && workflowDigest.ok
+    ? {
+        claimId: claimId.value,
+        owner: owner.value,
+        baselineRevision: baselineRevision.value,
+        workflowDigest: workflowDigest.value,
+      }
+    : undefined;
+}
+
+function parseTaskEventValue(value: unknown): TaskEvent | undefined {
+  const created = parseTaskCreatedEventValue(value);
   if (created !== undefined) return created;
   if (!isRecord(value)) return undefined;
   const common = parseCommonEvent(value);
   if (common === undefined) return undefined;
-  if (
-    // Stryker disable next-line ConditionalExpression: the UUID grammar string-coerces and rejects every non-string JSON value; this guard narrows the semantic type.
-    typeof value.taskId !== "string" ||
-    !/^[0-9a-f-]{36}$/u.test(value.taskId) ||
-    // Stryker disable next-line ConditionalExpression: the digest grammar string-coerces and rejects every non-string JSON value; this guard narrows the semantic type.
-    typeof value.specificationDigest !== "string" ||
-    !/^sha256:[0-9a-f]{64}$/u.test(value.specificationDigest)
-  )
-    return undefined;
+  const taskId = parseTaskId(value.taskId);
+  const specificationDigest = parseSpecificationDigest(
+    value.specificationDigest,
+  );
+  if (!taskId.ok || !specificationDigest.ok) return undefined;
   if (value.kind === "task-specified") {
     const specification = parseTaskSpecification(value.specification);
-    return specification === undefined ||
-      digestTaskSpecification(specification) !== value.specificationDigest
+    return !specification.ok ||
+      digestTaskSpecification(specification.value) !== specificationDigest.value
       ? undefined
       : {
           schemaVersion: 1,
           eventId: common.eventId,
           kind: "task-specified",
           occurredAt: common.occurredAt,
-          taskId: value.taskId,
-          specificationDigest: value.specificationDigest,
-          specification,
+          taskId: taskId.value,
+          specificationDigest: specificationDigest.value,
+          specification: specification.value,
         };
   }
-  if (value.kind === "task-claimed" && isRecord(value.claim)) {
-    const claim = value.claim;
-    if (
-      // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects every non-string JSON value and this guard narrows the semantic type.
-      typeof claim.claimId !== "string" ||
-      !/^[0-9a-f-]{36}$/u.test(claim.claimId) ||
-      // Stryker disable next-line ConditionalExpression: trim is only reached after this guard and all non-string values fail the subsequent semantic operation; this guard narrows the type.
-      typeof claim.owner !== "string" ||
-      claim.owner.trim().length === 0 ||
-      // Stryker disable next-line ConditionalExpression: the following SHA grammar rejects every non-string JSON value and this guard narrows the semantic type.
-      typeof claim.baselineRevision !== "string" ||
-      !/^[0-9a-f]{40}$/u.test(claim.baselineRevision) ||
-      // Stryker disable next-line ConditionalExpression: the following digest grammar rejects every non-string JSON value and this guard narrows the semantic type.
-      typeof claim.workflowDigest !== "string" ||
-      !/^sha256:[0-9a-f]{64}$/u.test(claim.workflowDigest)
-    )
-      return undefined;
-    return {
-      schemaVersion: 1,
-      eventId: common.eventId,
-      kind: "task-claimed",
-      occurredAt: common.occurredAt,
-      taskId: value.taskId,
-      specificationDigest: value.specificationDigest,
-      claim: {
-        claimId: claim.claimId,
-        owner: claim.owner.trim(),
-        baselineRevision: claim.baselineRevision,
-        workflowDigest: claim.workflowDigest,
-      },
-    };
+  if (value.kind === "task-claimed") {
+    const claim = parseTaskClaim(value.claim);
+    return claim === undefined
+      ? undefined
+      : {
+          schemaVersion: 1,
+          eventId: common.eventId,
+          kind: "task-claimed",
+          occurredAt: common.occurredAt,
+          taskId: taskId.value,
+          specificationDigest: specificationDigest.value,
+          claim,
+        };
   }
-  if (value.kind === "task-claim-taken-over" && isRecord(value.claim)) {
-    const claim = value.claim;
-    if (
-      // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects non-string JSON values and this guard narrows the type.
-      typeof value.previousClaimId !== "string" ||
-      !/^[0-9a-f-]{36}$/u.test(value.previousClaimId) ||
-      // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects non-string JSON values and this guard narrows the type.
-      typeof claim.claimId !== "string" ||
-      !/^[0-9a-f-]{36}$/u.test(claim.claimId) ||
-      typeof claim.owner !== "string" ||
-      claim.owner.trim().length === 0 ||
-      // Stryker disable next-line ConditionalExpression: the following SHA grammar rejects non-string JSON values and this guard narrows the type.
-      typeof claim.baselineRevision !== "string" ||
-      !/^[0-9a-f]{40}$/u.test(claim.baselineRevision) ||
-      // Stryker disable next-line ConditionalExpression: the following digest grammar rejects non-string JSON values and this guard narrows the type.
-      typeof claim.workflowDigest !== "string" ||
-      !/^sha256:[0-9a-f]{64}$/u.test(claim.workflowDigest)
-    )
-      return undefined;
-    return {
-      schemaVersion: 1,
-      eventId: common.eventId,
-      kind: "task-claim-taken-over",
-      occurredAt: common.occurredAt,
-      taskId: value.taskId,
-      specificationDigest: value.specificationDigest,
-      previousClaimId: value.previousClaimId,
-      claim: {
-        claimId: claim.claimId,
-        owner: claim.owner.trim(),
-        baselineRevision: claim.baselineRevision,
-        workflowDigest: claim.workflowDigest,
-      },
-    };
+  if (value.kind === "task-claim-taken-over") {
+    const previousClaimId = parseTaskClaimId(value.previousClaimId);
+    const claim = parseTaskClaim(value.claim);
+    return !previousClaimId.ok || claim === undefined
+      ? undefined
+      : {
+          schemaVersion: 1,
+          eventId: common.eventId,
+          kind: "task-claim-taken-over",
+          occurredAt: common.occurredAt,
+          taskId: taskId.value,
+          specificationDigest: specificationDigest.value,
+          previousClaimId: previousClaimId.value,
+          claim,
+        };
   }
   if (value.kind === "task-claim-released") {
+    const claimId = parseTaskClaimId(value.claimId);
     if (
-      // Stryker disable next-line ConditionalExpression: the following UUID grammar rejects every non-string JSON value and this guard narrows the semantic type.
-      typeof value.claimId !== "string" ||
-      !/^[0-9a-f-]{36}$/u.test(value.claimId) ||
+      !claimId.ok ||
       (value.reason !== "baseline-drift" &&
         value.reason !== "released" &&
         value.reason !== "completed")
@@ -273,22 +311,22 @@ export function parseTaskEvent(value: unknown): TaskEvent | undefined {
       eventId: common.eventId,
       kind: "task-claim-released",
       occurredAt: common.occurredAt,
-      taskId: value.taskId,
-      specificationDigest: value.specificationDigest,
-      claimId: value.claimId,
+      taskId: taskId.value,
+      specificationDigest: specificationDigest.value,
+      claimId: claimId.value,
       reason: value.reason,
     };
   }
   if (value.kind === "task-ready" && isRecord(value.review)) {
     const review = value.review;
+    const findingCount = parseSpecificationReviewFindingCount(
+      review.findingCount,
+    );
     if (
-      review.freshContext !== true ||
+      review.contextFreshness !== "fresh" ||
       review.reviewerRole !== "specification-reviewer" ||
-      // Stryker disable next-line ConditionalExpression: Number.isSafeInteger rejects every non-number JSON value; this guard narrows the semantic type.
-      typeof review.findingCount !== "number" ||
-      !Number.isSafeInteger(review.findingCount) ||
-      review.findingCount < 0 ||
-      review.reviewedSpecificationDigest !== value.specificationDigest
+      !findingCount.ok ||
+      review.reviewedSpecificationDigest !== specificationDigest.value
     )
       return undefined;
     return {
@@ -296,17 +334,44 @@ export function parseTaskEvent(value: unknown): TaskEvent | undefined {
       eventId: common.eventId,
       kind: "task-ready",
       occurredAt: common.occurredAt,
-      taskId: value.taskId,
-      specificationDigest: value.specificationDigest,
+      taskId: taskId.value,
+      specificationDigest: specificationDigest.value,
       review: {
-        freshContext: true,
+        contextFreshness: "fresh",
         reviewerRole: "specification-reviewer",
-        findingCount: review.findingCount,
-        reviewedSpecificationDigest: value.specificationDigest,
+        findingCount: findingCount.value,
+        reviewedSpecificationDigest: specificationDigest.value,
       },
     };
   }
   return undefined;
+}
+
+type TaskEventParseFailure = TiberFailure<
+  "TIBER_TASK_EVENT_INVALID",
+  { readonly boundary: "task-event" },
+  "corrected-task-event"
+>;
+
+export function parseTaskEvent(
+  value: unknown,
+): TiberResult<TaskEvent, TaskEventParseFailure> {
+  const event = parseTaskEventValue(value);
+  return event === undefined
+    ? {
+        ok: false,
+        failure: {
+          code: "TIBER_TASK_EVENT_INVALID",
+          message:
+            "Task event is malformed or violates its semantic invariants",
+          safeContext: { boundary: "task-event" },
+          causes: [],
+          retryability: "retry-after-input",
+          requiredRecoveryEvidence: ["corrected-task-event"],
+          redaction: "public",
+        },
+      }
+    : { ok: true, value: event };
 }
 
 export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
@@ -317,7 +382,12 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
       return {
         mode: "degraded-read-only",
         tasks: [...tasks.values()],
-        failure: "duplicate task authority event",
+        failure: some(
+          taskBoardFailure(
+            "duplicate-authority-event",
+            "duplicate task authority event",
+          ),
+        ),
       };
     }
     eventIds.add(event.eventId);
@@ -326,7 +396,12 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         return {
           mode: "degraded-read-only",
           tasks: [...tasks.values()],
-          failure: "duplicate task authority event",
+          failure: some(
+            taskBoardFailure(
+              "duplicate-authority-event",
+              "duplicate task authority event",
+            ),
+          ),
         };
       }
       tasks.set(event.task.id, {
@@ -334,7 +409,10 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         title: event.task.title,
         description: event.task.description,
         state: "Backlog",
-        blocked: false,
+        blockStatus: "unblocked",
+        specification: none,
+        specificationDigest: none,
+        claim: none,
       });
       continue;
     }
@@ -343,14 +421,19 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
       return {
         mode: "degraded-read-only",
         tasks: [...tasks.values()],
-        failure: "task event references an unknown task",
+        failure: some(
+          taskBoardFailure(
+            "unknown-task",
+            "task event references an unknown task",
+          ),
+        ),
       };
     }
     if (event.kind === "task-specified") {
       tasks.set(task.id, {
         ...task,
-        specification: event.specification,
-        specificationDigest: event.specificationDigest,
+        specification: some(event.specification),
+        specificationDigest: some(event.specificationDigest),
       });
       continue;
     }
@@ -358,51 +441,76 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
       if (
         // Stryker disable next-line ConditionalExpression, LogicalOperator: claim and In Progress state are installed atomically, so either condition independently detects an existing claim; both document the closed state invariant.
         task.state !== "Ready" ||
-        // Stryker disable next-line ConditionalExpression: claim and In Progress state are installed atomically, so the state check already detects every existing claim; this check documents exclusivity directly.
-        task.claim !== undefined ||
-        task.specificationDigest !== event.specificationDigest
+        // Stryker disable next-line ConditionalExpression, StringLiteral: claim and In Progress state are installed atomically, so the state check already detects every existing claim; this check documents exclusivity directly.
+        task.claim.kind === "some" ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: digest absence yields undefined and exact comparison below independently rejects it; the kind check documents the Option rail.
+        task.specificationDigest.kind === "none" ||
+        task.specificationDigest.value !== event.specificationDigest
       ) {
         return {
           mode: "degraded-read-only",
           tasks: [...tasks.values()],
-          failure: "task claim is not exclusive or state-bound",
+          failure: some(
+            taskBoardFailure(
+              "non-exclusive-claim",
+              "task claim is not exclusive or state-bound",
+            ),
+          ),
         };
       }
-      tasks.set(task.id, { ...task, state: "In Progress", claim: event.claim });
+      tasks.set(task.id, {
+        ...task,
+        state: "In Progress",
+        claim: some(event.claim),
+      });
       continue;
     }
     if (event.kind === "task-claim-taken-over") {
       if (
         // Stryker disable next-line ConditionalExpression, LogicalOperator: claim and In Progress state are installed atomically, so exact claim identity independently establishes this state; both checks document the invariant.
         task.state !== "In Progress" ||
-        // Stryker disable next-line OptionalChaining: In Progress always carries a claim by the closed fold invariant.
-        task.claim?.claimId !== event.previousClaimId ||
-        task.specificationDigest !== event.specificationDigest ||
-        task.claim.baselineRevision !== event.claim.baselineRevision ||
-        task.claim.workflowDigest !== event.claim.workflowDigest ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: claim and In Progress state are installed atomically; the state check already establishes presence.
+        task.claim.kind === "none" ||
+        task.claim.value.claimId !== event.previousClaimId ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: digest absence yields undefined and exact comparison below independently rejects it; the kind check documents the Option rail.
+        task.specificationDigest.kind === "none" ||
+        task.specificationDigest.value !== event.specificationDigest ||
+        task.claim.value.baselineRevision !== event.claim.baselineRevision ||
+        task.claim.value.workflowDigest !== event.claim.workflowDigest ||
         event.claim.claimId === event.previousClaimId
       ) {
         return {
           mode: "degraded-read-only",
           tasks: [...tasks.values()],
-          failure: "task claim takeover is not exact or state-bound",
+          failure: some(
+            taskBoardFailure(
+              "non-exact-claim-takeover",
+              "task claim takeover is not exact or state-bound",
+            ),
+          ),
         };
       }
-      tasks.set(task.id, { ...task, claim: event.claim });
+      tasks.set(task.id, { ...task, claim: some(event.claim) });
       continue;
     }
     if (event.kind === "task-claim-released") {
       if (
-        task.claim?.claimId !== event.claimId ||
-        // Stryker disable next-line ConditionalExpression: a claim can only be installed on a Ready task whose specification and digest are present; this restates that fold invariant before reconstruction.
-        task.specification === undefined ||
-        // Stryker disable next-line ConditionalExpression: a claim can only be installed on a Ready task whose specification and digest are present; this restates that fold invariant before reconstruction.
-        task.specificationDigest === undefined
+        task.claim.kind === "none" ||
+        task.claim.value.claimId !== event.claimId ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: active claims are installed only after specification and digest, so these checks document established invariants.
+        task.specification.kind === "none" ||
+        // Stryker disable next-line ConditionalExpression, StringLiteral: active claims are installed only after specification and digest, so these checks document established invariants.
+        task.specificationDigest.kind === "none"
       ) {
         return {
           mode: "degraded-read-only",
           tasks: [...tasks.values()],
-          failure: "task claim release does not match the active claim",
+          failure: some(
+            taskBoardFailure(
+              "non-exact-claim-release",
+              "task claim release does not match the active claim",
+            ),
+          ),
         };
       }
       tasks.set(task.id, {
@@ -410,27 +518,32 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         title: task.title,
         description: task.description,
         state: "Ready",
-        blocked: false,
+        blockStatus: "unblocked",
         specification: task.specification,
         specificationDigest: task.specificationDigest,
+        claim: none,
       });
       continue;
     }
     if (
-      // Stryker disable next-line ConditionalExpression, LogicalOperator: specification and digest are installed atomically by the only preceding event, so digest absence/mismatch already denies every state where specification is absent.
-      task.specification === undefined ||
-      // Stryker disable next-line ConditionalExpression: decideReadiness compares the review-bound event digest against the task's pinned digest, so this explicit check is a fail-fast restatement of the same invariant.
-      task.specificationDigest !== event.specificationDigest ||
-      !decideReadiness(
-        task.specification,
-        task.specificationDigest,
-        event.review,
-      ).ready
+      // Stryker disable next-line ConditionalExpression, LogicalOperator, StringLiteral: specification and digest are installed atomically by the only preceding event, so digest absence/mismatch already denies every state where specification is absent.
+      task.specification.kind === "none" ||
+      // Stryker disable next-line ConditionalExpression, StringLiteral: digest absence yields undefined and exact comparison below independently rejects it; the kind check documents the Option rail.
+      task.specificationDigest.kind === "none" ||
+      // Stryker disable next-line ConditionalExpression: the parsed Ready review is bound to the event digest, so decideReadiness below independently rejects every event/task digest mismatch as stale.
+      task.specificationDigest.value !== event.specificationDigest ||
+      decideReadiness(task.specificationDigest.value, event.review).status !==
+        "ready"
     ) {
       return {
         mode: "degraded-read-only",
         tasks: [...tasks.values()],
-        failure: "Ready event lacks an exact clean specification review",
+        failure: some(
+          taskBoardFailure(
+            "stale-readiness-review",
+            "Ready event lacks an exact clean specification review",
+          ),
+        ),
       };
     }
     tasks.set(task.id, { ...task, state: "Ready" });
@@ -440,17 +553,20 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
     tasks: [...tasks.values()].sort((left, right) =>
       left.id.localeCompare(right.id),
     ),
+    failure: none,
   };
 }
 
 export function formatTaskBoard(board: TaskBoard): string {
   const rows = board.tasks.map(
     (task) =>
-      `${task.state}${task.blocked ? " [Blocked]" : ""} | ${task.id} | ${task.title}`,
+      `${task.state}${task.blockStatus === "blocked" ? " [Blocked]" : ""} | ${task.id} | ${task.title}`,
   );
   return [
     `Task board: ${board.mode}`,
-    ...(board.failure === undefined ? [] : [`Failure: ${board.failure}`]),
+    ...(board.failure.kind === "none"
+      ? []
+      : [`Failure: ${board.failure.value.message}`]),
     "State | ID | Title",
     ...(rows.length === 0 ? ["(no tasks)"] : rows),
   ].join("\n");
