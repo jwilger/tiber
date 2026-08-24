@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 export interface StructuredCommand {
   readonly name: string;
   readonly executable: string;
+  readonly purpose: "test" | "verification";
   readonly argv: readonly string[];
   readonly cwd: "worktree";
   readonly environment: Readonly<Record<string, string>>;
@@ -45,7 +46,7 @@ function parseCommand(value: unknown): StructuredCommand | undefined {
   if (!record(value)) return undefined;
   if (
     Object.keys(value).sort().join(",") !==
-      "argv,cwd,environment,executable,maxOutputBytes,name,timeoutMs" ||
+      "argv,cwd,environment,executable,maxOutputBytes,name,purpose,timeoutMs" ||
     // Stryker disable next-line ConditionalExpression: the following name grammar rejects non-string JSON values and this guard narrows the type.
     typeof value.name !== "string" ||
     !/^[a-z][a-z0-9-]{0,63}$/u.test(value.name) ||
@@ -53,6 +54,7 @@ function parseCommand(value: unknown): StructuredCommand | undefined {
     typeof value.executable !== "string" ||
     !isAbsolute(value.executable) ||
     value.executable.includes("\0") ||
+    (value.purpose !== "test" && value.purpose !== "verification") ||
     !Array.isArray(value.argv) ||
     value.argv.length > 64 ||
     !value.argv.every(
@@ -96,6 +98,7 @@ function parseCommand(value: unknown): StructuredCommand | undefined {
   return {
     name: value.name,
     executable: value.executable,
+    purpose: value.purpose,
     // Stryker disable next-line MethodExpression: every argument was validated as a bounded string; filtering carries that proof into the inferred type.
     argv: value.argv.filter(
       // Stryker disable next-line ArrowFunction, ConditionalExpression: every argument was validated as a string immediately above.

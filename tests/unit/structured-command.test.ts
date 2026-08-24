@@ -8,6 +8,7 @@ import {
 const command = {
   name: "unit-tests",
   executable: "/usr/bin/node",
+  purpose: "test",
   argv: ["--test", "tests/unit"],
   cwd: "worktree",
   environment: { CI: "true" },
@@ -51,6 +52,14 @@ describe("structured command authority", () => {
     );
   });
 
+  it("accepts verification-purpose commands", () => {
+    expect(
+      compileCommandCatalog(withCommand({ purpose: "verification" })),
+    ).toMatchObject({
+      ok: true,
+    });
+  });
+
   it("sorts environment keys into canonical digest input", () => {
     const result = compileCommandCatalog(
       withCommand({ environment: { ZED: "z", ALPHA: "a" } }),
@@ -89,6 +98,7 @@ describe("structured command authority", () => {
     withCommand({ name: 1 }),
     withCommand({ executable: "node" }),
     withCommand({ executable: 1 }),
+    withCommand({ purpose: "mutation" }),
     withCommand({ argv: ["ok", 1] }),
     withCommand({ argv: ["bad\0arg"] }),
     withCommand({ argv: Array.from({ length: 65 }, () => "x") }),

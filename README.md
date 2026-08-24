@@ -100,6 +100,16 @@ model context. Results include only bounded UTF-8 head/tail previews and an
 artifact digest. `tiber_artifact_range` and `tiber_artifact_search` provide
 bounded verified access; age, count, and byte quotas reap old artifacts.
 
+`/tiber:red <task-id> <test-command> <exact-scenario-name>` projects the pinned
+scenario into deterministic Gherkin, runs only a locally granted test-purpose
+command in the owned worktree, stores the exact diagnostic by digest, and asks
+a fresh tool-free classifier whether that failure is scenario-specific.
+Unrelated, passing, stale, unbound, or malformed observations are rejected. A
+compile failure counts only when it specifically demonstrates the scenario's
+missing public surface. Before the resulting durable RED receipt, governed
+`edit` and `write` permit only exact task test mappings; production paths remain
+mechanically denied.
+
 ## Status and architecture
 
 The accepted replacement plan is in
