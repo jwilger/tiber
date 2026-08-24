@@ -189,7 +189,7 @@ export class GitTaskRemote {
           "--quiet",
           "-S",
           "-m",
-          `task: ${event.kind} ${event.kind === "task-created" ? event.task.id : event.taskId}`,
+          `task: ${event.kind} ${event.kind === "task-created" || event.kind === "task-campaign-goal-created" ? event.task.id : event.taskId}`,
           "-m",
           "Publish an append-only Tiber task event.",
         ]);

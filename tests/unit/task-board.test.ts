@@ -1729,6 +1729,7 @@ describe("exclusive claims", () => {
       ci: none,
       openedReview: none,
       reviewReceipt: none,
+      campaignProvenance: none,
     });
   });
 
@@ -2152,6 +2153,7 @@ describe("reviewed Ready events", () => {
           ci: none,
           openedReview: none,
           reviewReceipt: none,
+          campaignProvenance: none,
         },
       ],
       failure: some(
@@ -2281,6 +2283,7 @@ describe("reviewed Ready events", () => {
           ci: none,
           openedReview: none,
           reviewReceipt: none,
+          campaignProvenance: none,
         },
       ],
       failure: some(
@@ -2340,6 +2343,7 @@ describe("Kanban projection", () => {
           ci: none,
           openedReview: none,
           reviewReceipt: none,
+          campaignProvenance: none,
         },
       ],
       failure: some(
@@ -2376,6 +2380,7 @@ describe("Kanban projection", () => {
           ci: none,
           openedReview: none,
           reviewReceipt: none,
+          campaignProvenance: none,
         },
       ],
       failure: some(

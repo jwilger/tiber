@@ -1,3 +1,4 @@
+import { parseCampaignId, type CampaignId } from "../campaigns/campaign.js";
 import {
   decideCiEvaluation,
   type CiAuthorityObservation,
@@ -136,6 +137,7 @@ export interface Task {
   readonly ci: Option<CiSuccessReceipt>;
   readonly openedReview: Option<OpenedReview>;
   readonly reviewReceipt: Option<ReviewGateReceipt>;
+  readonly campaignProvenance: Option<CampaignId>;
 }
 
 export interface TaskCreatedEvent {
@@ -143,6 +145,19 @@ export interface TaskCreatedEvent {
   readonly eventId: TaskEventId;
   readonly kind: "task-created";
   readonly occurredAt: TaskEventOccurredAt;
+  readonly task: {
+    readonly id: TaskId;
+    readonly title: TaskTitle;
+    readonly description: TaskDescription;
+  };
+}
+
+export interface CampaignGoalTaskCreatedEvent {
+  readonly schemaVersion: 1;
+  readonly eventId: TaskEventId;
+  readonly kind: "task-campaign-goal-created";
+  readonly occurredAt: TaskEventOccurredAt;
+  readonly campaignId: CampaignId;
   readonly task: {
     readonly id: TaskId;
     readonly title: TaskTitle;
@@ -286,6 +301,7 @@ export interface TaskClaimReleasedEvent {
 
 export type TaskEvent =
   | TaskCreatedEvent
+  | CampaignGoalTaskCreatedEvent
   | TaskSpecifiedEvent
   | TaskReadyEvent
   | TaskClaimedEvent
@@ -380,6 +396,45 @@ function parseTaskCreatedEventValue(
     eventId: eventId.value,
     kind: "task-created",
     occurredAt: occurredAt.value,
+    task: {
+      id: taskId.value,
+      title: title.value,
+      description: description.value,
+    },
+  };
+}
+
+function parseCampaignGoalTaskCreatedEventValue(
+  value: unknown,
+): CampaignGoalTaskCreatedEvent | undefined {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    value.kind !== "task-campaign-goal-created" ||
+    !isRecord(value.task)
+  )
+    return undefined;
+  const eventId = parseTaskEventId(value.eventId);
+  const occurredAt = parseTaskEventOccurredAt(value.occurredAt);
+  const campaignId = parseCampaignId(value.campaignId);
+  const taskId = parseTaskId(value.task.id);
+  const title = parseTaskTitle(value.task.title);
+  const description = parseTaskDescription(value.task.description);
+  if (
+    !eventId.ok ||
+    !occurredAt.ok ||
+    !campaignId.ok ||
+    !taskId.ok ||
+    !title.ok ||
+    !description.ok
+  )
+    return undefined;
+  return {
+    schemaVersion: 1,
+    eventId: eventId.value,
+    kind: "task-campaign-goal-created",
+    occurredAt: occurredAt.value,
+    campaignId: campaignId.value,
     task: {
       id: taskId.value,
       title: title.value,
@@ -491,6 +546,8 @@ function parseDeliveryMode(value: unknown): GitDeliveryMode | undefined {
 function parseTaskEventValue(value: unknown): TaskEvent | undefined {
   const created = parseTaskCreatedEventValue(value);
   if (created !== undefined) return created;
+  const campaignGoalCreated = parseCampaignGoalTaskCreatedEventValue(value);
+  if (campaignGoalCreated !== undefined) return campaignGoalCreated;
   if (!isRecord(value)) return undefined;
   const common = parseCommonEvent(value);
   if (common === undefined) return undefined;
@@ -949,7 +1006,10 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
       };
     }
     eventIds.add(event.eventId);
-    if (event.kind === "task-created") {
+    if (
+      event.kind === "task-created" ||
+      event.kind === "task-campaign-goal-created"
+    ) {
       if (tasks.has(event.task.id)) {
         return {
           mode: "degraded-read-only",
@@ -978,6 +1038,10 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         ci: none,
         openedReview: none,
         reviewReceipt: none,
+        campaignProvenance:
+          event.kind === "task-campaign-goal-created"
+            ? some(event.campaignId)
+            : none,
       });
       continue;
     }
@@ -1389,6 +1453,7 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
         ci: task.ci,
         openedReview: task.openedReview,
         reviewReceipt: task.reviewReceipt,
+        campaignProvenance: task.campaignProvenance,
       });
       continue;
     }

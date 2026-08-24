@@ -3,6 +3,7 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 
+import { FileCampaignStore } from "../adapters/campaigns/file-campaign-store.js";
 import { FileCiAuthorityStore } from "../adapters/ci/file-ci-authority-store.js";
 import { verifyFileContainment } from "../adapters/containment/file-containment-verifier.js";
 import { FileProcessGroupRegistry } from "../adapters/processes/file-process-group-registry.js";
@@ -14,6 +15,7 @@ import {
 } from "../core/containment/containment.js";
 import { applyAssuranceCeiling } from "../core/configuration/authority.js";
 import { resolveSettings } from "../core/configuration/settings.js";
+import { parseCampaignCheckpointTime } from "../core/campaigns/campaign.js";
 import { authorizeBootstrapTool } from "../core/doctor/bootstrap-policy.js";
 import {
   parseDoctorNodeVersion,
@@ -24,6 +26,10 @@ import {
   createDoctorReport,
   formatDoctorReport,
 } from "../core/doctor/report.js";
+import {
+  handleAttentionCommand,
+  handleCampaignCommand,
+} from "./campaign-command.js";
 import { handleCiCommand } from "./ci-command.js";
 import { handleCommandGrant } from "./command-grant.js";
 import { handleDeliveryCommand } from "./delivery-command.js";
@@ -38,12 +44,16 @@ import { handleReviewCommand } from "./review-command.js";
 import { handleSettingsCommand } from "./settings-command.js";
 import { registerTaskCommands } from "./task-commands.js";
 import { handleWorkCommand } from "./work-command.js";
+import { registerAutomaticWorkflowOrchestration } from "./workflow-orchestration.js";
+import { registerWorkflowRequestTool } from "./workflow-request-tool.js";
 
 export default function registerTiber(pi: ExtensionAPI): void {
   const packageVersion = readPackageVersion();
   registerGovernedTools(pi);
   registerCommandTools(pi);
   registerTaskCommands(pi);
+  registerWorkflowRequestTool(pi);
+  registerAutomaticWorkflowOrchestration(pi);
   let containment: ContainmentStatus = {
     state: "lockdown",
     level: "host-trusted",
@@ -74,6 +84,16 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:settings", {
     description: "Inspect or edit inherited Tiber settings",
     handler: handleSettingsCommand,
+  });
+
+  pi.registerCommand("tiber:campaign", {
+    description: "Start, advance, or inspect a bounded autonomous campaign",
+    handler: handleCampaignCommand,
+  });
+
+  pi.registerCommand("tiber:attention", {
+    description: "Show non-modal campaign blocker attention",
+    handler: handleAttentionCommand,
   });
 
   pi.registerCommand("tiber:ci", {
@@ -140,6 +160,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
       "tiber_command",
       "tiber_artifact_range",
       "tiber_artifact_search",
+      "tiber_workflow_request",
     ]);
     const agentDirectory = getAgentDir();
     const processes = new FileProcessGroupRegistry(agentDirectory).reconcile();
@@ -204,8 +225,14 @@ export default function registerTiber(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("session_shutdown", () => {
-    new FileProcessGroupRegistry(getAgentDir()).terminateAll();
+  pi.on("session_shutdown", (_event, context) => {
+    const agentDirectory = getAgentDir();
+    const shutdownTime = parseCampaignCheckpointTime(new Date().toISOString());
+    if (shutdownTime.ok)
+      new FileCampaignStore(agentDirectory, context.cwd).shutdown(
+        shutdownTime.value,
+      );
+    new FileProcessGroupRegistry(agentDirectory).terminateAll();
   });
 
   pi.on("before_agent_start", (_event, context) => {
