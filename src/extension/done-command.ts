@@ -21,6 +21,7 @@ import {
 import { none, some, type Option } from "../core/types/option.js";
 import { decideReviewedCompletion } from "../core/workflow/final-review.js";
 import { parseWorktreeAbandonedAt } from "../core/worktrees/worktree-values.js";
+import { retainReviewedCompletion } from "./hindsight-memory.js";
 
 function coordinates(): Option<{
   readonly eventId: TaskClaimReleasedEvent["eventId"];
@@ -33,10 +34,10 @@ function coordinates(): Option<{
     : none;
 }
 
-function runDoneCommand(
+async function runDoneCommand(
   argumentsText: string,
   context: ExtensionCommandContext,
-): void {
+): Promise<void> {
   const taskId = parseTaskId(argumentsText.trim());
   if (!taskId.ok) {
     context.ui.notify("Usage: /tiber:done <task-id>", "info");
@@ -66,6 +67,7 @@ function runDoneCommand(
   const specificationDigest = task.specificationDigest.value;
   const sourceSnapshotDigest =
     task.finalReviewProgress.value.sourceSnapshotDigest;
+  const deliveredRevision = task.delivery.value.commit;
   const claimId =
     task.claim.kind === "some"
       ? task.claim.value.claimId
@@ -189,6 +191,14 @@ function runDoneCommand(
     context.ui.notify("TIBER_DONE_RECEIPT_NOT_PUBLISHED", "error");
     return;
   }
+  const memory = await retainReviewedCompletion(context.cwd, {
+    taskId: taskId.value,
+    specificationDigest,
+    sourceSnapshotDigest,
+    deliveredRevision,
+  });
+  if (memory === "failed")
+    context.ui.notify("TIBER_HINDSIGHT_COMPLETION_RETAIN_FAILED", "warning");
   context.ui.notify("TIBER_TASK_DONE", "info");
 }
 
@@ -196,6 +206,5 @@ export function handleDoneCommand(
   argumentsText: string,
   context: ExtensionCommandContext,
 ): Promise<void> {
-  runDoneCommand(argumentsText, context);
-  return Promise.resolve();
+  return runDoneCommand(argumentsText, context);
 }

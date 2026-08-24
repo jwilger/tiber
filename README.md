@@ -162,6 +162,16 @@ the service credential. Direct bounded HTTP is used—never an MCP bridge.
 Responses carry library/version, endpoint, digest, and cache provenance, while
 oversized documentation is exposed through Tiber's artifact tools.
 
+Optional Hindsight memory uses direct HTTP rather than an SDK or MCP bridge.
+Set `TIBER_HINDSIGHT_ENDPOINT` to an HTTPS service (or exact loopback test
+service), then independently enable `TIBER_HINDSIGHT_{GLOBAL,PRIVATE,SHARED}_{RECALL,RETAIN}`
+with the value `enabled`. Shared access additionally requires
+`TIBER_HINDSIGHT_SHARED_BANK`; `HINDSIGHT_API_KEY` is optional credential
+material. Banks remain separate, initial recall happens at most once with a hard
+budget, later recall is explicit, and only host-observed reviewed completions
+can reach shared memory. Raw output, source, diffs, and detected secrets are
+excluded from retention.
+
 Tiber follows normal Pi conversation without requiring users to memorize
 workflow commands. The active `tiber_workflow_request` tool lets Pi request a
 typed task or campaign operation inferred from ordinary intent. Tiber injects
