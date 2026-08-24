@@ -290,12 +290,20 @@ to every worktree; only a recorded causal diagnosis followed by terminal success
 for the exact failed revision releases that hold. CI success is also published
 as a signed task event and never inferred from a Git delivery receipt.
 
+The generic review-service port separates pull-request creation, review
+observation, CI observation, and merge authority. GitHub implements each as a
+thin direct HTTP adapter with a distinct credential capability. Review receipts
+bind the PR, delivered head revision, current approvals, complete resolved
+conversation set, exact-SHA checks, author permission, auto-merge disposition,
+and observed merge state.
+
 The Tiber repository requires PRs, linear squash history, Conventional
 Commit-compatible titles, resolved conversations, and an aggregate full-CI
-check. An authorized ordinary PR author may enable auto-merge after all gates.
-Release-please maintains a release PR that Tiber never auto-merges. Human merge
-is the publication boundary; tag, GitHub Release, and npm OIDC/provenance
-publication follow automatically.
+check. An authorized ordinary PR author may enable squash auto-merge only after
+all exact gates; missing permission leaves the PR open. Release-please branch or
+title identity deterministically classifies a release PR, which Tiber never
+auto-merges. Human merge is the publication boundary; tag, GitHub Release, and
+npm OIDC/provenance publication follow automatically.
 
 Local hooks remain fast: formatting, strict lint, incremental type checking,
 fast unit tests, and commit-message validation. There is no heavy pre-push

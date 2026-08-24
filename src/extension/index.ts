@@ -34,6 +34,7 @@ import { registerCommandTools } from "./command-tools.js";
 import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
 import { handleRedCommand } from "./red-command.js";
+import { handleReviewCommand } from "./review-command.js";
 import { handleSettingsCommand } from "./settings-command.js";
 import { registerTaskCommands } from "./task-commands.js";
 import { handleWorkCommand } from "./work-command.js";
@@ -105,6 +106,11 @@ export default function registerTiber(pi: ExtensionAPI): void {
     description:
       "Observe exact GREEN, run fresh review, and preserve a signed increment",
     handler: handleGreenCommand,
+  });
+
+  pi.registerCommand("tiber:review", {
+    description: "Open and observe an exact review-service delivery",
+    handler: handleReviewCommand,
   });
 
   pi.registerCommand("tiber:red", {

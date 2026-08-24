@@ -141,9 +141,24 @@ terminal `failure` creates a repository-wide delivery hold shared by all
 worktrees. After causal repair and a successful exact-revision rerun,
 `/tiber:ci <task-id> --recover <causal-diagnosis>` records recovery evidence and
 releases the hold. CI receipts remain separate from Git delivery receipts.
+For review-mode delivery, `/tiber:review open <task-id> <owner/repository>
+<base> <title> -- <body>` creates the exact pull request through the first-party
+GitHub HTTP adapter. `/tiber:review observe <task-id>` independently observes
+reviews, resolved conversations, exact-SHA check runs, author merge permission,
+and merge state. The four operations use separate
+`TIBER_GITHUB_PR_TOKEN`, `TIBER_GITHUB_REVIEW_TOKEN`,
+`TIBER_GITHUB_CI_TOKEN`, and `TIBER_GITHUB_MERGE_TOKEN` capabilities. An
+ordinary PR gets squash auto-merge only after approval, resolved conversations,
+all checks, and author permission. Missing permission leaves it open. A
+release-please branch or release title is always held for explicit human merge;
+Tiber never enables its auto-merge. Signed task events retain the exact PR,
+gates, disposition, and observed merge.
+
 Only after an exact delivery and its complete CI receipt may
 `/tiber:done <task-id>` terminate that claim's processes, release the claim,
 preserve dirty source privately, remove its owned worktree, and publish Done.
+Review-mode tasks additionally require the exact pull request to be observed as
+merged.
 
 ## Status and architecture
 
