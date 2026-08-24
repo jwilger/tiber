@@ -3,8 +3,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { some } from "../../core/types/option.js";
 import {
   foldTaskEvents,
+  taskBoardFailure,
   parseTaskEvent,
   type TaskBoard,
   type TaskEvent,
@@ -20,8 +22,12 @@ function git(cwd: string, args: readonly string[]): string {
   }).trim();
 }
 
-function degraded(failure: string): TaskBoard {
-  return { mode: "degraded-read-only", tasks: [], failure };
+function degraded(message: string): TaskBoard {
+  return {
+    mode: "degraded-read-only",
+    tasks: [],
+    failure: some(taskBoardFailure("task-history-verification", message)),
+  };
 }
 
 function copySigningConfiguration(source: string, target: string): void {
@@ -80,9 +86,9 @@ function verifiedEvents(repository: string): TaskEvent[] | undefined {
       const text = git(repository, ["show", `${commit}:${changed[0] ?? ""}`]);
       const parsed: unknown = JSON.parse(text);
       const event = parseTaskEvent(parsed);
-      if (event === undefined || `events/${event.eventId}.json` !== changed[0])
+      if (!event.ok || `events/${event.value.eventId}.json` !== changed[0])
         return undefined;
-      events.push(event);
+      events.push(event.value);
     } catch {
       return undefined;
     }

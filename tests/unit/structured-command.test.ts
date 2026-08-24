@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import { none, some } from "../../src/core/types/option.js";
+import { expectedOperationalFailure } from "../fixtures/failures.js";
+import {
+  commandCatalogDigest,
+  commandName,
+} from "../fixtures/command-values.js";
+
 import {
   compileCommandCatalog,
   decideCommandExecution,
@@ -130,28 +137,52 @@ describe("structured command authority", () => {
     if (!result.ok) expect(result.failure.message.length).toBeGreaterThan(0);
   });
 
+  it("returns a complete catalog parse failure", () => {
+    expect(compileCommandCatalog(null)).toEqual({
+      ok: false,
+      failure: expectedOperationalFailure(
+        "TIBER_COMMAND_CATALOG_INVALID",
+        "command-catalog",
+        "command catalog must contain 1 to 64 closed command definitions",
+        "retry-after-input",
+      ),
+    });
+  });
+
   it("requires an exact local catalog digest grant and active claim", () => {
     const compiled = compileCommandCatalog(catalog);
     if (!compiled.ok) throw new Error("fixture must compile");
     expect(
-      decideCommandExecution(compiled.value, "unit-tests", {
-        activeClaim: true,
-        grantedCatalogDigest: compiled.value.digest,
+      decideCommandExecution(compiled.value, commandName("unit-tests"), {
+        claimStatus: "published",
+        grantedCatalogDigest: some(compiled.value.digest),
       }),
     ).toEqual({ ok: true, command: compiled.value.commands[0] });
     for (const authority of [
-      { activeClaim: false, grantedCatalogDigest: compiled.value.digest },
-      { activeClaim: true, grantedCatalogDigest: undefined },
-      { activeClaim: true, grantedCatalogDigest: `sha256:${"f".repeat(64)}` },
-    ]) {
+      {
+        claimStatus: "absent",
+        grantedCatalogDigest: some(compiled.value.digest),
+      },
+      { claimStatus: "published", grantedCatalogDigest: none },
+      {
+        claimStatus: "published",
+        grantedCatalogDigest: some(
+          commandCatalogDigest(`sha256:${"f".repeat(64)}`),
+        ),
+      },
+    ] as const) {
       expect(
-        decideCommandExecution(compiled.value, "unit-tests", authority),
+        decideCommandExecution(
+          compiled.value,
+          commandName("unit-tests"),
+          authority,
+        ),
       ).toEqual({ ok: false, code: "TIBER_COMMAND_DENIED" });
     }
     expect(
-      decideCommandExecution(compiled.value, "unknown", {
-        activeClaim: true,
-        grantedCatalogDigest: compiled.value.digest,
+      decideCommandExecution(compiled.value, commandName("unknown"), {
+        claimStatus: "published",
+        grantedCatalogDigest: some(compiled.value.digest),
       }),
     ).toEqual({ ok: false, code: "TIBER_COMMAND_UNKNOWN" });
   });

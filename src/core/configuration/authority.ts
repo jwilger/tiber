@@ -1,42 +1,49 @@
+import { none, some, type Option } from "../types/option.js";
+import {
+  parseSecretEnvironmentVariableName,
+  parseSecretReferenceName,
+  type AuthorityUnlockConfirmation,
+  type SecretEnvironmentVariableName,
+  type SecretReferenceName,
+} from "./configuration-values.js";
 import {
   ASSURANCE_LEVELS,
+  settingsFailure,
   type AssuranceLevel,
   type SettingsResult,
 } from "./settings.js";
 
 export interface SecretReference {
   readonly provider: "environment";
-  readonly name: string;
+  readonly name: SecretEnvironmentVariableName;
 }
 
 export interface AuthorityDocument {
   readonly schemaVersion: 1;
   readonly ceilings: {
-    readonly minimumAssuranceLevel?: AssuranceLevel;
+    readonly minimumAssuranceLevel: Option<AssuranceLevel>;
   };
-  readonly secretReferences: Readonly<Record<string, SecretReference>>;
+  readonly secretReferences: Readonly<
+    Record<SecretReferenceName, SecretReference>
+  >;
 }
 
 export interface AssuranceDecision {
   readonly requested: AssuranceLevel;
   readonly effective: AssuranceLevel;
-  readonly conflict?: string;
+  readonly conflict: Option<string>;
 }
 
 export const EMPTY_AUTHORITY: AuthorityDocument = {
   schemaVersion: 1,
-  ceilings: {},
+  ceilings: { minimumAssuranceLevel: none },
   secretReferences: {},
 };
 
 function failure(message: string): SettingsResult<never> {
   return {
     ok: false,
-    failure: {
-      code: "TIBER_SETTINGS_INVALID_DOCUMENT",
-      message,
-      retryable: false,
-    },
+    failure: settingsFailure("TIBER_SETTINGS_INVALID_DOCUMENT", message),
   };
 }
 
@@ -53,11 +60,8 @@ function parseSecretReference(value: unknown): SecretReference | undefined {
   if (!isRecord(value) || value.provider !== "environment") {
     return undefined;
   }
-  // Stryker disable next-line ConditionalExpression: JSON non-strings are string-coerced by RegExp.test and none can satisfy the uppercase environment-name grammar; the explicit guard narrows the semantic result.
-  return typeof value.name === "string" &&
-    /^[A-Z][A-Z0-9_]{0,127}$/u.test(value.name)
-    ? { provider: "environment", name: value.name }
-    : undefined;
+  const name = parseSecretEnvironmentVariableName(value.name);
+  return name.ok ? { provider: "environment", name: name.value } : undefined;
 }
 
 export function parseAuthorityDocument(
@@ -80,24 +84,24 @@ export function parseAuthorityDocument(
     return failure("minimum assurance ceiling is invalid");
   }
 
-  const secretReferences: Record<string, SecretReference> = {};
+  const secretReferences: Record<SecretReferenceName, SecretReference> = {};
   for (const [key, value] of Object.entries(input.secretReferences)) {
-    if (!/^[a-z][a-z0-9-]{0,63}$/u.test(key)) {
+    const parsedKey = parseSecretReferenceName(key);
+    if (!parsedKey.ok) {
       return failure(`secret reference key is invalid: ${key}`);
     }
     const parsed = parseSecretReference(value);
     if (parsed === undefined) {
       return failure(`secret reference is invalid: ${key}`);
     }
-    secretReferences[key] = parsed;
+    secretReferences[parsedKey.value] = parsed;
   }
 
   const minimumAssuranceLevel = input.ceilings.minimumAssuranceLevel;
-  const ceilings: AuthorityDocument["ceilings"] =
-    // Stryker disable next-line ConditionalExpression: an own property whose value is undefined is omitted by JSON serialization and is semantically identical to absence under exact-optional consumers; the branch keeps the in-memory representation canonical.
-    minimumAssuranceLevel === undefined
-      ? {}
-      : { minimumAssuranceLevel: minimumAssuranceLevel };
+  const ceilings: AuthorityDocument["ceilings"] = {
+    minimumAssuranceLevel:
+      minimumAssuranceLevel === undefined ? none : some(minimumAssuranceLevel),
+  };
   return {
     ok: true,
     value: {
@@ -110,21 +114,23 @@ export function parseAuthorityDocument(
 
 export function applyAssuranceCeiling(
   requested: AssuranceLevel,
-  minimum: AssuranceLevel | undefined,
+  minimum: Option<AssuranceLevel>,
 ): AssuranceDecision {
-  // Stryker disable next-line ConditionalExpression, BlockStatement: undefined has rank -1, so the general ranking branch returns this same value; the early return documents and avoids relying on that array sentinel.
-  if (minimum === undefined) {
-    return { requested, effective: requested };
+  // Stryker disable next-line ConditionalExpression, BlockStatement, StringLiteral: none has no value and therefore rank -1, so the general ranking branch returns this same value; the early return documents the Option rail.
+  if (minimum.kind === "none") {
+    return { requested, effective: requested, conflict: none };
   }
   const requestedRank = ASSURANCE_LEVELS.indexOf(requested);
-  const minimumRank = ASSURANCE_LEVELS.indexOf(minimum);
+  const minimumRank = ASSURANCE_LEVELS.indexOf(minimum.value);
   if (requestedRank >= minimumRank) {
-    return { requested, effective: requested };
+    return { requested, effective: requested, conflict: none };
   }
   return {
     requested,
-    effective: minimum,
-    conflict: `project requested ${requested}, but the user-global ceiling requires ${minimum} or stronger`,
+    effective: minimum.value,
+    conflict: some(
+      `project requested ${requested}, but the user-global ceiling requires ${minimum.value} or stronger`,
+    ),
   };
 }
 
@@ -134,58 +140,60 @@ export function lockMinimumAssurance(
 ): AuthorityDocument {
   return {
     ...current,
-    ceilings: { minimumAssuranceLevel: level },
+    ceilings: { minimumAssuranceLevel: some(level) },
   };
 }
 
 export function unlockMinimumAssurance(
   current: AuthorityDocument,
-  confirmation: string,
+  confirmation: AuthorityUnlockConfirmation,
 ): SettingsResult<AuthorityDocument> {
   const locked = current.ceilings.minimumAssuranceLevel;
-  if (locked === undefined) {
+  if (locked.kind === "none") {
     return { ok: true, value: current };
   }
-  const expected = `unlock minimumAssuranceLevel=${locked}`;
+  const expected = `unlock minimumAssuranceLevel=${locked.value}`;
   if (confirmation !== expected) {
     return {
       ok: false,
-      failure: {
-        code: "TIBER_SETTINGS_INVALID_VALUE",
-        message: `unlock requires exact confirmation: ${expected}`,
-        retryable: false,
-      },
+      failure: settingsFailure(
+        "TIBER_SETTINGS_INVALID_VALUE",
+        `unlock requires exact confirmation: ${expected}`,
+      ),
     };
   }
-  return { ok: true, value: { ...current, ceilings: {} } };
+  return {
+    ok: true,
+    value: { ...current, ceilings: { minimumAssuranceLevel: none } },
+  };
 }
 
 export function setSecretReference(
   current: AuthorityDocument,
-  key: string,
-  environmentName: string | undefined,
+  key: SecretReferenceName,
+  environmentName: Option<SecretEnvironmentVariableName>,
 ): SettingsResult<AuthorityDocument> {
-  if (!/^[a-z][a-z0-9-]{0,63}$/u.test(key)) {
-    return failure(`secret reference key is invalid: ${key}`);
+  if (environmentName.kind === "none") {
+    const secretReferences = Object.fromEntries(
+      Object.entries(current.secretReferences).filter(
+        ([candidate]) => candidate !== key,
+      ),
+    );
+    return { ok: true, value: { ...current, secretReferences } };
   }
-  if (
-    environmentName !== undefined &&
-    !/^[A-Z][A-Z0-9_]{0,127}$/u.test(environmentName)
-  ) {
-    return failure(`environment variable name is invalid: ${environmentName}`);
-  }
-  const secretReferences: Readonly<Record<string, SecretReference>> =
-    environmentName === undefined
-      ? Object.fromEntries(
-          Object.entries(current.secretReferences).filter(
-            ([existingKey]) => existingKey !== key,
-          ),
-        )
-      : {
-          ...current.secretReferences,
-          [key]: { provider: "environment", name: environmentName },
-        };
-  return { ok: true, value: { ...current, secretReferences } };
+  return {
+    ok: true,
+    value: {
+      ...current,
+      secretReferences: {
+        ...current.secretReferences,
+        [key]: {
+          provider: "environment",
+          name: environmentName.value,
+        },
+      },
+    },
+  };
 }
 
 export function formatAuthority(
@@ -201,11 +209,11 @@ export function formatAuthority(
     .map(([key, reference]) => `${key}=environment:${reference.name}`)
     .join(", ");
   return [
-    `Minimum assurance lock: ${authority.ceilings.minimumAssuranceLevel ?? "unlocked"}`,
+    `Minimum assurance lock: ${authority.ceilings.minimumAssuranceLevel.kind === "none" ? "unlocked" : authority.ceilings.minimumAssuranceLevel.value}`,
     `Assurance after ceiling: ${decision.effective}`,
-    ...(decision.conflict === undefined
+    ...(decision.conflict.kind === "none"
       ? []
-      : [`Conflict: ${decision.conflict}`]),
+      : [`Conflict: ${decision.conflict.value}`]),
     `Secret references: ${references || "none"}`,
   ].join("\n");
 }

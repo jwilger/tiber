@@ -5,43 +5,70 @@ import {
   digestTaskSpecification,
   parseTaskSpecification,
   type ReadinessReview,
-  type TaskSpecification,
 } from "../../src/core/tasks/readiness.js";
+import {
+  parseSpecificationDigest,
+  parseSpecificationReviewFindingCount,
+} from "../../src/core/tasks/task-values.js";
+import { expectedSpecificationParseFailure } from "../fixtures/failures.js";
+import {
+  requireTaskSpecification,
+  validTaskSpecificationDocument,
+} from "../fixtures/task-specification.js";
 
-const baseScenario = {
-  name: "clean review",
-  given: ["a complete canonical specification"],
-  when: ["a fresh reviewer finds no issues"],
-  then: ["the task enters Ready"],
-} as const;
+const specification = requireTaskSpecification(validTaskSpecificationDocument);
+const digest = digestTaskSpecification(specification);
 
-const specification = {
-  outcome: "A shared task can enter Ready only after independent review",
-  scenarios: [baseScenario],
-  acceptanceCriteria: ["Ready is shared"],
-  exclusions: ["No automatic priority changes"],
-  dependencies: [],
-  testMappings: ["tests/acceptance/readiness.test.ts"],
-  architectureImplications:
-    "The review is advisory input to deterministic authority.",
-} as const satisfies TaskSpecification;
+function findingCount(value: number) {
+  const parsed = parseSpecificationReviewFindingCount(value);
+  if (!parsed.ok) throw new Error("invalid finding count fixture");
+  return parsed.value;
+}
+
+function specificationDigest(value: string) {
+  const parsed = parseSpecificationDigest(value);
+  if (!parsed.ok) throw new Error("invalid digest fixture");
+  return parsed.value;
+}
 
 const review: ReadinessReview = {
-  freshContext: true,
+  contextFreshness: "fresh",
   reviewerRole: "specification-reviewer",
-  findingCount: 0,
-  reviewedSpecificationDigest: "sha256:spec",
+  findingCount: findingCount(0),
+  reviewedSpecificationDigest: digest,
 };
 
 describe("specification parsing", () => {
   it("computes a byte-stable canonical digest", () => {
-    expect(digestTaskSpecification(specification)).toBe(
+    expect(digest).toBe(
       "sha256:6643ae23a72c68821650a8b0e91f4296b17fe86741bb6aa34cac4186085ff558",
     );
   });
 
   it("parses a complete structured specification", () => {
-    expect(parseTaskSpecification(specification)).toEqual(specification);
+    expect(parseTaskSpecification(validTaskSpecificationDocument)).toEqual({
+      ok: true,
+      value: validTaskSpecificationDocument,
+    });
+  });
+
+  it("rejects each malformed scenario component independently", () => {
+    for (const scenario of [
+      null,
+      { ...validTaskSpecificationDocument.scenarios[0], given: "not-an-array" },
+      { ...validTaskSpecificationDocument.scenarios[0], when: "not-an-array" },
+      { ...validTaskSpecificationDocument.scenarios[0], then: "not-an-array" },
+    ]) {
+      expect(
+        parseTaskSpecification({
+          ...validTaskSpecificationDocument,
+          scenarios: [scenario],
+        }),
+      ).toEqual({
+        ok: false,
+        failure: expectedSpecificationParseFailure(),
+      });
+    }
   });
 
   it.each([
@@ -49,174 +76,88 @@ describe("specification parsing", () => {
     [],
     "specification",
     {},
-    { ...specification, outcome: 1 },
-    { ...specification, scenarios: null },
-    { ...specification, acceptanceCriteria: null },
-    { ...specification, acceptanceCriteria: [1] },
-    { ...specification, exclusions: null },
-    { ...specification, exclusions: [1] },
-    { ...specification, dependencies: null },
-    { ...specification, dependencies: [1] },
-    { ...specification, testMappings: null },
-    { ...specification, testMappings: [1] },
-    { ...specification, architectureImplications: 1 },
-    { ...specification, scenarios: [null] },
+    { ...validTaskSpecificationDocument, outcome: 1 },
+    { ...validTaskSpecificationDocument, outcome: "" },
+    { ...validTaskSpecificationDocument, scenarios: null },
+    { ...validTaskSpecificationDocument, scenarios: [] },
+    { ...validTaskSpecificationDocument, acceptanceCriteria: null },
+    { ...validTaskSpecificationDocument, acceptanceCriteria: [1] },
+    { ...validTaskSpecificationDocument, acceptanceCriteria: [] },
+    { ...validTaskSpecificationDocument, exclusions: null },
+    { ...validTaskSpecificationDocument, exclusions: [1] },
+    { ...validTaskSpecificationDocument, exclusions: [] },
+    { ...validTaskSpecificationDocument, dependencies: null },
+    { ...validTaskSpecificationDocument, dependencies: [1] },
+    { ...validTaskSpecificationDocument, testMappings: null },
+    { ...validTaskSpecificationDocument, testMappings: [1] },
+    { ...validTaskSpecificationDocument, testMappings: [] },
+    { ...validTaskSpecificationDocument, architectureImplications: null },
+    { ...validTaskSpecificationDocument, architectureImplications: "" },
     {
-      ...specification,
-      scenarios: [{ ...specification.scenarios[0], name: 1 }],
+      ...validTaskSpecificationDocument,
+      scenarios: [
+        { name: "", given: ["given"], when: ["when"], then: ["then"] },
+      ],
     },
     {
-      ...specification,
-      scenarios: [{ ...specification.scenarios[0], given: null }],
+      ...validTaskSpecificationDocument,
+      scenarios: [
+        { name: "scenario", given: [], when: ["when"], then: ["then"] },
+      ],
     },
     {
-      ...specification,
-      scenarios: [{ ...specification.scenarios[0], given: [1] }],
+      ...validTaskSpecificationDocument,
+      scenarios: [
+        { name: "scenario", given: ["given"], when: [], then: ["then"] },
+      ],
     },
     {
-      ...specification,
-      scenarios: [{ ...specification.scenarios[0], when: null }],
+      ...validTaskSpecificationDocument,
+      scenarios: [
+        { name: "scenario", given: ["given"], when: ["when"], then: [] },
+      ],
     },
-    {
-      ...specification,
-      scenarios: [{ ...specification.scenarios[0], when: [1] }],
-    },
-    {
-      ...specification,
-      scenarios: [{ ...specification.scenarios[0], then: null }],
-    },
-    {
-      ...specification,
-      scenarios: [{ ...specification.scenarios[0], then: [1] }],
-    },
-  ])("rejects malformed specification %j", (candidate) => {
-    expect(parseTaskSpecification(candidate)).toBeUndefined();
+  ])("rejects malformed or incomplete specification", (candidate) => {
+    expect(parseTaskSpecification(candidate)).toEqual({
+      ok: false,
+      failure: expectedSpecificationParseFailure(),
+    });
   });
 });
 
 describe("specification readiness", () => {
   it("accepts a complete specification with a clean fresh exact review", () => {
-    expect(decideReadiness(specification, "sha256:spec", review)).toEqual({
-      ready: true,
+    expect(decideReadiness(digest, review)).toEqual({
+      status: "ready",
       code: "TIBER_SPECIFICATION_READY",
       reasons: [],
     });
   });
 
   it.each([
-    [{ ...specification, outcome: "" }, review, "outcome is missing"],
-    [{ ...specification, outcome: "   " }, review, "outcome is missing"],
-    [{ ...specification, scenarios: [] }, review, "scenarios are missing"],
     [
-      {
-        ...specification,
-        scenarios: [{ ...specification.scenarios[0], name: "" }],
-      },
-      review,
-      "a scenario is structurally incomplete",
-    ],
-    [
-      {
-        ...specification,
-        scenarios: [{ ...specification.scenarios[0], name: "   " }],
-      },
-      review,
-      "a scenario is structurally incomplete",
-    ],
-    [
-      {
-        ...specification,
-        scenarios: [baseScenario, { ...baseScenario, then: [] }],
-      },
-      review,
-      "a scenario is structurally incomplete",
-    ],
-    [
-      {
-        ...specification,
-        scenarios: [{ ...specification.scenarios[0], given: [] }],
-      },
-      review,
-      "a scenario is structurally incomplete",
-    ],
-    [
-      {
-        ...specification,
-        scenarios: [{ ...specification.scenarios[0], when: [] }],
-      },
-      review,
-      "a scenario is structurally incomplete",
-    ],
-    [
-      {
-        ...specification,
-        scenarios: [{ ...specification.scenarios[0], then: [] }],
-      },
-      review,
-      "a scenario is structurally incomplete",
-    ],
-    [
-      { ...specification, acceptanceCriteria: [] },
-      review,
-      "acceptance criteria are missing",
-    ],
-    [{ ...specification, exclusions: [] }, review, "exclusions are missing"],
-    [
-      { ...specification, testMappings: [] },
-      review,
-      "test mappings are missing",
-    ],
-    [
-      { ...specification, architectureImplications: "" },
-      review,
-      "architecture implications are missing",
-    ],
-    [
-      { ...specification, architectureImplications: "   " },
-      review,
-      "architecture implications are missing",
-    ],
-    [
-      specification,
-      { ...review, freshContext: false },
+      { ...review, contextFreshness: "stale" },
       "review did not use fresh context",
     ],
     [
-      specification,
-      { ...review, findingCount: 1 },
+      { ...review, findingCount: findingCount(1) },
       "review has unresolved findings",
     ],
     [
-      specification,
-      { ...review, reviewedSpecificationDigest: "old" },
+      {
+        ...review,
+        reviewedSpecificationDigest: specificationDigest(
+          `sha256:${"f".repeat(64)}`,
+        ),
+      },
       "review is stale",
     ],
-  ] as const)(
-    "denies incomplete or adverse readiness",
-    (candidate, candidateReview, reason) => {
-      const decision = decideReadiness(
-        candidate,
-        "sha256:spec",
-        candidateReview,
-      );
-      expect(decision.ready).toBe(false);
-      expect(decision.code).toBe("TIBER_SPECIFICATION_NOT_READY");
-      expect(decision.reasons).toContain(reason);
-    },
-  );
-
-  it("rejects structurally incomplete Gherkin", () => {
-    expect(
-      decideReadiness(
-        {
-          ...specification,
-          scenarios: [
-            { name: "bad", given: [], when: ["when"], then: ["then"] },
-          ],
-        },
-        "sha256:spec",
-        review,
-      ).reasons,
-    ).toContain("a scenario is structurally incomplete");
+  ] as const)("denies an adverse review", (candidateReview, reason) => {
+    const decision = decideReadiness(digest, candidateReview);
+    expect(decision).toEqual({
+      status: "not-ready",
+      code: "TIBER_SPECIFICATION_NOT_READY",
+      reasons: [reason],
+    });
   });
 });

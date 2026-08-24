@@ -31,7 +31,9 @@ export async function handleCommandGrant(
     "Grant exact project commands",
     `${catalog.value.canonicalJson}\n\nType: ${phrase}`,
   );
-  if (confirmation !== phrase || !authority.grant(catalog.value.digest)) {
+  const grant =
+    confirmation === phrase ? authority.grant(catalog.value.digest) : undefined;
+  if (grant?.ok !== true) {
     context.ui.notify(
       "TIBER_COMMAND_GRANT_DENIED: exact grant was not persisted",
       "error",

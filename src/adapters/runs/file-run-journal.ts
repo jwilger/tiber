@@ -8,32 +8,90 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
+import {
+  operationalFailure,
+  type TiberFailure,
+  type TiberResult,
+} from "../../core/failures/tiber-failure.js";
+import {
+  parseClaimBaselineRevision,
+  parseScenarioName,
+  parseTaskClaimId,
+  parseTestMappingPath,
+  type ClaimBaselineRevision,
+  type ScenarioName,
+  type TaskClaimId,
+  type TaskId,
+  type TestMappingPath,
+} from "../../core/tasks/task-values.js";
+import { none, some, type Option } from "../../core/types/option.js";
+import {
+  parseCompiledWorkflowDigest,
+  parseRedDiagnosticDigest,
+  type CompiledWorkflowDigest,
+  type RedDiagnosticDigest,
+} from "../../core/workflow/workflow-values.js";
+import {
+  parseOwnedWorktreePath,
+  type OwnedWorktreePath,
+} from "../../core/worktrees/worktree-values.js";
+
 export interface RunJournalRecord {
   readonly schemaVersion: 1;
-  readonly taskId: string;
-  readonly claimId: string;
-  readonly baselineRevision: string;
-  readonly workflowDigest: string;
+  readonly taskId: TaskId;
+  readonly claimId: TaskClaimId;
+  readonly baselineRevision: ClaimBaselineRevision;
+  readonly workflowDigest: CompiledWorkflowDigest;
   readonly state:
     | "claim-intent"
     | "active"
     | "blocked-baseline-drift"
     | "blocked-worktree"
     | "red-accepted";
-  readonly worktreePath?: string;
-  readonly redReceipt?: {
-    readonly scenarioName: string;
-    readonly testMapping: string;
-    readonly diagnosticDigest: string;
+  readonly worktreePath: Option<OwnedWorktreePath>;
+  readonly redReceipt: Option<{
+    readonly scenarioName: ScenarioName;
+    readonly testMapping: TestMappingPath;
+    readonly diagnosticDigest: RedDiagnosticDigest;
     readonly missingPublicSurface: boolean;
+  }>;
+}
+
+type RunJournalFailure = TiberFailure<
+  "TIBER_RUN_JOURNAL_INVALID" | "TIBER_RUN_JOURNAL_IO",
+  { readonly domain: "run-journal" },
+  "corrected-input" | "state-change" | "retry-operation"
+>;
+type RunJournalResult<Value> = TiberResult<Value, RunJournalFailure>;
+
+function failure(
+  code: RunJournalFailure["code"],
+  message: string,
+): RunJournalResult<never> {
+  return {
+    ok: false,
+    failure: operationalFailure(
+      code,
+      "run-journal",
+      message,
+      code === "TIBER_RUN_JOURNAL_IO" ? "transient" : "retry-after-input",
+    ),
   };
+}
+
+function errorCode(error: unknown): Option<string> {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? some(error.code)
+    : none;
 }
 
 export class FileRunJournal {
   public constructor(private readonly agentDirectory: string) {}
 
-  public read(taskId: string): RunJournalRecord | undefined {
-    if (!/^[0-9a-f-]{36}$/u.test(taskId)) return undefined;
+  public read(taskId: TaskId): RunJournalResult<Option<RunJournalRecord>> {
     try {
       const value: unknown = JSON.parse(
         readFileSync(
@@ -50,11 +108,8 @@ export class FileRunJournal {
         !("taskId" in value) ||
         value.taskId !== taskId ||
         !("claimId" in value) ||
-        typeof value.claimId !== "string" ||
         !("baselineRevision" in value) ||
-        typeof value.baselineRevision !== "string" ||
         !("workflowDigest" in value) ||
-        typeof value.workflowDigest !== "string" ||
         !("state" in value) ||
         (value.state !== "claim-intent" &&
           value.state !== "active" &&
@@ -62,49 +117,84 @@ export class FileRunJournal {
           value.state !== "blocked-worktree" &&
           value.state !== "red-accepted")
       )
-        return undefined;
-      const worktreePath =
-        "worktreePath" in value && typeof value.worktreePath === "string"
-          ? value.worktreePath
+        return failure(
+          "TIBER_RUN_JOURNAL_INVALID",
+          "run journal has an invalid document shape",
+        );
+      const claimId = parseTaskClaimId(value.claimId);
+      const baselineRevision = parseClaimBaselineRevision(
+        value.baselineRevision,
+      );
+      const workflowDigest = parseCompiledWorkflowDigest(value.workflowDigest);
+      if (!claimId.ok || !baselineRevision.ok || !workflowDigest.ok)
+        return failure(
+          "TIBER_RUN_JOURNAL_INVALID",
+          "run journal authority values are invalid",
+        );
+      const parsedWorktree =
+        "worktreePath" in value
+          ? parseOwnedWorktreePath(value.worktreePath)
           : undefined;
+      if (parsedWorktree !== undefined && !parsedWorktree.ok)
+        return failure(
+          "TIBER_RUN_JOURNAL_INVALID",
+          "run journal worktree path is invalid",
+        );
+      const worktreePath =
+        parsedWorktree?.ok === true ? some(parsedWorktree.value) : none;
       const red = "redReceipt" in value ? value.redReceipt : undefined;
       const redReceipt =
         typeof red === "object" &&
         red !== null &&
         !Array.isArray(red) &&
         "scenarioName" in red &&
-        typeof red.scenarioName === "string" &&
         "testMapping" in red &&
-        typeof red.testMapping === "string" &&
         "diagnosticDigest" in red &&
-        typeof red.diagnosticDigest === "string" &&
         "missingPublicSurface" in red &&
         typeof red.missingPublicSurface === "boolean"
-          ? {
-              scenarioName: red.scenarioName,
-              testMapping: red.testMapping,
-              diagnosticDigest: red.diagnosticDigest,
-              missingPublicSurface: red.missingPublicSurface,
-            }
+          ? (() => {
+              const scenarioName = parseScenarioName(red.scenarioName);
+              const testMapping = parseTestMappingPath(red.testMapping);
+              const diagnosticDigest = parseRedDiagnosticDigest(
+                red.diagnosticDigest,
+              );
+              return scenarioName.ok && testMapping.ok && diagnosticDigest.ok
+                ? {
+                    scenarioName: scenarioName.value,
+                    testMapping: testMapping.value,
+                    diagnosticDigest: diagnosticDigest.value,
+                    missingPublicSurface: red.missingPublicSurface,
+                  }
+                : undefined;
+            })()
           : undefined;
       if (value.state === "red-accepted" && redReceipt === undefined)
-        return undefined;
+        return failure(
+          "TIBER_RUN_JOURNAL_INVALID",
+          "accepted RED run journal omits a valid receipt",
+        );
       return {
-        schemaVersion: 1,
-        taskId,
-        claimId: value.claimId,
-        baselineRevision: value.baselineRevision,
-        workflowDigest: value.workflowDigest,
-        state: value.state,
-        ...(worktreePath === undefined ? {} : { worktreePath }),
-        ...(redReceipt === undefined ? {} : { redReceipt }),
+        ok: true,
+        value: some({
+          schemaVersion: 1,
+          taskId,
+          claimId: claimId.value,
+          baselineRevision: baselineRevision.value,
+          workflowDigest: workflowDigest.value,
+          state: value.state,
+          worktreePath,
+          redReceipt: redReceipt === undefined ? none : some(redReceipt),
+        }),
       };
-    } catch {
-      return undefined;
+    } catch (error) {
+      const code = errorCode(error);
+      return code.kind === "some" && code.value === "ENOENT"
+        ? { ok: true, value: none }
+        : failure("TIBER_RUN_JOURNAL_IO", "run journal could not be read");
     }
   }
 
-  public write(record: RunJournalRecord): boolean {
+  public write(record: RunJournalRecord): RunJournalResult<void> {
     const path = join(
       this.agentDirectory,
       "tiber",
@@ -114,20 +204,37 @@ export class FileRunJournal {
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {
+      const document = {
+        schemaVersion: 1,
+        taskId: record.taskId,
+        claimId: record.claimId,
+        baselineRevision: record.baselineRevision,
+        workflowDigest: record.workflowDigest,
+        state: record.state,
+        ...(record.worktreePath.kind === "some"
+          ? { worktreePath: record.worktreePath.value }
+          : {}),
+        ...(record.redReceipt.kind === "some"
+          ? { redReceipt: record.redReceipt.value }
+          : {}),
+      };
+      writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, {
         encoding: "utf8",
         mode: 0o600,
         flag: "wx",
       });
       renameSync(temporary, path);
-      return true;
+      return { ok: true, value: undefined };
     } catch {
       try {
         rmSync(temporary, { force: true });
       } catch {
-        return false;
+        return failure(
+          "TIBER_RUN_JOURNAL_IO",
+          "run journal cleanup failed after a write error",
+        );
       }
-      return false;
+      return failure("TIBER_RUN_JOURNAL_IO", "run journal was not durable");
     }
   }
 }

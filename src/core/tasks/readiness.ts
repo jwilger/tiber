@@ -1,76 +1,148 @@
 import { createHash } from "node:crypto";
 
+import type { TiberFailure, TiberResult } from "../failures/tiber-failure.js";
+import type { ReviewContextFreshness } from "../reviews/review-values.js";
+import {
+  parseAcceptanceCriterion,
+  parseArchitectureImplication,
+  parseScenarioGivenStep,
+  parseScenarioName,
+  parseScenarioThenStep,
+  parseScenarioWhenStep,
+  parseSpecificationDependency,
+  parseSpecificationDigest,
+  parseSpecificationExclusion,
+  parseSpecificationOutcome,
+  parseTestMappingPath,
+  type AcceptanceCriterion,
+  type ArchitectureImplication,
+  type ScenarioGivenStep,
+  type ScenarioName,
+  type ScenarioThenStep,
+  type ScenarioWhenStep,
+  type SpecificationDependency,
+  type SpecificationDigest,
+  type SpecificationExclusion,
+  type SpecificationOutcome,
+  type SpecificationReviewFindingCount,
+  type TestMappingPath,
+} from "./task-values.js";
+
 export interface GherkinScenario {
-  readonly name: string;
-  readonly given: readonly string[];
-  readonly when: readonly string[];
-  readonly then: readonly string[];
+  readonly name: ScenarioName;
+  readonly given: readonly ScenarioGivenStep[];
+  readonly when: readonly ScenarioWhenStep[];
+  readonly then: readonly ScenarioThenStep[];
 }
 
 export interface TaskSpecification {
-  readonly outcome: string;
+  readonly outcome: SpecificationOutcome;
   readonly scenarios: readonly GherkinScenario[];
-  readonly acceptanceCriteria: readonly string[];
-  readonly exclusions: readonly string[];
-  readonly dependencies: readonly string[];
-  readonly testMappings: readonly string[];
-  readonly architectureImplications: string;
+  readonly acceptanceCriteria: readonly AcceptanceCriterion[];
+  readonly exclusions: readonly SpecificationExclusion[];
+  readonly dependencies: readonly SpecificationDependency[];
+  readonly testMappings: readonly TestMappingPath[];
+  readonly architectureImplications: ArchitectureImplication;
 }
 
 export interface ReadinessReview {
-  readonly freshContext: boolean;
+  readonly contextFreshness: ReviewContextFreshness;
   readonly reviewerRole: "specification-reviewer";
-  readonly findingCount: number;
-  readonly reviewedSpecificationDigest: string;
+  readonly findingCount: SpecificationReviewFindingCount;
+  readonly reviewedSpecificationDigest: SpecificationDigest;
 }
 
-export interface ReadinessDecision {
-  readonly ready: boolean;
-  readonly code: string;
-  readonly reasons: readonly string[];
-}
+export type ReadinessReason =
+  | "review did not use fresh context"
+  | "review has unresolved findings"
+  | "review is stale";
+export type ReadinessDecision =
+  | {
+      readonly status: "ready";
+      readonly code: "TIBER_SPECIFICATION_READY";
+      readonly reasons: readonly [];
+    }
+  | {
+      readonly status: "not-ready";
+      readonly code: "TIBER_SPECIFICATION_NOT_READY";
+      readonly reasons: readonly ReadinessReason[];
+    };
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   // Stryker disable next-line ConditionalExpression: non-null JSON primitives expose undefined required properties and are rejected by the parser; typeof establishes the TypeScript predicate.
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringArray(value: unknown): readonly string[] | undefined {
-  return Array.isArray(value) && value.every((item) => typeof item === "string")
-    ? value
-    : undefined;
+function semanticArray<Value>(
+  value: unknown,
+  parse: (
+    candidate: unknown,
+  ) => { readonly ok: true; readonly value: Value } | { readonly ok: false },
+): readonly Value[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const parsed: Value[] = [];
+  for (const candidate of value) {
+    const result = parse(candidate);
+    if (!result.ok) return undefined;
+    parsed.push(result.value);
+  }
+  return parsed;
 }
 
-export function parseTaskSpecification(
+function parseTaskSpecificationValue(
   value: unknown,
 ): TaskSpecification | undefined {
   if (!isRecord(value) || !Array.isArray(value.scenarios)) return undefined;
-  const outcome = typeof value.outcome === "string" ? value.outcome : undefined;
-  const acceptanceCriteria = stringArray(value.acceptanceCriteria);
-  const exclusions = stringArray(value.exclusions);
-  const dependencies = stringArray(value.dependencies);
-  const testMappings = stringArray(value.testMappings);
-  const architectureImplications =
-    typeof value.architectureImplications === "string"
-      ? value.architectureImplications
-      : undefined;
+  const outcomeResult = parseSpecificationOutcome(value.outcome);
+  const outcome = outcomeResult.ok ? outcomeResult.value : undefined;
+  const acceptanceCriteria = semanticArray(
+    value.acceptanceCriteria,
+    parseAcceptanceCriterion,
+  );
+  const exclusions = semanticArray(
+    value.exclusions,
+    parseSpecificationExclusion,
+  );
+  const dependencies = semanticArray(
+    value.dependencies,
+    parseSpecificationDependency,
+  );
+  const testMappings = semanticArray(value.testMappings, parseTestMappingPath);
+  const architectureResult = parseArchitectureImplication(
+    value.architectureImplications,
+  );
+  const architectureImplications = architectureResult.ok
+    ? architectureResult.value
+    : undefined;
   const scenarios: GherkinScenario[] = [];
   for (const candidate of value.scenarios) {
-    if (!isRecord(candidate) || typeof candidate.name !== "string")
+    if (!isRecord(candidate)) return undefined;
+    const name = parseScenarioName(candidate.name);
+    const given = semanticArray(candidate.given, parseScenarioGivenStep);
+    const when = semanticArray(candidate.when, parseScenarioWhenStep);
+    const then = semanticArray(candidate.then, parseScenarioThenStep);
+    if (
+      !name.ok ||
+      given === undefined ||
+      given.length === 0 ||
+      when === undefined ||
+      when.length === 0 ||
+      then === undefined ||
+      then.length === 0
+    )
       return undefined;
-    const given = stringArray(candidate.given);
-    const when = stringArray(candidate.when);
-    const then = stringArray(candidate.then);
-    if (given === undefined || when === undefined || then === undefined)
-      return undefined;
-    scenarios.push({ name: candidate.name, given, when, then });
+    scenarios.push({ name: name.value, given, when, then });
   }
   if (
     outcome === undefined ||
+    scenarios.length === 0 ||
     acceptanceCriteria === undefined ||
+    acceptanceCriteria.length === 0 ||
     exclusions === undefined ||
+    exclusions.length === 0 ||
     dependencies === undefined ||
     testMappings === undefined ||
+    testMappings.length === 0 ||
     architectureImplications === undefined
   )
     return undefined;
@@ -85,45 +157,61 @@ export function parseTaskSpecification(
   };
 }
 
+type SpecificationParseFailure = TiberFailure<
+  "TIBER_SPECIFICATION_INVALID",
+  { readonly boundary: "task-specification" },
+  "corrected-specification"
+>;
+
+export function parseTaskSpecification(
+  value: unknown,
+): TiberResult<TaskSpecification, SpecificationParseFailure> {
+  const specification = parseTaskSpecificationValue(value);
+  return specification === undefined
+    ? {
+        ok: false,
+        failure: {
+          code: "TIBER_SPECIFICATION_INVALID",
+          message: "Task specification is malformed or incomplete",
+          safeContext: { boundary: "task-specification" },
+          causes: [],
+          retryability: "retry-after-input",
+          requiredRecoveryEvidence: ["corrected-specification"],
+          redaction: "public",
+        },
+      }
+    : { ok: true, value: specification };
+}
+
 export function digestTaskSpecification(
   specification: TaskSpecification,
-): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify(specification)).digest("hex")}`;
+): SpecificationDigest {
+  const digest = parseSpecificationDigest(
+    `sha256:${createHash("sha256").update(JSON.stringify(specification)).digest("hex")}`,
+  );
+  // Stryker disable next-line ConditionalExpression, BlockStatement: SHA-256 generation always satisfies the purpose-specific digest parser; this is a defect assertion.
+  if (!digest.ok) {
+    // Stryker disable next-line StringLiteral, CallExpression: SHA-256 generation makes this defect throw unreachable in valid execution.
+    throw new Error("generated specification digest violated its invariant");
+  }
+  return digest.value;
 }
 
 export function decideReadiness(
-  specification: TaskSpecification,
-  expectedDigest: string,
+  expectedDigest: SpecificationDigest,
   review: ReadinessReview,
 ): ReadinessDecision {
-  const reasons: string[] = [];
-  if (specification.outcome.trim().length === 0)
-    reasons.push("outcome is missing");
-  if (specification.scenarios.length === 0)
-    reasons.push("scenarios are missing");
-  if (
-    specification.scenarios.some(
-      (scenario) =>
-        scenario.name.trim().length === 0 ||
-        scenario.given.length === 0 ||
-        scenario.when.length === 0 ||
-        scenario.then.length === 0,
-    )
-  )
-    reasons.push("a scenario is structurally incomplete");
-  if (specification.acceptanceCriteria.length === 0)
-    reasons.push("acceptance criteria are missing");
-  if (specification.exclusions.length === 0)
-    reasons.push("exclusions are missing");
-  if (specification.testMappings.length === 0)
-    reasons.push("test mappings are missing");
-  if (specification.architectureImplications.trim().length === 0)
-    reasons.push("architecture implications are missing");
-  if (!review.freshContext) reasons.push("review did not use fresh context");
+  const reasons: ReadinessReason[] = [];
+  if (review.contextFreshness !== "fresh")
+    reasons.push("review did not use fresh context");
   if (review.findingCount !== 0) reasons.push("review has unresolved findings");
   if (review.reviewedSpecificationDigest !== expectedDigest)
     reasons.push("review is stale");
   return reasons.length === 0
-    ? { ready: true, code: "TIBER_SPECIFICATION_READY", reasons: [] }
-    : { ready: false, code: "TIBER_SPECIFICATION_NOT_READY", reasons };
+    ? { status: "ready", code: "TIBER_SPECIFICATION_READY", reasons: [] }
+    : {
+        status: "not-ready",
+        code: "TIBER_SPECIFICATION_NOT_READY",
+        reasons,
+      };
 }

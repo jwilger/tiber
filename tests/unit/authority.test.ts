@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  parseAuthorityUnlockConfirmation,
+  parseSecretEnvironmentVariableName,
+  parseSecretReferenceName,
+} from "../../src/core/configuration/configuration-values.js";
+import { expectedSettingsFailure } from "../fixtures/failures.js";
+import { none, some } from "../../src/core/types/option.js";
+
+import {
   applyAssuranceCeiling,
   EMPTY_AUTHORITY,
   formatAuthority,
@@ -13,18 +21,27 @@ import {
 
 const invalidDocument = (message: string) => ({
   ok: false,
-  failure: {
-    code: "TIBER_SETTINGS_INVALID_DOCUMENT",
-    message,
-    retryable: false,
-  },
+  failure: expectedSettingsFailure("TIBER_SETTINGS_INVALID_DOCUMENT", message),
 });
+
+function authority(value: unknown): AuthorityDocument {
+  const parsed = parseAuthorityDocument(value);
+  if (!parsed.ok) throw new Error("invalid authority fixture");
+  return parsed.value;
+}
+
+function unlockConfirmation(value: string) {
+  const parsed = parseAuthorityUnlockConfirmation(value);
+  if (!parsed.ok) throw new Error("invalid unlock confirmation fixture");
+  return parsed.value;
+}
 
 describe("global authority ceilings", () => {
   it("leaves an unlocked request unchanged", () => {
-    expect(applyAssuranceCeiling("host-trusted", undefined)).toEqual({
+    expect(applyAssuranceCeiling("host-trusted", none)).toEqual({
       requested: "host-trusted",
       effective: "host-trusted",
+      conflict: none,
     });
   });
 
@@ -32,13 +49,14 @@ describe("global authority ceilings", () => {
     expect(
       applyAssuranceCeiling(
         "workspace-isolated",
-        "workspace-and-network-isolated",
+        some("workspace-and-network-isolated"),
       ),
     ).toEqual({
       requested: "workspace-isolated",
       effective: "workspace-and-network-isolated",
-      conflict:
+      conflict: some(
         "project requested workspace-isolated, but the user-global ceiling requires workspace-and-network-isolated or stronger",
+      ),
     });
   });
 
@@ -46,9 +64,10 @@ describe("global authority ceilings", () => {
     ["workspace-and-network-isolated", "workspace-and-network-isolated"],
     ["hermetic", "workspace-and-network-isolated"],
   ] as const)("allows %s under %s", (requested, minimum) => {
-    expect(applyAssuranceCeiling(requested, minimum)).toEqual({
+    expect(applyAssuranceCeiling(requested, some(minimum))).toEqual({
       requested,
       effective: requested,
+      conflict: none,
     });
   });
 
@@ -57,40 +76,58 @@ describe("global authority ceilings", () => {
       EMPTY_AUTHORITY,
       "workspace-and-network-isolated",
     );
-    expect(unlockMinimumAssurance(locked, "yes")).toEqual({
+    expect(unlockMinimumAssurance(locked, unlockConfirmation("yes"))).toEqual({
       ok: false,
-      failure: {
-        code: "TIBER_SETTINGS_INVALID_VALUE",
-        message:
-          "unlock requires exact confirmation: unlock minimumAssuranceLevel=workspace-and-network-isolated",
-        retryable: false,
-      },
+      failure: expectedSettingsFailure(
+        "TIBER_SETTINGS_INVALID_VALUE",
+        "unlock requires exact confirmation: unlock minimumAssuranceLevel=workspace-and-network-isolated",
+      ),
     });
     expect(
       unlockMinimumAssurance(
         locked,
-        "unlock minimumAssuranceLevel=workspace-and-network-isolated",
+        unlockConfirmation(
+          "unlock minimumAssuranceLevel=workspace-and-network-isolated",
+        ),
       ),
     ).toEqual({ ok: true, value: EMPTY_AUTHORITY });
   });
 
   it("treats unlocking an unlocked document as an idempotent no-op", () => {
-    expect(unlockMinimumAssurance(EMPTY_AUTHORITY, "anything")).toEqual({
+    expect(
+      unlockMinimumAssurance(EMPTY_AUTHORITY, unlockConfirmation("anything")),
+    ).toEqual({
       ok: true,
       value: EMPTY_AUTHORITY,
     });
   });
 });
 
+function secretKey(value: string) {
+  const parsed = parseSecretReferenceName(value);
+  if (!parsed.ok) throw new Error("invalid secret key fixture");
+  return parsed.value;
+}
+
+function environmentName(value: string) {
+  const parsed = parseSecretEnvironmentVariableName(value);
+  if (!parsed.ok) throw new Error("invalid environment name fixture");
+  return parsed.value;
+}
+
 describe("secret references", () => {
   it("stores only an external environment reference", () => {
     expect(
-      setSecretReference(EMPTY_AUTHORITY, "context7", "CONTEXT7_API_KEY"),
+      setSecretReference(
+        EMPTY_AUTHORITY,
+        secretKey("context7"),
+        some(environmentName("CONTEXT7_API_KEY")),
+      ),
     ).toEqual({
       ok: true,
       value: {
         schemaVersion: 1,
-        ceilings: {},
+        ceilings: { minimumAssuranceLevel: none },
         secretReferences: {
           context7: { provider: "environment", name: "CONTEXT7_API_KEY" },
         },
@@ -99,48 +136,32 @@ describe("secret references", () => {
   });
 
   it.each([
-    [
-      "Context7",
-      "CONTEXT7_API_KEY",
-      "secret reference key is invalid: Context7",
-    ],
-    [
-      "context7",
-      "actual-secret-value",
-      "environment variable name is invalid: actual-secret-value",
-    ],
-    ["context7", "_LEADING", "environment variable name is invalid: _LEADING"],
-    [
-      "context7",
-      "VALID-bad",
-      "environment variable name is invalid: VALID-bad",
-    ],
-    ["valid_BAD", "VALID", "secret reference key is invalid: valid_BAD"],
-    [
-      "context7",
-      "A".repeat(129),
-      `environment variable name is invalid: ${"A".repeat(129)}`,
-    ],
-  ])("rejects invalid reference %s=%s", (key, name, message) => {
-    expect(setSecretReference(EMPTY_AUTHORITY, key, name)).toEqual(
-      invalidDocument(message),
-    );
+    ["Context7", "CONTEXT7_API_KEY"],
+    ["context7", "actual-secret-value"],
+    ["context7", "_LEADING"],
+    ["context7", "VALID-bad"],
+    ["valid_BAD", "VALID"],
+    ["context7", "A".repeat(129)],
+  ])("rejects invalid reference %s=%s at its boundary", (key, name) => {
+    const parsedKey = parseSecretReferenceName(key);
+    const parsedName = parseSecretEnvironmentVariableName(name);
+    expect(parsedKey.ok && parsedName.ok).toBe(false);
   });
 
   it("removes exactly the selected reference", () => {
-    const current: AuthorityDocument = {
+    const current = authority({
       schemaVersion: 1,
       ceilings: {},
       secretReferences: {
         context7: { provider: "environment", name: "CONTEXT7_API_KEY" },
         hindsight: { provider: "environment", name: "HINDSIGHT_API_KEY" },
       },
-    };
-    expect(setSecretReference(current, "context7", undefined)).toEqual({
+    });
+    expect(setSecretReference(current, secretKey("context7"), none)).toEqual({
       ok: true,
       value: {
         schemaVersion: 1,
-        ceilings: {},
+        ceilings: { minimumAssuranceLevel: none },
         secretReferences: {
           hindsight: { provider: "environment", name: "HINDSIGHT_API_KEY" },
         },
@@ -159,14 +180,20 @@ describe("authority document boundary", () => {
   };
 
   it("parses a complete document into semantic values", () => {
-    expect(parseAuthorityDocument(valid)).toEqual({ ok: true, value: valid });
+    expect(parseAuthorityDocument(valid)).toEqual({
+      ok: true,
+      value: authority(valid),
+    });
   });
 
   it("parses an empty unlocked document without undefined properties", () => {
-    expect(parseAuthorityDocument(EMPTY_AUTHORITY)).toEqual({
-      ok: true,
-      value: EMPTY_AUTHORITY,
-    });
+    expect(
+      parseAuthorityDocument({
+        schemaVersion: 1,
+        ceilings: {},
+        secretReferences: {},
+      }),
+    ).toEqual({ ok: true, value: EMPTY_AUTHORITY });
   });
 
   it.each([
@@ -234,7 +261,7 @@ describe("authority document boundary", () => {
   });
 
   it("renders sorted references and conflict preview without secret values", () => {
-    const authority: AuthorityDocument = {
+    const configuredAuthority = authority({
       schemaVersion: 1,
       ceilings: {
         minimumAssuranceLevel: "workspace-and-network-isolated",
@@ -243,8 +270,8 @@ describe("authority document boundary", () => {
         hindsight: { provider: "environment", name: "HINDSIGHT_API_KEY" },
         context7: { provider: "environment", name: "CONTEXT7_API_KEY" },
       },
-    };
-    expect(formatAuthority(authority, "host-trusted")).toBe(
+    });
+    expect(formatAuthority(configuredAuthority, "host-trusted")).toBe(
       "Minimum assurance lock: workspace-and-network-isolated\n" +
         "Assurance after ceiling: workspace-and-network-isolated\n" +
         "Conflict: project requested host-trusted, but the user-global ceiling requires workspace-and-network-isolated or stronger\n" +

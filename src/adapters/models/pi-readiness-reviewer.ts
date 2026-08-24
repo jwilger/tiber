@@ -4,20 +4,35 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
+import type { TiberResult } from "../../core/failures/tiber-failure.js";
 import type {
   ReadinessReview,
   TaskSpecification,
 } from "../../core/tasks/readiness.js";
+import {
+  parseSpecificationReviewFindingCount,
+  type SpecificationDigest,
+} from "../../core/tasks/task-values.js";
+import {
+  modelReviewFailure,
+  type ModelReviewFailure,
+} from "./model-review-failure.js";
 
 export function parseReadinessReviewOutput(
   text: string,
-  digest: string,
-): ReadinessReview | undefined {
+  digest: SpecificationDigest,
+): TiberResult<ReadinessReview, ModelReviewFailure> {
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch {
-    return undefined;
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_READINESS_REVIEW_INVALID",
+        "readiness review output is not valid JSON",
+      ),
+    };
   }
   if (
     typeof value !== "object" ||
@@ -25,26 +40,46 @@ export function parseReadinessReviewOutput(
     Array.isArray(value) ||
     Object.keys(value).length !== 1
   )
-    return undefined;
-  if (!("findingCount" in value)) return undefined;
-  const findingCount: unknown = value.findingCount;
-  return typeof findingCount === "number" &&
-    Number.isSafeInteger(findingCount) &&
-    findingCount >= 0
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_READINESS_REVIEW_INVALID",
+        "readiness review output has an invalid shape",
+      ),
+    };
+  if (!("findingCount" in value))
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_READINESS_REVIEW_INVALID",
+        "readiness review output omits findingCount",
+      ),
+    };
+  const findingCount = parseSpecificationReviewFindingCount(value.findingCount);
+  return findingCount.ok
     ? {
-        freshContext: true,
-        reviewerRole: "specification-reviewer",
-        findingCount,
-        reviewedSpecificationDigest: digest,
+        ok: true,
+        value: {
+          contextFreshness: "fresh",
+          reviewerRole: "specification-reviewer",
+          findingCount: findingCount.value,
+          reviewedSpecificationDigest: digest,
+        },
       }
-    : undefined;
+    : {
+        ok: false,
+        failure: modelReviewFailure(
+          "TIBER_READINESS_REVIEW_INVALID",
+          "readiness review findingCount is invalid",
+        ),
+      };
 }
 
-export async function reviewSpecification(
+async function conductSpecificationReview(
   cwd: string,
   specification: TaskSpecification,
-  digest: string,
-): Promise<ReadinessReview | undefined> {
+  digest: SpecificationDigest,
+): Promise<TiberResult<ReadinessReview, ModelReviewFailure>> {
   const { session } = await createAgentSession({
     cwd,
     agentDir: getAgentDir(),
@@ -85,11 +120,35 @@ export async function reviewSpecification(
       }
     }
     return text === undefined
-      ? undefined
+      ? {
+          ok: false,
+          failure: modelReviewFailure(
+            "TIBER_REVIEW_RESPONSE_MISSING",
+            "readiness reviewer returned no text response",
+          ),
+        }
       : parseReadinessReviewOutput(text, digest);
   } finally {
     clearTimeout(timeout);
     unsubscribe();
     session.dispose();
+  }
+}
+
+export async function reviewSpecification(
+  cwd: string,
+  specification: TaskSpecification,
+  digest: SpecificationDigest,
+): Promise<TiberResult<ReadinessReview, ModelReviewFailure>> {
+  try {
+    return await conductSpecificationReview(cwd, specification, digest);
+  } catch {
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_REVIEW_EXECUTION_FAILED",
+        "readiness review session failed",
+      ),
+    };
   }
 }

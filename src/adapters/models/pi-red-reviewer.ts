@@ -4,21 +4,36 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
+import type { TiberResult } from "../../core/failures/tiber-failure.js";
 import type { TaskSpecification } from "../../core/tasks/readiness.js";
 import type {
   RedObservation,
   RedReview,
 } from "../../core/workflow/semantic-red.js";
+import {
+  parseRedReviewRationale,
+  type RedDiagnosticDigest,
+} from "../../core/workflow/workflow-values.js";
+import {
+  modelReviewFailure,
+  type ModelReviewFailure,
+} from "./model-review-failure.js";
 
 export function parseRedReviewOutput(
   text: string,
-  diagnosticDigest: string,
-): RedReview | undefined {
+  diagnosticDigest: RedDiagnosticDigest,
+): TiberResult<RedReview, ModelReviewFailure> {
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch {
-    return undefined;
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_RED_REVIEW_INVALID",
+        "RED review output is not valid JSON",
+      ),
+    };
   }
   if (
     typeof value !== "object" ||
@@ -32,28 +47,55 @@ export function parseRedReviewOutput(
       value.classification !== "invalid-red") ||
     !("missingPublicSurface" in value) ||
     typeof value.missingPublicSurface !== "boolean" ||
-    !("rationale" in value) ||
-    typeof value.rationale !== "string" ||
-    value.rationale.trim().length < 12
+    !("rationale" in value)
   )
-    return undefined;
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_RED_REVIEW_INVALID",
+        "RED review output has an invalid shape",
+      ),
+    };
+  const rationale = parseRedReviewRationale(
+    typeof value.rationale === "string"
+      ? value.rationale.trim()
+      : value.rationale,
+  );
+  if (!rationale.ok)
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_RED_REVIEW_INVALID",
+        "RED review rationale is invalid",
+      ),
+    };
   return {
-    freshContext: true,
-    reviewerRole: "red-classifier",
-    reviewedDiagnosticDigest: diagnosticDigest,
-    classification: value.classification,
-    missingPublicSurface: value.missingPublicSurface,
-    rationale: value.rationale.trim(),
+    ok: true,
+    value: {
+      contextFreshness: "fresh",
+      reviewerRole: "red-classifier",
+      reviewedDiagnosticDigest: diagnosticDigest,
+      classification: value.classification,
+      missingPublicSurface: value.missingPublicSurface,
+      rationale: rationale.value,
+    },
   };
 }
 
-export async function reviewRedObservation(
+async function conductRedReview(
   cwd: string,
   specification: TaskSpecification,
   observation: RedObservation,
   diagnostic: string,
-): Promise<RedReview | undefined> {
-  if (Buffer.byteLength(diagnostic) > 65_536) return undefined;
+): Promise<TiberResult<RedReview, ModelReviewFailure>> {
+  if (Buffer.byteLength(diagnostic) > 65_536)
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_RED_REVIEW_INVALID",
+        "RED diagnostic exceeds its review bound",
+      ),
+    };
   const { session } = await createAgentSession({
     cwd,
     agentDir: getAgentDir(),
@@ -97,11 +139,36 @@ export async function reviewRedObservation(
       }
     }
     return text === undefined
-      ? undefined
+      ? {
+          ok: false,
+          failure: modelReviewFailure(
+            "TIBER_REVIEW_RESPONSE_MISSING",
+            "RED reviewer returned no text response",
+          ),
+        }
       : parseRedReviewOutput(text, observation.diagnosticDigest);
   } finally {
     clearTimeout(timeout);
     unsubscribe();
     session.dispose();
+  }
+}
+
+export async function reviewRedObservation(
+  cwd: string,
+  specification: TaskSpecification,
+  observation: RedObservation,
+  diagnostic: string,
+): Promise<TiberResult<RedReview, ModelReviewFailure>> {
+  try {
+    return await conductRedReview(cwd, specification, observation, diagnostic);
+  } catch {
+    return {
+      ok: false,
+      failure: modelReviewFailure(
+        "TIBER_REVIEW_EXECUTION_FAILED",
+        "RED review session failed",
+      ),
+    };
   }
 }

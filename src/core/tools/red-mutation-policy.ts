@@ -1,17 +1,21 @@
 import { isAbsolute, posix } from "node:path";
 
-import type { ToolDecision } from "./tool-policy.js";
+import type {
+  ClaimPublicationStatus,
+  TestMappingPath,
+} from "../tasks/task-values.js";
+import type { ToolDecision, ToolDecisionCode } from "./tool-policy.js";
 
-function deny(code: string, detail: string): ToolDecision {
+function deny(code: ToolDecisionCode, detail: string): ToolDecision {
   return { allowed: false, code, detail };
 }
 
 export function authorizeWorkflowMutation(
   requestedPath: string,
   authority: {
-    readonly activeClaim: boolean;
-    readonly redAccepted: boolean;
-    readonly testMappings: readonly string[];
+    readonly claimStatus: ClaimPublicationStatus;
+    readonly redStatus: "accepted" | "required";
+    readonly testMappings: readonly TestMappingPath[];
   },
 ): ToolDecision {
   if (
@@ -30,12 +34,12 @@ export function authorizeWorkflowMutation(
       "TIBER_MUTATION_PATH_INVALID",
       "mutation path must be canonical, repository-relative, and outside Git metadata",
     );
-  if (!authority.activeClaim)
+  if (authority.claimStatus !== "published")
     return deny(
       "TIBER_MUTATION_CLAIM_REQUIRED",
       "mutation requires an exact active remote claim",
     );
-  if (authority.redAccepted)
+  if (authority.redStatus === "accepted")
     return {
       allowed: true,
       code: "TIBER_PRODUCTION_MUTATION_ALLOWED",

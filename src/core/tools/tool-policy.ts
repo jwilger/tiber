@@ -1,8 +1,29 @@
 import { isAbsolute, relative, resolve } from "node:path";
 
-export interface ToolDecision {
+import type {
+  CanonicalReadTarget,
+  ClaimedWorkspaceRoot,
+  RequestedWorkspacePath,
+} from "./tool-values.js";
+
+export type ToolDecisionCode =
+  | "TIBER_MUTATION_CLAIMED"
+  | "TIBER_MUTATION_CLAIM_REQUIRED"
+  | "TIBER_PATH_OUTSIDE_WORKSPACE"
+  | "TIBER_PATH_SYMLINK_ESCAPE"
+  | "TIBER_READ_ALLOWED"
+  | "TIBER_TOOL_INVENTORY_COMPLETE"
+  | "TIBER_TOOL_INVENTORY_INCOMPLETE"
+  | "TIBER_PRODUCTION_MUTATION_ALLOWED"
+  | "TIBER_RED_REQUIRED"
+  | "TIBER_TEST_MUTATION_ALLOWED"
+  | "TIBER_MUTATION_PATH_INVALID";
+
+export interface ToolDecision<
+  Code extends ToolDecisionCode = ToolDecisionCode,
+> {
   readonly allowed: boolean;
-  readonly code: string;
+  readonly code: Code;
   readonly detail: string;
 }
 
@@ -16,20 +37,23 @@ export const GOVERNED_TOOL_NAMES = [
   "write",
 ] as const;
 
-function deny(code: string, detail: string): ToolDecision {
+function deny<Code extends ToolDecisionCode>(
+  code: Code,
+  detail: string,
+): ToolDecision<Code> {
   return { allowed: false, code, detail };
 }
 
-function isWithin(root: string, candidate: string): boolean {
+function isWithin(root: ClaimedWorkspaceRoot, candidate: string): boolean {
   const path = relative(root, candidate);
   // Stryker disable next-line ConditionalExpression, StringLiteral: the empty relative path also satisfies the general non-parent, non-absolute rule; the explicit root case documents intent.
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
 export function authorizeReadPath(
-  canonicalRoot: string,
-  requestedPath: string,
-  canonicalTarget: string,
+  canonicalRoot: ClaimedWorkspaceRoot,
+  requestedPath: RequestedWorkspacePath,
+  canonicalTarget: CanonicalReadTarget,
 ): ToolDecision {
   const lexicalTarget = resolve(canonicalRoot, requestedPath);
   if (!isWithin(canonicalRoot, lexicalTarget)) {
@@ -51,8 +75,10 @@ export function authorizeReadPath(
   };
 }
 
-export function authorizeMutation(hasPublishedClaim: boolean): ToolDecision {
-  return hasPublishedClaim
+export function authorizeMutation(
+  claimStatus: "absent" | "published",
+): ToolDecision {
+  return claimStatus === "published"
     ? {
         allowed: true,
         code: "TIBER_MUTATION_CLAIMED",
@@ -66,7 +92,9 @@ export function authorizeMutation(hasPublishedClaim: boolean): ToolDecision {
 
 export function verifyToolInventory(
   toolNames: readonly string[],
-): ToolDecision {
+): ToolDecision<
+  "TIBER_TOOL_INVENTORY_COMPLETE" | "TIBER_TOOL_INVENTORY_INCOMPLETE"
+> {
   const unexpected = [...new Set(toolNames)]
     .filter((name) => !GOVERNED_TOOL_NAMES.some((known) => known === name))
     .sort();

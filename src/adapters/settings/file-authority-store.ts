@@ -14,12 +14,15 @@ import {
   parseAuthorityDocument,
   type AuthorityDocument,
 } from "../../core/configuration/authority.js";
-import type { SettingsResult } from "../../core/configuration/settings.js";
+import {
+  settingsFailure,
+  type SettingsResult,
+} from "../../core/configuration/settings.js";
 
 function ioFailure(message: string): SettingsResult<never> {
   return {
     ok: false,
-    failure: { code: "TIBER_SETTINGS_IO", message, retryable: true },
+    failure: settingsFailure("TIBER_SETTINGS_IO", message),
   };
 }
 
@@ -56,7 +59,18 @@ export class FileAuthorityStore {
     const temporaryPath = `${path}.${String(process.pid)}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+      const document = {
+        schemaVersion: 1,
+        ceilings:
+          value.ceilings.minimumAssuranceLevel.kind === "none"
+            ? {}
+            : {
+                minimumAssuranceLevel:
+                  value.ceilings.minimumAssuranceLevel.value,
+              },
+        secretReferences: value.secretReferences,
+      };
+      writeFileSync(temporaryPath, `${JSON.stringify(document, null, 2)}\n`, {
         encoding: "utf8",
         mode: 0o600,
         flag: "wx",

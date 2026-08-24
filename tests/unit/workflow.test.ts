@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { expectedOperationalFailure as operationalFailure } from "../fixtures/failures.js";
+
 import {
   BUILT_IN_WORKFLOW,
   compileWorkflow,
@@ -75,18 +77,35 @@ describe("data-only workflow compilation", () => {
   it("reports malformed workflow details exactly", () => {
     expect(compileWorkflow(null)).toEqual({
       ok: false,
-      failure: {
-        code: "TIBER_WORKFLOW_INVALID",
-        message: "workflow must be an object",
-      },
+      failure: operationalFailure(
+        "TIBER_WORKFLOW_INVALID",
+        "workflow-compilation",
+        "workflow must be an object",
+        "retry-after-input",
+      ),
+    });
+    expect(
+      compileWorkflow({
+        ...valid,
+        id: "Invalid",
+      }),
+    ).toEqual({
+      ok: false,
+      failure: operationalFailure(
+        "TIBER_WORKFLOW_INVALID",
+        "workflow-compilation",
+        "workflow id and stages must use their canonical grammars",
+        "retry-after-input",
+      ),
     });
     expect(compileWorkflow({})).toEqual({
       ok: false,
-      failure: {
-        code: "TIBER_WORKFLOW_INVALID",
-        message:
-          "workflow must contain only a valid id and 1 to 64 unique data-only stages",
-      },
+      failure: operationalFailure(
+        "TIBER_WORKFLOW_INVALID",
+        "workflow-compilation",
+        "workflow must contain only a valid id and 1 to 64 unique data-only stages",
+        "retry-after-input",
+      ),
     });
   });
 
@@ -98,10 +117,12 @@ describe("data-only workflow compilation", () => {
       }),
     ).toEqual({
       ok: false,
-      failure: {
-        code: "TIBER_WORKFLOW_POLICY_FLOOR",
-        message: "workflow must preserve required stage order: red",
-      },
+      failure: operationalFailure(
+        "TIBER_WORKFLOW_POLICY_FLOOR",
+        "workflow-compilation",
+        "workflow must preserve required stage order: red",
+        "retry-after-input",
+      ),
     });
     expect(
       compileWorkflow({

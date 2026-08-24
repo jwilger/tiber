@@ -1,29 +1,61 @@
 import { createHash } from "node:crypto";
 
+import type { Option } from "../types/option.js";
+import {
+  parseArtifactByteLength,
+  parseArtifactContent,
+  parseArtifactDigest,
+  parseArtifactOmittedBytes,
+  parseArtifactPreviewHead,
+  parseArtifactPreviewTail,
+  type ArtifactByteLength,
+  type ArtifactContent,
+  type ArtifactDigest,
+  type ArtifactOmittedBytes,
+  type ArtifactPreviewHead,
+  type ArtifactPreviewTail,
+  type CommandDurationMilliseconds,
+  type CommandExitCode,
+  type CommandStandardError,
+  type CommandStandardOutput,
+  type InlineOutputMaximumBytes,
+} from "./artifact-values.js";
+
 export interface CommandOutput {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number | null;
-  readonly durationMs: number;
+  readonly stdout: CommandStandardOutput;
+  readonly stderr: CommandStandardError;
+  readonly exitCode: Option<CommandExitCode>;
+  readonly durationMs: CommandDurationMilliseconds;
 }
 
 export type VirtualizedCommandOutput =
   | {
       readonly kind: "inline";
       readonly output: CommandOutput;
-      readonly byteLength: number;
+      readonly byteLength: ArtifactByteLength;
     }
   | {
       readonly kind: "artifact";
-      readonly digest: string;
-      readonly byteLength: number;
-      readonly content: string;
+      readonly digest: ArtifactDigest;
+      readonly byteLength: ArtifactByteLength;
+      readonly content: ArtifactContent;
       readonly preview: {
-        readonly head: string;
-        readonly tail: string;
-        readonly omittedBytes: number;
+        readonly head: ArtifactPreviewHead;
+        readonly tail: ArtifactPreviewTail;
+        readonly omittedBytes: ArtifactOmittedBytes;
       };
     };
+
+function generated<Value>(
+  result: { readonly ok: true; readonly value: Value } | { readonly ok: false },
+): Value {
+  // Stryker disable next-line ConditionalExpression, BlockStatement: callers pass only values derived from bounded generated lengths/content; parser rejection is an internal defect.
+  if (!result.ok) {
+    // Stryker disable next-line StringLiteral, CallExpression: generated bounded values make this defect throw unreachable.
+    throw new Error("generated artifact value violated its invariant");
+  }
+  return result.value;
+}
 
 function utf8Prefix(buffer: Buffer, maximumBytes: number): string {
   return buffer
@@ -41,19 +73,19 @@ function utf8Suffix(buffer: Buffer, maximumBytes: number): string {
 
 export function virtualizeCommandOutput(
   output: CommandOutput,
-  maximumInlineBytes: number,
+  maximumInlineBytes: InlineOutputMaximumBytes,
 ): VirtualizedCommandOutput {
-  if (
-    !Number.isSafeInteger(maximumInlineBytes) ||
-    maximumInlineBytes < 1 ||
-    maximumInlineBytes > 1_048_576
-  )
-    throw new Error("TIBER_OUTPUT_BOUND_INVALID");
   const directBytes =
     Buffer.byteLength(output.stdout) + Buffer.byteLength(output.stderr);
   if (directBytes <= maximumInlineBytes)
-    return { kind: "inline", output, byteLength: directBytes };
-  const content = `exitCode: ${String(output.exitCode)}\ndurationMs: ${String(output.durationMs)}\n--- stdout ---\n${output.stdout}\n--- stderr ---\n${output.stderr}`;
+    return {
+      kind: "inline",
+      output,
+      byteLength: generated(parseArtifactByteLength(directBytes)),
+    };
+  const exitCode =
+    output.exitCode.kind === "some" ? String(output.exitCode.value) : "signal";
+  const content = `exitCode: ${exitCode}\ndurationMs: ${String(output.durationMs)}\n--- stdout ---\n${output.stdout}\n--- stderr ---\n${output.stderr}`;
   // Stryker disable next-line StringLiteral: UTF-8 is Buffer.from's specified default; the explicit encoding documents artifact identity.
   const bytes = Buffer.from(content, "utf8");
   const headBudget = Math.floor(maximumInlineBytes / 2);
@@ -63,13 +95,19 @@ export function virtualizeCommandOutput(
   const shown = Buffer.byteLength(head) + Buffer.byteLength(tail);
   return {
     kind: "artifact",
-    digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
-    byteLength: bytes.length,
-    content,
+    digest: generated(
+      parseArtifactDigest(
+        `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+      ),
+    ),
+    byteLength: generated(parseArtifactByteLength(bytes.length)),
+    content: generated(parseArtifactContent(content)),
     preview: {
-      head,
-      tail,
-      omittedBytes: Math.max(0, bytes.length - shown),
+      head: generated(parseArtifactPreviewHead(head)),
+      tail: generated(parseArtifactPreviewTail(tail)),
+      omittedBytes: generated(
+        parseArtifactOmittedBytes(Math.max(0, bytes.length - shown)),
+      ),
     },
   };
 }

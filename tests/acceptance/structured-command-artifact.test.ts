@@ -5,6 +5,18 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { some } from "../../src/core/types/option.js";
+import {
+  artifactRangeLimit,
+  artifactReapAtMilliseconds,
+  artifactRangeOffset,
+  artifactSearchMaximumMatches,
+  artifactSearchQuery,
+  inlineOutputMaximumBytes,
+} from "../fixtures/artifact-values.js";
+import { commandName } from "../fixtures/command-values.js";
+import { taskClaimId, taskId } from "../fixtures/task-values.js";
+
 import { FileArtifactStore } from "../../src/adapters/artifacts/file-artifact-store.js";
 import { FileCommandAuthority } from "../../src/adapters/commands/file-command-authority.js";
 import { StructuredCommandRunner } from "../../src/adapters/commands/structured-command-runner.js";
@@ -49,42 +61,63 @@ describe("structured command artifact boundary", () => {
     const catalog = authority.loadCatalog();
     expect(catalog.ok).toBe(true);
     if (!catalog.ok) return;
-    expect(authority.grant(catalog.value.digest)).toBe(true);
-    const decision = decideCommandExecution(catalog.value, "large-output", {
-      activeClaim: true,
-      grantedCatalogDigest: authority.readGrant(),
+    expect(authority.grant(catalog.value.digest)).toEqual({
+      ok: true,
+      value: undefined,
     });
+    const grant = authority.readGrant();
+    expect(grant.ok).toBe(true);
+    if (!grant.ok) return;
+    const decision = decideCommandExecution(
+      catalog.value,
+      commandName("large-output"),
+      {
+        claimStatus: "published",
+        grantedCatalogDigest: grant.value,
+      },
+    );
     expect(decision.ok).toBe(true);
     if (!decision.ok) return;
 
     const run = await new StructuredCommandRunner(
       new FileProcessGroupRegistry(agent),
     ).run(decision.command, repository, {
-      taskId: "2424c876-6180-4c64-976e-9ea4bd540744",
-      claimId: "00000000-0000-4000-8000-000000000001",
+      taskId: taskId("2424c876-6180-4c64-976e-9ea4bd540744"),
+      claimId: taskClaimId("00000000-0000-4000-8000-000000000001"),
     });
     expect(run.ok).toBe(true);
     if (!run.ok) return;
     const result = virtualizeCommandOutput(
       run.output,
-      decision.command.maxOutputBytes,
+      inlineOutputMaximumBytes(decision.command.maxOutputBytes),
     );
     expect(result.kind).toBe("artifact");
     if (result.kind !== "artifact") return;
     expect(Buffer.byteLength(JSON.stringify(result.preview))).toBeLessThan(512);
     const artifacts = new FileArtifactStore(agent);
-    expect(artifacts.put(result)).toEqual({ ok: true, value: result.digest });
-    expect(artifacts.search(result.digest, "result-499", 5)).toEqual({
+    expect(artifacts.put(result)).toEqual({
+      ok: true,
+      value: some(result.digest),
+    });
+    expect(
+      artifacts.search(
+        result.digest,
+        artifactSearchQuery("result-499"),
+        artifactSearchMaximumMatches(5),
+      ),
+    ).toEqual({
       ok: true,
       value: [{ line: 503, text: "result-499" }],
     });
-    const range = artifacts.range(result.digest, 0, 64);
+    const range = artifacts.range(
+      result.digest,
+      artifactRangeOffset(0),
+      artifactRangeLimit(64),
+    );
     expect(range).toMatchObject({
       ok: true,
-      value: { offset: 0, nextOffset: 64 },
+      value: { offset: 0, nextOffset: some(64) },
     });
-    expect(artifacts.range(result.digest, -1, 1)).toMatchObject({ ok: false });
-    expect(artifacts.search(result.digest, "", 1)).toMatchObject({ ok: false });
     expect(new FileProcessGroupRegistry(agent).read()).toEqual({
       ok: true,
       value: [],
@@ -93,7 +126,10 @@ describe("structured command artifact boundary", () => {
     const hash = result.digest.slice("sha256:".length);
     const path = join(agent, "tiber", "artifacts", "sha256", `${hash}.txt`);
     utimesSync(path, new Date(0), new Date(0));
-    expect(artifacts.reap(Date.now())).toEqual({ ok: true, value: 1 });
+    expect(artifacts.reap(artifactReapAtMilliseconds(Date.now()))).toEqual({
+      ok: true,
+      value: 1,
+    });
     expect(artifacts.read(result.digest)).toMatchObject({
       ok: false,
       failure: { code: "TIBER_ARTIFACT_NOT_FOUND" },

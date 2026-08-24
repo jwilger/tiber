@@ -11,11 +11,44 @@ import {
 import { dirname, join } from "node:path";
 
 import {
+  parseCommandCatalogDigest,
+  type CommandCatalogDigest,
+} from "../../core/commands/command-values.js";
+import {
   compileCommandCatalog,
   type CommandCatalogResult,
 } from "../../core/commands/structured-command.js";
+import {
+  operationalFailure,
+  type TiberFailure,
+  type TiberResult,
+} from "../../core/failures/tiber-failure.js";
+import { none, some, type Option } from "../../core/types/option.js";
 
-const DIGEST = /^sha256:[0-9a-f]{64}$/u;
+type CommandAuthorityFailure = TiberFailure<
+  "TIBER_COMMAND_GRANT_INVALID" | "TIBER_COMMAND_GRANT_IO",
+  { readonly domain: "command-authority" },
+  "corrected-input" | "state-change" | "retry-operation"
+>;
+type CommandAuthorityResult<Value> = TiberResult<
+  Value,
+  CommandAuthorityFailure
+>;
+
+function authorityFailure(
+  code: CommandAuthorityFailure["code"],
+  message: string,
+): CommandAuthorityResult<never> {
+  return {
+    ok: false,
+    failure: operationalFailure(
+      code,
+      "command-authority",
+      message,
+      code === "TIBER_COMMAND_GRANT_IO" ? "transient" : "retry-after-input",
+    ),
+  };
+}
 
 export class FileCommandAuthority {
   private readonly catalogPath: string;
@@ -42,16 +75,18 @@ export class FileCommandAuthority {
     } catch {
       return {
         ok: false,
-        failure: {
-          code: "TIBER_COMMAND_CATALOG_INVALID",
-          message: "project command catalog is missing or unreadable",
-        },
+        failure: operationalFailure(
+          "TIBER_COMMAND_CATALOG_INVALID",
+          "command-catalog",
+          "project command catalog is missing or unreadable",
+          "retry-after-input",
+        ),
       };
     }
   }
 
-  public readGrant(): string | undefined {
-    if (!existsSync(this.grantPath)) return undefined;
+  public readGrant(): CommandAuthorityResult<Option<CommandCatalogDigest>> {
+    if (!existsSync(this.grantPath)) return { ok: true, value: none };
     try {
       const value: unknown = JSON.parse(readFileSync(this.grantPath, "utf8"));
       if (
@@ -61,19 +96,30 @@ export class FileCommandAuthority {
         !("schemaVersion" in value) ||
         value.schemaVersion !== 1 ||
         !("catalogDigest" in value) ||
-        typeof value.catalogDigest !== "string" ||
-        !DIGEST.test(value.catalogDigest) ||
         Object.keys(value).sort().join(",") !== "catalogDigest,schemaVersion"
       )
-        return undefined;
-      return value.catalogDigest;
+        return authorityFailure(
+          "TIBER_COMMAND_GRANT_INVALID",
+          "command grant document is invalid",
+        );
+      const digest = parseCommandCatalogDigest(value.catalogDigest);
+      return digest.ok
+        ? { ok: true, value: some(digest.value) }
+        : authorityFailure(
+            "TIBER_COMMAND_GRANT_INVALID",
+            "command grant digest is invalid",
+          );
     } catch {
-      return undefined;
+      return authorityFailure(
+        "TIBER_COMMAND_GRANT_IO",
+        "command grant could not be read",
+      );
     }
   }
 
-  public grant(catalogDigest: string): boolean {
-    if (!DIGEST.test(catalogDigest)) return false;
+  public grant(
+    catalogDigest: CommandCatalogDigest,
+  ): CommandAuthorityResult<void> {
     const temporary = `${this.grantPath}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dirname(this.grantPath), { recursive: true, mode: 0o700 });
@@ -83,10 +129,21 @@ export class FileCommandAuthority {
         { encoding: "utf8", mode: 0o600, flag: "wx" },
       );
       renameSync(temporary, this.grantPath);
-      return this.readGrant() === catalogDigest;
+      const observed = this.readGrant();
+      return observed.ok &&
+        observed.value.kind === "some" &&
+        observed.value.value === catalogDigest
+        ? { ok: true, value: undefined }
+        : authorityFailure(
+            "TIBER_COMMAND_GRANT_INVALID",
+            "durable command grant observation did not match its intent",
+          );
     } catch {
       rmSync(temporary, { force: true });
-      return false;
+      return authorityFailure(
+        "TIBER_COMMAND_GRANT_IO",
+        "command grant was not durable",
+      );
     }
   }
 }

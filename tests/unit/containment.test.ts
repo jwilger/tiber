@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
 
+import { none, some } from "../../src/core/types/option.js";
+import {
+  attestationExpiresAt,
+  attestationIssuedAt,
+  containmentAttestationNonce,
+  containmentAttestationSignature,
+  containmentEvaluationAt,
+  containmentRepositoryPath,
+  containmentVerifierIdentity,
+} from "../fixtures/containment-values.js";
+
 import {
   decideContainment,
   formatContainment,
@@ -10,16 +21,16 @@ import {
 const attestation: ContainmentAttestation = {
   schemaVersion: 1,
   level: "workspace-and-network-isolated",
-  repositoryPath: "/workspace",
-  issuedAt: "2026-01-01T00:00:00.000Z",
-  expiresAt: "2027-01-01T00:00:00.000Z",
-  verifier: "build-host",
-  nonce: "unique",
-  signature: "signature",
+  repositoryPath: containmentRepositoryPath("/workspace"),
+  issuedAt: attestationIssuedAt("2026-01-01T00:00:00.000Z"),
+  expiresAt: attestationExpiresAt("2027-01-01T00:00:00.000Z"),
+  verifier: containmentVerifierIdentity("build-host"),
+  nonce: containmentAttestationNonce("unique"),
+  signature: containmentAttestationSignature("signature"),
 };
 
 const evidence: ContainmentEvidence = {
-  attestation,
+  attestation: some(attestation),
   signatureValid: true,
   linux: true,
   mountNamespaceIsolated: true,
@@ -30,8 +41,8 @@ const evidence: ContainmentEvidence = {
 function decide(overrides: Partial<ContainmentEvidence> = {}) {
   return decideContainment(
     "workspace-and-network-isolated",
-    "/workspace",
-    "2026-06-01T00:00:00.000Z",
+    containmentRepositoryPath("/workspace"),
+    containmentEvaluationAt("2026-06-01T00:00:00.000Z"),
     { ...evidence, ...overrides },
   );
 }
@@ -39,13 +50,19 @@ function decide(overrides: Partial<ContainmentEvidence> = {}) {
 describe("containment authority", () => {
   it("does not claim strong isolation for host-trusted mode", () => {
     expect(
-      decideContainment("host-trusted", "/workspace", "invalid", {
-        signatureValid: false,
-        linux: false,
-        mountNamespaceIsolated: false,
-        networkNamespaceIsolated: false,
-        seccompEnabled: false,
-      }),
+      decideContainment(
+        "host-trusted",
+        containmentRepositoryPath("/workspace"),
+        containmentEvaluationAt("2026-06-01T00:00:00.000Z"),
+        {
+          attestation: none,
+          signatureValid: false,
+          linux: false,
+          mountNamespaceIsolated: false,
+          networkNamespaceIsolated: false,
+          seccompEnabled: false,
+        },
+      ),
     ).toEqual({
       state: "verified",
       level: "host-trusted",
@@ -56,6 +73,7 @@ describe("containment authority", () => {
 
   it("locks down a missing attestation", () => {
     const evidenceWithoutAttestation: ContainmentEvidence = {
+      attestation: none,
       signatureValid: true,
       linux: true,
       mountNamespaceIsolated: true,
@@ -65,8 +83,8 @@ describe("containment authority", () => {
     expect(
       decideContainment(
         "workspace-and-network-isolated",
-        "/workspace",
-        "2026-06-01T00:00:00.000Z",
+        containmentRepositoryPath("/workspace"),
+        containmentEvaluationAt("2026-06-01T00:00:00.000Z"),
         evidenceWithoutAttestation,
       ),
     ).toEqual({
@@ -84,29 +102,42 @@ describe("containment authority", () => {
       "Attestation signature is invalid",
     ],
     [
-      { attestation: { ...attestation, repositoryPath: "/other" } },
-      "TIBER_CONTAINMENT_ATTESTATION_MISMATCH",
-      "Attestation does not match the repository and requested level",
-    ],
-    [
-      { attestation: { ...attestation, level: "workspace-isolated" } },
+      {
+        attestation: some({
+          ...attestation,
+          repositoryPath: containmentRepositoryPath("/other"),
+        }),
+      },
       "TIBER_CONTAINMENT_ATTESTATION_MISMATCH",
       "Attestation does not match the repository and requested level",
     ],
     [
       {
-        attestation: { ...attestation, expiresAt: "2026-01-02T00:00:00.000Z" },
+        attestation: some({
+          ...attestation,
+          level: "workspace-isolated" as const,
+        }),
+      },
+      "TIBER_CONTAINMENT_ATTESTATION_MISMATCH",
+      "Attestation does not match the repository and requested level",
+    ],
+    [
+      {
+        attestation: some({
+          ...attestation,
+          expiresAt: attestationExpiresAt("2026-01-02T00:00:00.000Z"),
+        }),
       },
       "TIBER_CONTAINMENT_ATTESTATION_EXPIRED",
       "Attestation is not currently valid",
     ],
     [
-      { attestation: { ...attestation, issuedAt: "2026-12-01T00:00:00.000Z" } },
-      "TIBER_CONTAINMENT_ATTESTATION_EXPIRED",
-      "Attestation is not currently valid",
-    ],
-    [
-      { attestation: { ...attestation, issuedAt: "invalid" } },
+      {
+        attestation: some({
+          ...attestation,
+          issuedAt: attestationIssuedAt("2026-12-01T00:00:00.000Z"),
+        }),
+      },
       "TIBER_CONTAINMENT_ATTESTATION_EXPIRED",
       "Attestation is not currently valid",
     ],
@@ -141,16 +172,16 @@ describe("containment authority", () => {
     expect(
       decideContainment(
         "workspace-and-network-isolated",
-        "/workspace",
-        attestation.issuedAt,
+        containmentRepositoryPath("/workspace"),
+        containmentEvaluationAt(attestation.issuedAt),
         evidence,
       ),
     ).toMatchObject({ state: "verified" });
     expect(
       decideContainment(
         "workspace-and-network-isolated",
-        "/workspace",
-        attestation.expiresAt,
+        containmentRepositoryPath("/workspace"),
+        containmentEvaluationAt(attestation.expiresAt),
         evidence,
       ),
     ).toMatchObject({
@@ -172,11 +203,16 @@ describe("containment authority", () => {
   it("requires seccomp only for hermetic mode", () => {
     const hermeticAttestation = { ...attestation, level: "hermetic" } as const;
     expect(
-      decideContainment("hermetic", "/workspace", "2026-06-01T00:00:00.000Z", {
-        ...evidence,
-        attestation: hermeticAttestation,
-        seccompEnabled: false,
-      }),
+      decideContainment(
+        "hermetic",
+        containmentRepositoryPath("/workspace"),
+        containmentEvaluationAt("2026-06-01T00:00:00.000Z"),
+        {
+          ...evidence,
+          attestation: some(hermeticAttestation),
+          seccompEnabled: false,
+        },
+      ),
     ).toEqual({
       state: "lockdown",
       level: "hermetic",
@@ -184,11 +220,16 @@ describe("containment authority", () => {
       detail: "Hermetic mode requires corroborated seccomp filtering",
     });
     expect(
-      decideContainment("hermetic", "/workspace", "2026-06-01T00:00:00.000Z", {
-        ...evidence,
-        attestation: hermeticAttestation,
-        networkNamespaceIsolated: false,
-      }),
+      decideContainment(
+        "hermetic",
+        containmentRepositoryPath("/workspace"),
+        containmentEvaluationAt("2026-06-01T00:00:00.000Z"),
+        {
+          ...evidence,
+          attestation: some(hermeticAttestation),
+          networkNamespaceIsolated: false,
+        },
+      ),
     ).toMatchObject({
       state: "lockdown",
       code: "TIBER_CONTAINMENT_NETWORK_UNVERIFIED",
@@ -196,11 +237,14 @@ describe("containment authority", () => {
     expect(
       decideContainment(
         "workspace-isolated",
-        "/workspace",
-        "2026-06-01T00:00:00.000Z",
+        containmentRepositoryPath("/workspace"),
+        containmentEvaluationAt("2026-06-01T00:00:00.000Z"),
         {
           ...evidence,
-          attestation: { ...attestation, level: "workspace-isolated" },
+          attestation: some({
+            ...attestation,
+            level: "workspace-isolated" as const,
+          }),
           networkNamespaceIsolated: false,
           seccompEnabled: false,
         },

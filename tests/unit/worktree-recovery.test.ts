@@ -5,8 +5,16 @@ import {
   parseOwnedWorktreeRegistry,
   reconcileOwnedWorktrees,
 } from "../../src/core/worktrees/worktree-recovery.js";
+import { parseTaskClaimId } from "../../src/core/tasks/task-values.js";
+import { none, some } from "../../src/core/types/option.js";
+import { expectedOperationalFailure } from "../fixtures/failures.js";
+import {
+  parseOwnedWorktreePath,
+  parseRecoveryReference,
+  parseTaskBranchName,
+} from "../../src/core/worktrees/worktree-values.js";
 
-const owned = {
+const ownedDocument = {
   schemaVersion: 1 as const,
   taskId: "2424c876-6180-4c64-976e-9ea4bd540744",
   claimId: "00000000-0000-4000-8000-000000000001",
@@ -20,16 +28,28 @@ function registry(worktrees: readonly unknown[]): unknown {
   return { schemaVersion: 1, worktrees };
 }
 
+const parsedOwned = parseOwnedWorktreeRegistry(registry([ownedDocument]));
+if (!parsedOwned.ok) throw new Error("invalid owned worktree fixture");
+const owned = parsedOwned.value.worktrees[0];
+if (owned === undefined) throw new Error("missing owned worktree fixture");
+
+function required<Value>(
+  result: { readonly ok: true; readonly value: Value } | { readonly ok: false },
+): Value {
+  if (!result.ok) throw new Error("invalid semantic worktree fixture");
+  return result.value;
+}
+
 describe("owned worktree recovery", () => {
   it("parses a bounded durable registry and rejects malformed or excess ownership", () => {
-    expect(parseOwnedWorktreeRegistry(registry([owned]))).toEqual({
+    expect(parseOwnedWorktreeRegistry(registry([ownedDocument]))).toEqual({
       ok: true,
       value: { schemaVersion: 1, worktrees: [owned] },
     });
     const eight = Array.from({ length: 8 }, (_, index) => ({
-      ...owned,
+      ...ownedDocument,
       taskId: `2424c87${String(index)}-6180-4c64-976e-9ea4bd540744`,
-      path: `${owned.path}-${String(index)}`,
+      path: `${ownedDocument.path}-${String(index)}`,
     }));
     expect(parseOwnedWorktreeRegistry(registry(eight))).toMatchObject({
       ok: true,
@@ -92,13 +112,34 @@ describe("owned worktree recovery", () => {
     }
   });
 
+  it("returns complete stable registry failures", () => {
+    expect(parseOwnedWorktreeRegistry(null)).toEqual({
+      ok: false,
+      failure: expectedOperationalFailure(
+        "TIBER_WORKTREE_REGISTRY_INVALID",
+        "worktree-registry",
+        "owned worktree registry is malformed or exceeds its quota",
+        "retry-after-input",
+      ),
+    });
+    expect(parseOwnedWorktreeRegistry(registry([owned, owned]))).toEqual({
+      ok: false,
+      failure: expectedOperationalFailure(
+        "TIBER_WORKTREE_REGISTRY_INVALID",
+        "worktree-registry",
+        "owned worktree entries are malformed or ambiguous",
+        "retry-after-input",
+      ),
+    });
+  });
+
   it("retains exact interrupted ownership and classifies every ambiguity", () => {
     const valid = {
       path: owned.path,
       canonicalWithinRoot: true,
       gitRegistered: true,
-      branch: owned.branch,
-      claimId: owned.claimId,
+      branch: some(owned.branch),
+      claimId: some(owned.claimId),
       processGroupAlive: false,
     };
     expect(reconcileOwnedWorktrees([owned], [valid])).toEqual({
@@ -107,10 +148,19 @@ describe("owned worktree recovery", () => {
       staleProcessGroups: [],
     });
     expect(
+      reconcileOwnedWorktrees([owned], [{ ...valid, branch: none }]),
+    ).toEqual({ resumable: [], blocked: [owned], staleProcessGroups: [] });
+    expect(
+      reconcileOwnedWorktrees([owned], [{ ...valid, claimId: none }]),
+    ).toEqual({ resumable: [], blocked: [owned], staleProcessGroups: [] });
+    expect(
       reconcileOwnedWorktrees(
         [owned],
         [
-          { ...valid, path: "/foreign" },
+          {
+            ...valid,
+            path: required(parseOwnedWorktreePath("/foreign")),
+          },
           { ...valid, processGroupAlive: true },
         ],
       ),
@@ -123,8 +173,16 @@ describe("owned worktree recovery", () => {
       undefined,
       { ...valid, canonicalWithinRoot: false },
       { ...valid, gitRegistered: false },
-      { ...valid, branch: "foreign" },
-      { ...valid, claimId: "foreign" },
+      {
+        ...valid,
+        branch: some(required(parseTaskBranchName("tiber/task/foreign"))),
+      },
+      {
+        ...valid,
+        claimId: some(
+          required(parseTaskClaimId("33333333-3333-4333-8333-333333333333")),
+        ),
+      },
     ]) {
       expect(
         reconcileOwnedWorktrees(
@@ -135,77 +193,82 @@ describe("owned worktree recovery", () => {
     }
   });
 
-  it("refuses foreign, ambiguous, actively claimed, or unrecoverable cleanup", () => {
+  it("refuses foreign, ambiguous, or actively claimed cleanup", () => {
+    const validRecovery = some(
+      required(parseRecoveryReference("refs/tiber/recovery/example")),
+    );
     for (const observation of [
+      {
+        canonicalWithinRoot: true,
+        gitRegistered: true,
+        branch: none,
+        claimStatus: "released",
+      },
       {
         canonicalWithinRoot: false,
         gitRegistered: true,
-        branch: owned.branch,
-        claimActive: false,
+        branch: some(owned.branch),
+        claimStatus: "released",
       },
       {
         canonicalWithinRoot: true,
         gitRegistered: false,
-        branch: owned.branch,
-        claimActive: false,
+        branch: some(owned.branch),
+        claimStatus: "released",
       },
       {
         canonicalWithinRoot: true,
         gitRegistered: true,
-        branch: "foreign",
-        claimActive: false,
+        branch: some(required(parseTaskBranchName("tiber/task/foreign"))),
+        claimStatus: "released",
       },
       {
         canonicalWithinRoot: true,
         gitRegistered: true,
-        branch: owned.branch,
-        claimActive: true,
+        branch: some(owned.branch),
+        claimStatus: "active",
       },
-    ]) {
+    ] as const) {
       expect(
         decideWorktreeAbandonment(owned, {
           ...observation,
           dirtySource: true,
-          recoveryRef: "refs/tiber/recovery/example",
-        }),
-      ).toEqual({ ok: false, code: "TIBER_WORKTREE_CLEANUP_DENIED" });
-    }
-    for (const recoveryRef of [
-      "bad",
-      "xrefs/tiber/recovery/example",
-      "refs/tiber/recovery/example!",
-    ]) {
-      expect(
-        decideWorktreeAbandonment(owned, {
-          canonicalWithinRoot: true,
-          gitRegistered: true,
-          branch: owned.branch,
-          claimActive: false,
-          dirtySource: true,
-          recoveryRef,
+          recoveryRef: validRecovery,
         }),
       ).toEqual({ ok: false, code: "TIBER_WORKTREE_CLEANUP_DENIED" });
     }
   });
 
-  it("preserves dirty source under a private recovery ref before removal", () => {
+  it("requires a recovery reference before dirty source cleanup", () => {
     expect(
       decideWorktreeAbandonment(owned, {
         canonicalWithinRoot: true,
         gitRegistered: true,
-        branch: owned.branch,
-        claimActive: false,
+        branch: some(owned.branch),
+        claimStatus: "released",
         dirtySource: true,
-        recoveryRef: "refs/tiber/recovery/2424c876/20260823T160000Z",
+        recoveryRef: none,
+      }),
+    ).toEqual({ ok: false, code: "TIBER_WORKTREE_CLEANUP_DENIED" });
+  });
+
+  it("preserves dirty source under a private recovery ref before removal", () => {
+    const recoveryRef = required(
+      parseRecoveryReference("refs/tiber/recovery/2424c876/20260823T160000Z"),
+    );
+    expect(
+      decideWorktreeAbandonment(owned, {
+        canonicalWithinRoot: true,
+        gitRegistered: true,
+        branch: some(owned.branch),
+        claimStatus: "released",
+        dirtySource: true,
+        recoveryRef: some(recoveryRef),
       }),
     ).toEqual({
       ok: true,
       effects: [
-        {
-          kind: "create-recovery-ref",
-          path: owned.path,
-          ref: "refs/tiber/recovery/2424c876/20260823T160000Z",
-        },
+        { kind: "create-recovery-ref", path: owned.path, ref: recoveryRef },
         { kind: "remove-owned-worktree", path: owned.path },
         { kind: "remove-registry-entry", taskId: owned.taskId },
       ],
@@ -213,14 +276,33 @@ describe("owned worktree recovery", () => {
   });
 
   it("removes clean owned work without manufacturing a recovery ref", () => {
+    const recoveryRef = required(
+      parseRecoveryReference("refs/tiber/recovery/unused"),
+    );
     expect(
       decideWorktreeAbandonment(owned, {
         canonicalWithinRoot: true,
         gitRegistered: true,
-        branch: owned.branch,
-        claimActive: false,
+        branch: some(owned.branch),
+        claimStatus: "released",
         dirtySource: false,
-        recoveryRef: "not-needed-for-clean-work",
+        recoveryRef: some(recoveryRef),
+      }),
+    ).toEqual({
+      ok: true,
+      effects: [
+        { kind: "remove-owned-worktree", path: owned.path },
+        { kind: "remove-registry-entry", taskId: owned.taskId },
+      ],
+    });
+    expect(
+      decideWorktreeAbandonment(owned, {
+        canonicalWithinRoot: true,
+        gitRegistered: true,
+        branch: some(owned.branch),
+        claimStatus: "released",
+        dirtySource: false,
+        recoveryRef: none,
       }),
     ).toEqual({
       ok: true,

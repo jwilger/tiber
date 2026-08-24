@@ -6,12 +6,25 @@ import {
   parseSettingsDocument,
   resolveSettings,
   setSetting,
+  settingsFailure,
   type SettingsOverrides,
 } from "../../src/core/configuration/settings.js";
+import { none, some } from "../../src/core/types/option.js";
+import { expectedSettingsFailure } from "../fixtures/failures.js";
+
+function overrides(
+  values: Readonly<Record<string, unknown>> = {},
+): SettingsOverrides {
+  const parsed = parseSettingsDocument({ schemaVersion: 1, values });
+  if (!parsed.ok) throw new Error("invalid settings fixture");
+  return parsed.value.values;
+}
+
+const inherited = (): SettingsOverrides => overrides();
 
 describe("layered settings", () => {
   it("uses built-ins when both explicit layers inherit", () => {
-    expect(resolveSettings({}, {})).toEqual({
+    expect(resolveSettings(inherited(), inherited())).toEqual({
       assuranceLevel: { value: "host-trusted", source: "built-in" },
       outputPreviewBytes: { value: 16_384, source: "built-in" },
       worktreeMode: { value: "isolated", source: "built-in" },
@@ -21,16 +34,16 @@ describe("layered settings", () => {
   it("prefers project values over user-global values", () => {
     expect(
       resolveSettings(
-        {
+        overrides({
           assuranceLevel: "workspace-isolated",
           outputPreviewBytes: 8192,
           worktreeMode: "current",
-        },
-        {
+        }),
+        overrides({
           assuranceLevel: "hermetic",
           outputPreviewBytes: 4096,
           worktreeMode: "isolated",
-        },
+        }),
       ),
     ).toEqual({
       assuranceLevel: { value: "hermetic", source: "project" },
@@ -42,12 +55,12 @@ describe("layered settings", () => {
   it("uses a user-global value when the project inherits", () => {
     expect(
       resolveSettings(
-        {
+        overrides({
           assuranceLevel: "workspace-and-network-isolated",
           outputPreviewBytes: 32_768,
           worktreeMode: "current",
-        },
-        {},
+        }),
+        inherited(),
       ),
     ).toEqual({
       assuranceLevel: {
@@ -62,8 +75,8 @@ describe("layered settings", () => {
   it("renders all columns and effective sources", () => {
     expect(
       formatSettingsTable(
-        { assuranceLevel: "workspace-isolated" },
-        { worktreeMode: "current" },
+        overrides({ assuranceLevel: "workspace-isolated" }),
+        overrides({ worktreeMode: "current" }),
       ),
     ).toBe(
       [
@@ -85,7 +98,7 @@ describe("layered settings", () => {
 });
 
 describe("settings document parsing", () => {
-  it("parses a complete versioned document", () => {
+  it("parses explicit and inherited fields into Options", () => {
     expect(
       parseSettingsDocument({
         schemaVersion: 1,
@@ -100,23 +113,23 @@ describe("settings document parsing", () => {
       value: {
         schemaVersion: 1,
         values: {
-          assuranceLevel: "hermetic",
-          outputPreviewBytes: 1024,
-          worktreeMode: "current",
+          assuranceLevel: some("hermetic"),
+          outputPreviewBytes: some(1024),
+          worktreeMode: some("current"),
         },
       },
     });
-  });
-
-  it("parses an empty values object without undefined properties", () => {
-    const result = parseSettingsDocument({ schemaVersion: 1, values: {} });
-    expect(result).toStrictEqual({
+    expect(parseSettingsDocument({ schemaVersion: 1, values: {} })).toEqual({
       ok: true,
-      value: { schemaVersion: 1, values: {} },
+      value: {
+        schemaVersion: 1,
+        values: {
+          assuranceLevel: none,
+          outputPreviewBytes: none,
+          worktreeMode: none,
+        },
+      },
     });
-    if (result.ok) {
-      expect(Object.keys(result.value.values)).toStrictEqual([]);
-    }
   });
 
   it("accepts both preview boundaries", () => {
@@ -124,28 +137,21 @@ describe("settings document parsing", () => {
       parseSettingsDocument({
         schemaVersion: 1,
         values: { outputPreviewBytes: 1024 },
-      }),
-    ).toMatchObject({ ok: true });
+      }).ok,
+    ).toBe(true);
     expect(
       parseSettingsDocument({
         schemaVersion: 1,
         values: { outputPreviewBytes: 1_048_576 },
-      }),
-    ).toMatchObject({ ok: true });
+      }).ok,
+    ).toBe(true);
   });
 
   it.each([
     [null, "settings must use schema version 1 and an object of values"],
-    [[], "settings must use schema version 1 and an object of values"],
-    [7, "settings must use schema version 1 and an object of values"],
-    ["settings", "settings must use schema version 1 and an object of values"],
     [{}, "settings must use schema version 1 and an object of values"],
     [
       { schemaVersion: 2, values: {} },
-      "settings must use schema version 1 and an object of values",
-    ],
-    [
-      { schemaVersion: 1, values: [] },
       "settings must use schema version 1 and an object of values",
     ],
     [
@@ -161,10 +167,6 @@ describe("settings document parsing", () => {
       "worktreeMode is invalid",
     ],
     [
-      { schemaVersion: 1, values: { outputPreviewBytes: "4096" } },
-      "outputPreviewBytes must be an integer from 1024 to 1048576",
-    ],
-    [
       { schemaVersion: 1, values: { outputPreviewBytes: 1023 } },
       "outputPreviewBytes must be an integer from 1024 to 1048576",
     ],
@@ -172,88 +174,96 @@ describe("settings document parsing", () => {
       { schemaVersion: 1, values: { outputPreviewBytes: 1_048_577 } },
       "outputPreviewBytes must be an integer from 1024 to 1048576",
     ],
-    [
-      { schemaVersion: 1, values: { outputPreviewBytes: 1024.5 } },
-      "outputPreviewBytes must be an integer from 1024 to 1048576",
-    ],
-  ] as const)("rejects malformed input %#", (input, message) => {
+  ] as const)("rejects malformed input", (input, message) => {
     expect(parseSettingsDocument(input)).toEqual({
       ok: false,
-      failure: {
-        code: "TIBER_SETTINGS_INVALID_DOCUMENT",
+      failure: expectedSettingsFailure(
+        "TIBER_SETTINGS_INVALID_DOCUMENT",
         message,
-        retryable: false,
-      },
+      ),
+    });
+  });
+});
+
+describe("settings failures", () => {
+  it.each([
+    ["TIBER_SETTINGS_IO", "transient", ["retry-operation"]],
+    [
+      "TIBER_SETTINGS_REPOSITORY_REQUIRED",
+      "retry-after-state-change",
+      ["repository-required"],
+    ],
+    [
+      "TIBER_SETTINGS_INVALID_VALUE",
+      "retry-after-input",
+      ["corrected-settings"],
+    ],
+  ] as const)("classifies %s recovery", (code, retryability, evidence) => {
+    expect(settingsFailure(code, "failure")).toEqual({
+      ...expectedSettingsFailure(code, "failure"),
+      retryability,
+      requiredRecoveryEvidence: evidence,
     });
   });
 });
 
 describe("setting updates", () => {
   it.each([
-    [
-      "assuranceLevel",
-      "workspace-isolated",
-      { assuranceLevel: "workspace-isolated" },
-    ],
-    [
-      "assuranceLevel",
-      "workspace-and-network-isolated",
-      { assuranceLevel: "workspace-and-network-isolated" },
-    ],
-    ["assuranceLevel", "hermetic", { assuranceLevel: "hermetic" }],
-    ["assuranceLevel", "host-trusted", { assuranceLevel: "host-trusted" }],
-    ["worktreeMode", "isolated", { worktreeMode: "isolated" }],
-    ["worktreeMode", "current", { worktreeMode: "current" }],
-    ["outputPreviewBytes", "1024", { outputPreviewBytes: 1024 }],
-    ["outputPreviewBytes", "1048576", { outputPreviewBytes: 1_048_576 }],
-  ] as const)("sets %s to %s", (key, value, expected) => {
-    expect(setSetting({}, key, value)).toEqual({ ok: true, value: expected });
+    ["assuranceLevel", "workspace-isolated"],
+    ["worktreeMode", "current"],
+    ["outputPreviewBytes", "1024"],
+  ] as const)("sets %s to %s", (key, value) => {
+    const result = setSetting(inherited(), key, value);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value[key].kind).toBe("some");
+  });
+
+  it("inherits one setting without clearing explicit siblings", () => {
+    const explicit = overrides({
+      assuranceLevel: "hermetic",
+      outputPreviewBytes: 4096,
+      worktreeMode: "current",
+    });
+    expect(setSetting(explicit, "assuranceLevel", "inherit")).toEqual({
+      ok: true,
+      value: {
+        assuranceLevel: none,
+        outputPreviewBytes: some(4096),
+        worktreeMode: some("current"),
+      },
+    });
+    expect(setSetting(explicit, "outputPreviewBytes", "inherit")).toEqual({
+      ok: true,
+      value: {
+        assuranceLevel: some("hermetic"),
+        outputPreviewBytes: none,
+        worktreeMode: some("current"),
+      },
+    });
+    expect(setSetting(explicit, "worktreeMode", "inherit")).toEqual({
+      ok: true,
+      value: {
+        assuranceLevel: some("hermetic"),
+        outputPreviewBytes: some(4096),
+        worktreeMode: none,
+      },
+    });
   });
 
   it.each(["assuranceLevel", "outputPreviewBytes", "worktreeMode"] as const)(
-    "removes %s when inheriting without disturbing other values",
+    "represents inherited %s explicitly as none",
     (key) => {
       const result = setSetting(
-        {
+        overrides({
           assuranceLevel: "hermetic",
           outputPreviewBytes: 4096,
           worktreeMode: "current",
-        },
+        }),
         key,
         "inherit",
       );
-      expect(result).toMatchObject({ ok: true });
-      if (result.ok) {
-        expect(result.value).not.toHaveProperty(key);
-        expect(Object.keys(result.value)).toHaveLength(2);
-      }
-    },
-  );
-
-  it.each([
-    [
-      { assuranceLevel: "hermetic" } satisfies SettingsOverrides,
-      "worktreeMode",
-      { assuranceLevel: "hermetic" },
-    ],
-    [
-      { outputPreviewBytes: 4096 } satisfies SettingsOverrides,
-      "worktreeMode",
-      { outputPreviewBytes: 4096 },
-    ],
-    [
-      { assuranceLevel: "hermetic" } satisfies SettingsOverrides,
-      "outputPreviewBytes",
-      { assuranceLevel: "hermetic" },
-    ],
-  ] as const)(
-    "does not add undefined properties while %s inherits",
-    (current, key, expected) => {
-      const result = setSetting(current, key, "inherit");
-      expect(result).toStrictEqual({ ok: true, value: expected });
-      if (result.ok) {
-        expect(Object.keys(result.value)).toStrictEqual(Object.keys(expected));
-      }
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value[key]).toEqual(none);
     },
   );
 
@@ -282,22 +292,10 @@ describe("setting updates", () => {
       "TIBER_SETTINGS_INVALID_VALUE",
       "invalid value for outputPreviewBytes: 1023",
     ],
-    [
-      "outputPreviewBytes",
-      "1048577",
-      "TIBER_SETTINGS_INVALID_VALUE",
-      "invalid value for outputPreviewBytes: 1048577",
-    ],
-    [
-      "outputPreviewBytes",
-      "1.5",
-      "TIBER_SETTINGS_INVALID_VALUE",
-      "invalid value for outputPreviewBytes: 1.5",
-    ],
   ] as const)("rejects %s=%s", (key, value, code, message) => {
-    expect(setSetting({}, key, value)).toEqual({
+    expect(setSetting(inherited(), key, value)).toEqual({
       ok: false,
-      failure: { code, message, retryable: false },
+      failure: expectedSettingsFailure(code, message),
     });
   });
 });

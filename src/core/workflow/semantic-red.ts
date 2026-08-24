@@ -1,37 +1,57 @@
+import type { CommandExitCode } from "../artifacts/artifact-values.js";
+import type {
+  CommandCatalogDigest,
+  CommandName,
+} from "../commands/command-values.js";
+import type { ReviewContextFreshness } from "../reviews/review-values.js";
 import type { TaskSpecification } from "../tasks/readiness.js";
+import type { Option } from "../types/option.js";
+import {
+  parseScenarioFeatureText,
+  type RedDiagnosticDigest,
+  type RedReviewRationale,
+  type ScenarioFeatureText,
+} from "./workflow-values.js";
+import type {
+  ClaimBaselineRevision,
+  ScenarioName,
+  SpecificationDigest,
+  TaskId,
+  TestMappingPath,
+} from "../tasks/task-values.js";
 
 export interface RedObservation {
   readonly schemaVersion: 1;
-  readonly taskId: string;
-  readonly specificationDigest: string;
-  readonly scenarioName: string;
-  readonly testMapping: string;
-  readonly baselineRevision: string;
-  readonly commandCatalogDigest: string;
-  readonly commandName: string;
-  readonly exitCode: number | null;
-  readonly diagnosticDigest: string;
+  readonly taskId: TaskId;
+  readonly specificationDigest: SpecificationDigest;
+  readonly scenarioName: ScenarioName;
+  readonly testMapping: TestMappingPath;
+  readonly baselineRevision: ClaimBaselineRevision;
+  readonly commandCatalogDigest: CommandCatalogDigest;
+  readonly commandName: CommandName;
+  readonly exitCode: Option<CommandExitCode>;
+  readonly diagnosticDigest: RedDiagnosticDigest;
 }
 
 export interface RedReview {
-  readonly freshContext: boolean;
-  readonly reviewerRole: string;
-  readonly reviewedDiagnosticDigest: string;
+  readonly contextFreshness: ReviewContextFreshness;
+  readonly reviewerRole: "red-classifier";
+  readonly reviewedDiagnosticDigest: RedDiagnosticDigest;
   readonly classification: "valid-red" | "unrelated-failure" | "invalid-red";
   readonly missingPublicSurface: boolean;
-  readonly rationale: string;
+  readonly rationale: RedReviewRationale;
 }
 
 export type RedDecision =
   | {
       readonly accepted: true;
       readonly receipt: {
-        readonly taskId: string;
-        readonly specificationDigest: string;
-        readonly baselineRevision: string;
-        readonly scenarioName: string;
-        readonly testMapping: string;
-        readonly diagnosticDigest: string;
+        readonly taskId: TaskId;
+        readonly specificationDigest: SpecificationDigest;
+        readonly baselineRevision: ClaimBaselineRevision;
+        readonly scenarioName: ScenarioName;
+        readonly testMapping: TestMappingPath;
+        readonly diagnosticDigest: RedDiagnosticDigest;
         readonly missingPublicSurface: boolean;
       };
     }
@@ -39,9 +59,9 @@ export type RedDecision =
 
 export function projectScenarioFeature(
   specification: TaskSpecification,
-  scenarioName: string,
+  scenarioName: ScenarioName,
 ):
-  | { readonly ok: true; readonly feature: string }
+  | { readonly ok: true; readonly feature: ScenarioFeatureText }
   | { readonly ok: false; readonly code: "TIBER_SCENARIO_UNKNOWN" } {
   const scenario = specification.scenarios.find(
     (candidate) => candidate.name === scenarioName,
@@ -57,7 +77,13 @@ export function projectScenarioFeature(
     ...scenario.then.map((step) => `    Then ${step}`),
     "",
   ];
-  return { ok: true, feature: lines.join("\n") };
+  const feature = parseScenarioFeatureText(lines.join("\n"));
+  // Stryker disable next-line ConditionalExpression, BlockStatement: every component was parsed into bounded scenario text and the generated feature remains within the parser's derived bound; this is a defect assertion.
+  if (!feature.ok) {
+    // Stryker disable next-line StringLiteral, CallExpression: bounded feature generation makes this defect throw unreachable.
+    throw new Error("generated scenario feature violated its invariant");
+  }
+  return { ok: true, feature: feature.value };
 }
 
 export function decideRedAcceptance(
@@ -65,29 +91,27 @@ export function decideRedAcceptance(
   observation: RedObservation,
   review: RedReview,
   authority: {
-    readonly taskId: string;
-    readonly specificationDigest: string;
-    readonly baselineRevision: string;
-    readonly commandCatalogDigest: string;
+    readonly taskId: TaskId;
+    readonly specificationDigest: SpecificationDigest;
+    readonly baselineRevision: ClaimBaselineRevision;
+    readonly commandCatalogDigest: CommandCatalogDigest;
   },
 ): RedDecision {
   const scenario = specification.scenarios.find(
     (candidate) => candidate.name === observation.scenarioName,
   );
   if (
-    observation.exitCode === 0 ||
-    observation.exitCode === null ||
+    observation.exitCode.kind === "none" ||
+    observation.exitCode.value === 0 ||
     scenario === undefined ||
     !specification.testMappings.includes(observation.testMapping) ||
     observation.taskId !== authority.taskId ||
     observation.specificationDigest !== authority.specificationDigest ||
     observation.baselineRevision !== authority.baselineRevision ||
     observation.commandCatalogDigest !== authority.commandCatalogDigest ||
-    !review.freshContext ||
-    review.reviewerRole !== "red-classifier" ||
+    review.contextFreshness !== "fresh" ||
     review.reviewedDiagnosticDigest !== observation.diagnosticDigest ||
-    review.classification !== "valid-red" ||
-    review.rationale.trim().length < 12
+    review.classification !== "valid-red"
   )
     return { accepted: false, code: "TIBER_RED_REJECTED" };
   return {

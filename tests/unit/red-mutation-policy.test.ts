@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { authorizeWorkflowMutation } from "../../src/core/tools/red-mutation-policy.js";
+import { testMappingPath } from "../fixtures/task-values.js";
 
 const authority = {
-  activeClaim: true,
-  redAccepted: false,
-  testMappings: ["tests/account-deletion.test.ts"],
+  claimStatus: "published" as const,
+  redStatus: "required" as const,
+  testMappings: [testMappingPath("tests/account-deletion.test.ts")],
 };
 
 describe("RED mutation gate", () => {
@@ -35,7 +36,10 @@ describe("RED mutation gate", () => {
     expect(
       authorizeWorkflowMutation("tests/account-deletion.test.ts", {
         ...authority,
-        testMappings: ["tests/other.test.ts", "tests/account-deletion.test.ts"],
+        testMappings: [
+          testMappingPath("tests/other.test.ts"),
+          testMappingPath("tests/account-deletion.test.ts"),
+        ],
       }),
     ).toEqual({
       allowed: true,
@@ -48,7 +52,7 @@ describe("RED mutation gate", () => {
     expect(
       authorizeWorkflowMutation("src/account.ts", {
         ...authority,
-        redAccepted: true,
+        redStatus: "accepted",
       }),
     ).toEqual({
       allowed: true,
@@ -59,8 +63,8 @@ describe("RED mutation gate", () => {
     expect(
       authorizeWorkflowMutation("src/account.ts", {
         ...authority,
-        activeClaim: false,
-        redAccepted: true,
+        claimStatus: "absent",
+        redStatus: "accepted",
       }),
     ).toEqual({
       allowed: false,
@@ -81,7 +85,7 @@ describe("RED mutation gate", () => {
   ])("rejects non-canonical mutation path %j", (path) => {
     const decision = authorizeWorkflowMutation(path, {
       ...authority,
-      redAccepted: true,
+      redStatus: "accepted",
     });
     expect(decision).toEqual({
       allowed: false,

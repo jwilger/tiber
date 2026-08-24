@@ -7,7 +7,17 @@ import {
   type ContainmentAttestation,
   type ContainmentStatus,
 } from "../../core/containment/containment.js";
+import {
+  parseAttestationExpiresAt,
+  parseAttestationIssuedAt,
+  parseContainmentAttestationNonce,
+  parseContainmentAttestationSignature,
+  parseContainmentEvaluationAt,
+  parseContainmentRepositoryPath,
+  parseContainmentVerifierIdentity,
+} from "../../core/containment/containment-values.js";
 import type { AssuranceLevel } from "../../core/configuration/settings.js";
+import { none, some } from "../../core/types/option.js";
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -22,25 +32,30 @@ function parseAttestation(value: unknown): ContainmentAttestation | undefined {
     level !== "hermetic"
   )
     return undefined;
-  const fields = [
-    "repositoryPath",
-    "issuedAt",
-    "expiresAt",
-    "verifier",
-    "nonce",
-    "signature",
-  ] as const;
-  if (fields.some((field) => typeof value[field] !== "string"))
+  const repositoryPath = parseContainmentRepositoryPath(value.repositoryPath);
+  const issuedAt = parseAttestationIssuedAt(value.issuedAt);
+  const expiresAt = parseAttestationExpiresAt(value.expiresAt);
+  const verifier = parseContainmentVerifierIdentity(value.verifier);
+  const nonce = parseContainmentAttestationNonce(value.nonce);
+  const signature = parseContainmentAttestationSignature(value.signature);
+  if (
+    !repositoryPath.ok ||
+    !issuedAt.ok ||
+    !expiresAt.ok ||
+    !verifier.ok ||
+    !nonce.ok ||
+    !signature.ok
+  )
     return undefined;
   return {
     schemaVersion: 1,
     level,
-    repositoryPath: String(value.repositoryPath),
-    issuedAt: String(value.issuedAt),
-    expiresAt: String(value.expiresAt),
-    verifier: String(value.verifier),
-    nonce: String(value.nonce),
-    signature: String(value.signature),
+    repositoryPath: repositoryPath.value,
+    issuedAt: issuedAt.value,
+    expiresAt: expiresAt.value,
+    verifier: verifier.value,
+    nonce: nonce.value,
+    signature: signature.value,
   };
 }
 
@@ -57,7 +72,8 @@ function canonicalPayload(attestation: ContainmentAttestation): string {
 }
 
 function readJson(path: string): unknown {
-  return JSON.parse(readFileSync(path, "utf8")) as unknown;
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  return parsed;
 }
 
 function signatureIsValid(
@@ -110,8 +126,20 @@ export function verifyFileContainment(
   agentDirectory: string,
   now = new Date().toISOString(),
 ): ContainmentStatus {
-  const repositoryPath = realpathSync(cwd);
-  const path = join(repositoryPath, ".tiber", "containment-attestation.json");
+  const repositoryPath = parseContainmentRepositoryPath(realpathSync(cwd));
+  const evaluationAt = parseContainmentEvaluationAt(now);
+  if (!repositoryPath.ok || !evaluationAt.ok)
+    return {
+      state: "lockdown",
+      level: requested,
+      code: "TIBER_CONTAINMENT_ATTESTATION_MISMATCH",
+      detail: "Containment verification inputs are invalid",
+    };
+  const path = join(
+    repositoryPath.value,
+    ".tiber",
+    "containment-attestation.json",
+  );
   let attestation: ContainmentAttestation | undefined;
   if (existsSync(path)) {
     try {
@@ -120,15 +148,20 @@ export function verifyFileContainment(
       attestation = undefined;
     }
   }
-  return decideContainment(requested, repositoryPath, now, {
-    ...(attestation === undefined ? {} : { attestation }),
-    signatureValid:
-      attestation === undefined
-        ? false
-        : signatureIsValid(attestation, agentDirectory),
-    linux: process.platform === "linux",
-    mountNamespaceIsolated: namespaceIsolated("mnt"),
-    networkNamespaceIsolated: namespaceIsolated("net"),
-    seccompEnabled: seccompEnabled(),
-  });
+  return decideContainment(
+    requested,
+    repositoryPath.value,
+    evaluationAt.value,
+    {
+      attestation: attestation === undefined ? none : some(attestation),
+      signatureValid:
+        attestation === undefined
+          ? false
+          : signatureIsValid(attestation, agentDirectory),
+      linux: process.platform === "linux",
+      mountNamespaceIsolated: namespaceIsolated("mnt"),
+      networkNamespaceIsolated: namespaceIsolated("net"),
+      seccompEnabled: seccompEnabled(),
+    },
+  );
 }

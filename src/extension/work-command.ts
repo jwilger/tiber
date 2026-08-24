@@ -17,6 +17,16 @@ import type {
   TaskClaimTakenOverEvent,
 } from "../core/tasks/task-board.js";
 import {
+  parseClaimBaselineRevision,
+  parseClaimOwnerIdentity,
+  parseTaskClaimId,
+  parseTaskEventId,
+  parseTaskEventOccurredAt,
+  parseTaskId,
+} from "../core/tasks/task-values.js";
+import { none, some } from "../core/types/option.js";
+import { parseCompiledWorkflowDigest } from "../core/workflow/workflow-values.js";
+import {
   BUILT_IN_WORKFLOW,
   compileWorkflow,
 } from "../core/workflow/workflow.js";
@@ -31,6 +41,21 @@ function git(cwd: string, arguments_: readonly string[]): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function newTaskEventCoordinates():
+  | {
+      readonly eventId: ReturnType<typeof parseTaskEventId> & {
+        readonly ok: true;
+      };
+      readonly occurredAt: ReturnType<typeof parseTaskEventOccurredAt> & {
+        readonly ok: true;
+      };
+    }
+  | undefined {
+  const eventId = parseTaskEventId(randomUUID());
+  const occurredAt = parseTaskEventOccurredAt(new Date().toISOString());
+  return eventId.ok && occurredAt.ok ? { eventId, occurredAt } : undefined;
 }
 
 function projectWorkflow(cwd: string): unknown {
@@ -51,14 +76,16 @@ export async function handleWorkCommand(
   const remote = new GitTaskRemote(context.cwd);
   const takeoverMatch = /^takeover\s+(\S+)$/u.exec(argumentsText.trim());
   if (takeoverMatch !== null) {
-    const taskId = takeoverMatch[1] ?? "";
+    const taskId = parseTaskId(takeoverMatch[1]);
     const board = remote.read();
-    const task = board.tasks.find((candidate) => candidate.id === taskId);
+    const task = taskId.ok
+      ? board.tasks.find((candidate) => candidate.id === taskId.value)
+      : undefined;
     if (
       board.mode !== "writable" ||
       task?.state !== "In Progress" ||
-      task.claim === undefined ||
-      task.specificationDigest === undefined
+      task.claim.kind !== "some" ||
+      task.specificationDigest.kind !== "some"
     ) {
       context.ui.notify(
         "TIBER_TAKEOVER_DENIED: no exact active claim",
@@ -73,7 +100,9 @@ export async function handleWorkCommand(
       );
       return;
     }
-    const phrase = `takeover ${task.id} ${task.claim.claimId}`;
+    const activeClaim = task.claim.value;
+    const specificationDigest = task.specificationDigest.value;
+    const phrase = `takeover ${task.id} ${activeClaim.claimId}`;
     const confirmation = await context.ui.input(
       "Exact claim takeover",
       `Type: ${phrase}`,
@@ -93,23 +122,38 @@ export async function handleWorkCommand(
       );
       return;
     }
-    const claimId = randomUUID();
-    const occurredAt = new Date().toISOString();
+    const claimId = parseTaskClaimId(randomUUID());
+    const claimOwner = parseClaimOwnerIdentity(owner);
+    const coordinates = newTaskEventCoordinates();
+    if (!claimId.ok || !claimOwner.ok || coordinates === undefined) {
+      context.ui.notify(
+        "TIBER_TASK_VALUE_INVALID: takeover values are invalid",
+        "error",
+      );
+      return;
+    }
     const event: TaskClaimTakenOverEvent = {
       schemaVersion: 1,
-      eventId: randomUUID(),
+      eventId: coordinates.eventId.value,
       kind: "task-claim-taken-over",
-      occurredAt,
+      occurredAt: coordinates.occurredAt.value,
       taskId: task.id,
-      specificationDigest: task.specificationDigest,
-      previousClaimId: task.claim.claimId,
-      claim: { ...task.claim, claimId, owner },
+      specificationDigest,
+      previousClaimId: activeClaim.claimId,
+      claim: {
+        ...activeClaim,
+        claimId: claimId.value,
+        owner: claimOwner.value,
+      },
     };
     const published = remote.publish(event);
+    const observedClaim = published.tasks.find(
+      (candidate) => candidate.id === task.id,
+    )?.claim;
     if (
       published.mode !== "writable" ||
-      published.tasks.find((candidate) => candidate.id === task.id)?.claim
-        ?.claimId !== claimId
+      observedClaim?.kind !== "some" ||
+      observedClaim.value.claimId !== claimId.value
     ) {
       context.ui.notify(
         "TIBER_TAKEOVER_PUBLICATION_FAILED: takeover was not observed",
@@ -122,9 +166,9 @@ export async function handleWorkCommand(
       getAgentDir(),
     ).transferClaim({
       taskId: task.id,
-      previousClaimId: task.claim.claimId,
-      claimId,
-      occurredAt,
+      previousClaimId: activeClaim.claimId,
+      claimId: claimId.value,
+      occurredAt: coordinates.occurredAt.value,
     });
     if (!transfer.ok) {
       context.ui.notify(
@@ -134,18 +178,20 @@ export async function handleWorkCommand(
       return;
     }
     context.ui.notify(
-      `Claim takeover published\nTask: ${task.id}\nClaim: ${claimId}`,
+      `Claim takeover published\nTask: ${task.id}\nClaim: ${claimId.value}`,
       "info",
     );
     return;
   }
-  const taskId = argumentsText.trim();
+  const taskId = parseTaskId(argumentsText.trim());
   const board = remote.read();
-  const task = board.tasks.find((candidate) => candidate.id === taskId);
+  const task = taskId.ok
+    ? board.tasks.find((candidate) => candidate.id === taskId.value)
+    : undefined;
   if (
     board.mode !== "writable" ||
     task?.state !== "Ready" ||
-    task.specificationDigest === undefined
+    task.specificationDigest.kind !== "some"
   ) {
     context.ui.notify(
       "TIBER_WORK_NOT_READY: task must be unclaimed, verified, and Ready",
@@ -170,16 +216,35 @@ export async function handleWorkCommand(
     );
     return Promise.resolve();
   }
-  const claimId = randomUUID();
+  const claimId = parseTaskClaimId(randomUUID());
+  const claimBaseline = parseClaimBaselineRevision(baselineRevision);
+  const claimOwner = parseClaimOwnerIdentity(owner);
+  const workflowDigest = parseCompiledWorkflowDigest(workflow.value.digest);
+  const claimCoordinates = newTaskEventCoordinates();
+  if (
+    !claimId.ok ||
+    !claimBaseline.ok ||
+    !claimOwner.ok ||
+    !workflowDigest.ok ||
+    claimCoordinates === undefined
+  ) {
+    context.ui.notify(
+      "TIBER_TASK_VALUE_INVALID: claim values are invalid",
+      "error",
+    );
+    return Promise.resolve();
+  }
   const journal = new FileRunJournal(getAgentDir());
   const baseRecord = {
     schemaVersion: 1,
     taskId: task.id,
-    claimId,
-    baselineRevision,
-    workflowDigest: workflow.value.digest,
+    claimId: claimId.value,
+    baselineRevision: claimBaseline.value,
+    workflowDigest: workflowDigest.value,
+    worktreePath: none,
+    redReceipt: none,
   } as const;
-  if (!journal.write({ ...baseRecord, state: "claim-intent" })) {
+  if (!journal.write({ ...baseRecord, state: "claim-intent" }).ok) {
     context.ui.notify(
       "TIBER_RUN_JOURNAL_FAILED: claim intent was not durable",
       "error",
@@ -188,23 +253,27 @@ export async function handleWorkCommand(
   }
   const event: TaskClaimedEvent = {
     schemaVersion: 1,
-    eventId: randomUUID(),
+    eventId: claimCoordinates.eventId.value,
     kind: "task-claimed",
-    occurredAt: new Date().toISOString(),
+    occurredAt: claimCoordinates.occurredAt.value,
     taskId: task.id,
-    specificationDigest: task.specificationDigest,
+    specificationDigest: task.specificationDigest.value,
     claim: {
-      claimId,
-      owner,
-      baselineRevision,
-      workflowDigest: workflow.value.digest,
+      claimId: claimId.value,
+      owner: claimOwner.value,
+      baselineRevision: claimBaseline.value,
+      workflowDigest: workflowDigest.value,
     },
   };
   const claimed = remote.publish(event);
   const published = claimed.tasks.find(
     (candidate) => candidate.id === task.id,
   )?.claim;
-  if (claimed.mode !== "writable" || published?.claimId !== claimId) {
+  if (
+    claimed.mode !== "writable" ||
+    published?.kind !== "some" ||
+    published.value.claimId !== claimId.value
+  ) {
     context.ui.notify(
       "TIBER_CLAIM_PUBLICATION_FAILED: exclusive claim was not observed",
       "error",
@@ -213,18 +282,29 @@ export async function handleWorkCommand(
   }
   const currentRevision = git(context.cwd, ["rev-parse", "HEAD"]);
   if (currentRevision !== baselineRevision) {
+    const releaseCoordinates = newTaskEventCoordinates();
+    if (releaseCoordinates === undefined) {
+      context.ui.notify(
+        "TIBER_TASK_VALUE_INVALID: release event values are invalid",
+        "error",
+      );
+      return Promise.resolve();
+    }
     const release: TaskClaimReleasedEvent = {
       schemaVersion: 1,
-      eventId: randomUUID(),
+      eventId: releaseCoordinates.eventId.value,
       kind: "task-claim-released",
-      occurredAt: new Date().toISOString(),
+      occurredAt: releaseCoordinates.occurredAt.value,
       taskId: task.id,
-      specificationDigest: task.specificationDigest,
-      claimId,
+      specificationDigest: task.specificationDigest.value,
+      claimId: claimId.value,
       reason: "baseline-drift",
     };
     remote.publish(release);
-    journal.write({ ...baseRecord, state: "blocked-baseline-drift" });
+    if (!journal.write({ ...baseRecord, state: "blocked-baseline-drift" }).ok) {
+      context.ui.notify("TIBER_RUN_JOURNAL_FAILED", "error");
+      return Promise.resolve();
+    }
     context.ui.notify(
       "TIBER_BASELINE_DRIFT: claim released and Ready rank preserved",
       "error",
@@ -233,23 +313,34 @@ export async function handleWorkCommand(
   }
   const worktree = new GitOwnedWorktrees(context.cwd, getAgentDir()).create({
     taskId: task.id,
-    claimId,
-    baselineRevision,
-    occurredAt: new Date().toISOString(),
+    claimId: claimId.value,
+    baselineRevision: claimBaseline.value,
+    occurredAt: claimCoordinates.occurredAt.value,
   });
   if (!worktree.ok) {
+    const releaseCoordinates = newTaskEventCoordinates();
+    if (releaseCoordinates === undefined) {
+      context.ui.notify(
+        "TIBER_TASK_VALUE_INVALID: release event values are invalid",
+        "error",
+      );
+      return Promise.resolve();
+    }
     const release: TaskClaimReleasedEvent = {
       schemaVersion: 1,
-      eventId: randomUUID(),
+      eventId: releaseCoordinates.eventId.value,
       kind: "task-claim-released",
-      occurredAt: new Date().toISOString(),
+      occurredAt: releaseCoordinates.occurredAt.value,
       taskId: task.id,
-      specificationDigest: task.specificationDigest,
-      claimId,
+      specificationDigest: task.specificationDigest.value,
+      claimId: claimId.value,
       reason: "released",
     };
     remote.publish(release);
-    journal.write({ ...baseRecord, state: "blocked-worktree" });
+    if (!journal.write({ ...baseRecord, state: "blocked-worktree" }).ok) {
+      context.ui.notify("TIBER_RUN_JOURNAL_FAILED", "error");
+      return Promise.resolve();
+    }
     context.ui.notify(
       `${worktree.failure.code}: ${worktree.failure.message}; claim released`,
       "error",
@@ -260,8 +351,8 @@ export async function handleWorkCommand(
     !journal.write({
       ...baseRecord,
       state: "active",
-      worktreePath: worktree.value.path,
-    })
+      worktreePath: some(worktree.value.path),
+    }).ok
   ) {
     context.ui.notify(
       "TIBER_RUN_JOURNAL_FAILED: active worktree receipt was not durable",
@@ -270,7 +361,7 @@ export async function handleWorkCommand(
     return Promise.resolve();
   }
   context.ui.notify(
-    `Tiber work started\nTask: ${task.id}\nClaim: ${claimId}\nBaseline: ${baselineRevision}\nWorkflow: ${workflow.value.digest}\nWorktree: ${worktree.value.path}`,
+    `Tiber work started\nTask: ${task.id}\nClaim: ${claimId.value}\nBaseline: ${claimBaseline.value}\nWorkflow: ${workflowDigest.value}\nWorktree: ${worktree.value.path}`,
     "info",
   );
   return Promise.resolve();

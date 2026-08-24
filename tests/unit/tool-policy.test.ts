@@ -5,28 +5,55 @@ import {
   authorizeReadPath,
   verifyToolInventory,
 } from "../../src/core/tools/tool-policy.js";
+import {
+  canonicalReadTarget,
+  claimedWorkspaceRoot,
+  requestedWorkspacePath,
+} from "../fixtures/tool-values.js";
 
 describe("governed tool policy", () => {
   it("allows canonical reads within the repository", () => {
     expect(
-      authorizeReadPath("/repo", "src/file.ts", "/repo/src/file.ts"),
+      authorizeReadPath(
+        claimedWorkspaceRoot("/repo"),
+        requestedWorkspacePath("src/file.ts"),
+        canonicalReadTarget("/repo/src/file.ts"),
+      ),
     ).toEqual({
       allowed: true,
       code: "TIBER_READ_ALLOWED",
       detail: "read-only workspace inspection allowed",
     });
-    expect(authorizeReadPath("/repo", ".", "/repo")).toMatchObject({
+    expect(
+      authorizeReadPath(
+        claimedWorkspaceRoot("/repo"),
+        requestedWorkspacePath("."),
+        canonicalReadTarget("/repo"),
+      ),
+    ).toMatchObject({
       allowed: true,
     });
   });
 
   it("denies lexical and symlink escapes before reading", () => {
-    expect(authorizeReadPath("/repo", "../secret", "/secret")).toEqual({
+    expect(
+      authorizeReadPath(
+        claimedWorkspaceRoot("/repo"),
+        requestedWorkspacePath("../secret"),
+        canonicalReadTarget("/secret"),
+      ),
+    ).toEqual({
       allowed: false,
       code: "TIBER_PATH_OUTSIDE_WORKSPACE",
       detail: "requested path escapes the workspace",
     });
-    expect(authorizeReadPath("/repo", "linked", "/secret")).toEqual({
+    expect(
+      authorizeReadPath(
+        claimedWorkspaceRoot("/repo"),
+        requestedWorkspacePath("linked"),
+        canonicalReadTarget("/secret"),
+      ),
+    ).toEqual({
       allowed: false,
       code: "TIBER_PATH_SYMLINK_ESCAPE",
       detail: "canonical target escapes through a symlink",
@@ -34,13 +61,13 @@ describe("governed tool policy", () => {
   });
 
   it("requires a remotely published claim for every mutation", () => {
-    expect(authorizeMutation(false)).toEqual({
+    expect(authorizeMutation("absent")).toEqual({
       allowed: false,
       code: "TIBER_MUTATION_CLAIM_REQUIRED",
       detail:
         "repository mutation requires a remotely published exclusive task claim",
     });
-    expect(authorizeMutation(true)).toEqual({
+    expect(authorizeMutation("published")).toEqual({
       allowed: true,
       code: "TIBER_MUTATION_CLAIMED",
       detail: "published task claim authorizes governed mutation",

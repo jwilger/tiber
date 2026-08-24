@@ -1,16 +1,22 @@
+import type {
+  DoctorNodeVersion,
+  DoctorPackageVersion,
+  DoctorRepositoryPath,
+} from "./doctor-values.js";
+
 export const BOOTSTRAP_MODE = "read-only-bootstrap" as const;
 
 export interface DoctorInput {
-  readonly cwd: string;
-  readonly nodeVersion: string;
-  readonly packageVersion: string;
+  readonly cwd: DoctorRepositoryPath;
+  readonly nodeVersion: DoctorNodeVersion;
+  readonly packageVersion: DoctorPackageVersion;
 }
 
 export interface DoctorReport {
   readonly product: "@jwilger/tiber";
-  readonly version: string;
-  readonly nodeVersion: string;
-  readonly repositoryPath: string;
+  readonly version: DoctorPackageVersion;
+  readonly nodeVersion: DoctorNodeVersion;
+  readonly repositoryPath: DoctorRepositoryPath;
   readonly mode: typeof BOOTSTRAP_MODE;
   readonly mutationPolicy: "known-mutation-tools-blocked";
 }

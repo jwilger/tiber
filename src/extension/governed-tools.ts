@@ -20,11 +20,24 @@ import { Type } from "typebox";
 import { FileRunJournal } from "../adapters/runs/file-run-journal.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
 import { GitOwnedWorktrees } from "../adapters/worktrees/git-owned-worktrees.js";
+import type { TestMappingPath } from "../core/tasks/task-values.js";
+import type { OwnedWorktreePath } from "../core/worktrees/worktree-values.js";
 import { authorizeWorkflowMutation } from "../core/tools/red-mutation-policy.js";
+import {
+  operationalFailure,
+  type TiberFailure,
+  type TiberResult,
+} from "../core/failures/tiber-failure.js";
 import {
   authorizeMutation,
   authorizeReadPath,
 } from "../core/tools/tool-policy.js";
+import {
+  parseCanonicalReadTarget,
+  parseClaimedWorkspaceRoot,
+  parseRequestedWorkspacePath,
+  type CanonicalReadTarget,
+} from "../core/tools/tool-values.js";
 
 const readParameters = Type.Object({
   path: Type.String({ description: "Claimed-worktree-relative file path" }),
@@ -45,10 +58,10 @@ const writeParameters = Type.Object({
 });
 
 interface ActiveMutationAuthority {
-  readonly root: string;
-  readonly activeClaim: boolean;
-  readonly redAccepted: boolean;
-  readonly testMappings: readonly string[];
+  readonly root: OwnedWorktreePath;
+  readonly claimStatus: "published";
+  readonly redStatus: "accepted" | "required";
+  readonly testMappings: readonly TestMappingPath[];
 }
 
 function activeAuthority(
@@ -63,41 +76,87 @@ function activeAuthority(
       (candidate) =>
         candidate.id === entry.taskId &&
         candidate.state === "In Progress" &&
-        candidate.claim?.claimId === entry.claimId,
+        candidate.claim.kind === "some" &&
+        candidate.claim.value.claimId === entry.claimId,
     );
-    if (task?.specification === undefined) return [];
-    const run = new FileRunJournal(getAgentDir()).read(task.id);
-    if (run?.claimId !== entry.claimId) return [];
-    return [
-      {
-        root: entry.path,
-        activeClaim: true,
-        redAccepted: run.state === "red-accepted",
-        testMappings: task.specification.testMappings,
-      },
-    ];
+    if (task?.specification.kind !== "some") return [];
+    const runResult = new FileRunJournal(getAgentDir()).read(task.id);
+    if (
+      !runResult.ok ||
+      runResult.value.kind === "none" ||
+      runResult.value.value.claimId !== entry.claimId
+    )
+      return [];
+    const run = runResult.value.value;
+    const authority: ActiveMutationAuthority = {
+      root: entry.path,
+      claimStatus: "published",
+      redStatus: run.state === "red-accepted" ? "accepted" : "required",
+      testMappings: task.specification.value.testMappings,
+    };
+    return [authority];
   });
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+type GovernedPathFailure = TiberFailure<
+  "TIBER_MUTATION_PATH_INVALID",
+  { readonly domain: "governed-path" },
+  "corrected-input" | "state-change" | "retry-operation"
+>;
+
 async function canonicalMutationTarget(
-  root: string,
-  path: string,
-): Promise<string> {
-  const lexical = resolve(root, path);
+  rootValue: string,
+  pathValue: string,
+): Promise<TiberResult<CanonicalReadTarget, GovernedPathFailure>> {
+  const root = parseClaimedWorkspaceRoot(rootValue);
+  const path = parseRequestedWorkspacePath(pathValue);
+  if (!root.ok || !path.ok)
+    return {
+      ok: false,
+      failure: operationalFailure(
+        "TIBER_MUTATION_PATH_INVALID",
+        "governed-path",
+        "mutation path values are invalid",
+        "retry-after-input",
+      ),
+    };
+  const lexical = resolve(root.value, path.value);
   const parent = await realpath(dirname(lexical));
-  const canonical = resolve(parent, basename(lexical));
-  const check = authorizeReadPath(
-    root,
-    path,
-    existsSync(lexical) ? await realpath(lexical) : canonical,
+  const canonical = parseCanonicalReadTarget(
+    resolve(parent, basename(lexical)),
   );
-  if (!check.allowed) throw new Error(check.code);
-  return canonical;
+  const observed = parseCanonicalReadTarget(
+    existsSync(lexical)
+      ? await realpath(lexical)
+      : resolve(parent, basename(lexical)),
+  );
+  if (!canonical.ok || !observed.ok)
+    return {
+      ok: false,
+      failure: operationalFailure(
+        "TIBER_MUTATION_PATH_INVALID",
+        "governed-path",
+        "canonical mutation target is invalid",
+        "retry-after-input",
+      ),
+    };
+  const check = authorizeReadPath(root.value, path.value, observed.value);
+  return check.allowed
+    ? { ok: true, value: canonical.value }
+    : {
+        ok: false,
+        failure: operationalFailure(
+          "TIBER_MUTATION_PATH_INVALID",
+          "governed-path",
+          check.detail,
+          "retry-after-input",
+        ),
+      };
 }
 
 function deniedMutation() {
-  const denial = authorizeMutation(false);
+  const denial = authorizeMutation("absent");
   return {
     content: [
       { type: "text" as const, text: `${denial.code}: ${denial.detail}` },
@@ -115,10 +174,19 @@ export function registerGovernedTools(pi: ExtensionAPI): void {
     async execute(_id, parameters, _signal, _update, context) {
       try {
         const authority = activeAuthority(context);
-        const root = realpathSync(authority?.root ?? context.cwd);
-        const lexical = resolve(root, parameters.path);
-        const canonical = realpathSync(lexical);
-        const decision = authorizeReadPath(root, parameters.path, canonical);
+        const root = parseClaimedWorkspaceRoot(
+          realpathSync(authority?.root ?? context.cwd),
+        );
+        const requested = parseRequestedWorkspacePath(parameters.path);
+        if (!root.ok || !requested.ok) throw new Error("invalid read path");
+        const lexical = resolve(root.value, requested.value);
+        const canonical = parseCanonicalReadTarget(realpathSync(lexical));
+        if (!canonical.ok) throw new Error("invalid canonical read path");
+        const decision = authorizeReadPath(
+          root.value,
+          requested.value,
+          canonical.value,
+        );
         if (!decision.allowed)
           return {
             content: [
@@ -126,7 +194,7 @@ export function registerGovernedTools(pi: ExtensionAPI): void {
             ],
             details: { allowed: false, code: decision.code },
           };
-        const text = await readFile(canonical, "utf8");
+        const text = await readFile(canonical.value, "utf8");
         const lines = text.split("\n");
         const start = (parameters.offset ?? 1) - 1;
         const selected = lines
@@ -183,26 +251,33 @@ export function registerGovernedTools(pi: ExtensionAPI): void {
           authority.root,
           parameters.path,
         );
-        const before = await readFile(target, "utf8");
+        if (!target.ok)
+          return {
+            content: [{ type: "text", text: target.failure.code }],
+            details: { allowed: false, code: target.failure.code },
+            isError: true,
+          };
+        const targetPath = target.value;
+        const before = await readFile(targetPath, "utf8");
         const first = before.indexOf(parameters.oldText);
         if (first < 0 || before.includes(parameters.oldText, first + 1))
           throw new Error("oldText must match exactly once");
         const after = `${before.slice(0, first)}${parameters.newText}${before.slice(first + parameters.oldText.length)}`;
-        const temporary = `${target}.${randomUUID()}.tmp`;
+        const temporary = `${targetPath}.${randomUUID()}.tmp`;
         await writeFile(temporary, after, {
           encoding: "utf8",
           mode: 0o600,
           flag: "wx",
         });
         try {
-          await rename(temporary, target);
+          await rename(temporary, targetPath);
         } catch (error) {
           await rm(temporary, { force: true });
           throw error;
         }
         return {
           content: [{ type: "text", text: `Updated ${parameters.path}` }],
-          details: { allowed: true, code: decision.code, path: target },
+          details: { allowed: true, code: decision.code, path: targetPath },
         };
       } catch (error) {
         return {
@@ -242,21 +317,28 @@ export function registerGovernedTools(pi: ExtensionAPI): void {
           authority.root,
           parameters.path,
         );
-        const temporary = `${target}.${randomUUID()}.tmp`;
+        if (!target.ok)
+          return {
+            content: [{ type: "text", text: target.failure.code }],
+            details: { allowed: false, code: target.failure.code },
+            isError: true,
+          };
+        const targetPath = target.value;
+        const temporary = `${targetPath}.${randomUUID()}.tmp`;
         await writeFile(temporary, parameters.content, {
           encoding: "utf8",
           mode: 0o600,
           flag: "wx",
         });
         try {
-          await rename(temporary, target);
+          await rename(temporary, targetPath);
         } catch (error) {
           await rm(temporary, { force: true });
           throw error;
         }
         return {
           content: [{ type: "text", text: `Wrote ${parameters.path}` }],
-          details: { allowed: true, code: decision.code, path: target },
+          details: { allowed: true, code: decision.code, path: targetPath },
         };
       } catch (error) {
         return {
