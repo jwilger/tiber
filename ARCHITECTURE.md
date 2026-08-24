@@ -303,9 +303,15 @@ approve, see, or reuse a capability.
 
 ## External context services
 
-Context7 is a first-party direct typed HTTP adapter exposing bounded library
-resolution and documentation queries with library, version, source, and cache
-provenance. It obeys configured endpoint and network capabilities.
+Context7 is a first-party direct typed HTTP adapter exposing `resolve_library`
+and `query_docs` with library, version, source-digest, and cache provenance. It
+requires explicit `TIBER_CONTEXT7_NETWORK=enabled` authority, accepts only the
+exact HTTPS Context7 v2 endpoint (or an exact loopback endpoint for local
+service testing), refuses redirects, and applies hard request, timeout, response,
+and result-count bounds. Responses are parsed once and malformed or oversized
+payloads fail closed. Oversized documentation is content-addressed and returned
+through the ordinary bounded artifact preview/range/search surface. The optional
+API key is used only as an HTTP credential and never returned to model context.
 
 Hindsight is optional and uses separate user-global, private-repository, and
 opt-in shared-project banks with independent recall and retain permissions. A

@@ -32,7 +32,9 @@ export interface ToolDecision<
 export const GOVERNED_TOOL_NAMES = [
   "bash",
   "edit",
+  "query_docs",
   "read",
+  "resolve_library",
   "tiber_artifact_range",
   "tiber_artifact_search",
   "tiber_command",

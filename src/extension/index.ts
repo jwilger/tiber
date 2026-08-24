@@ -40,6 +40,7 @@ import { registerExceptionRequestTool } from "./exception-request-tool.js";
 import { handleGreenCommand } from "./green-command.js";
 import { registerHeadroomCompaction } from "./headroom-compaction.js";
 import { registerCommandTools } from "./command-tools.js";
+import { registerContext7Tools } from "./context7-tools.js";
 import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
 import { handleRedCommand } from "./red-command.js";
@@ -54,6 +55,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
   const packageVersion = readPackageVersion();
   registerGovernedTools(pi);
   registerCommandTools(pi);
+  registerContext7Tools(pi);
   registerTaskCommands(pi);
   registerWorkflowRequestTool(pi);
   registerExceptionRequestTool(pi);

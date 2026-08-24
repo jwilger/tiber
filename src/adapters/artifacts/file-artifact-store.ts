@@ -29,7 +29,10 @@ import {
   parseArtifactSearchMatchText,
   parseArtifactsReapedCount,
 } from "../../core/artifacts/artifact-values.js";
-import type { VirtualizedCommandOutput } from "../../core/artifacts/output-virtualization.js";
+import type {
+  VirtualizedCommandOutput,
+  VirtualizedTextOutput,
+} from "../../core/artifacts/output-virtualization.js";
 import {
   operationalFailure,
   type TiberFailure,
@@ -92,7 +95,7 @@ export class FileArtifactStore {
   }
 
   public put(
-    result: VirtualizedCommandOutput,
+    result: VirtualizedCommandOutput | VirtualizedTextOutput,
   ): ArtifactResult<Option<ArtifactDigest>> {
     if (result.kind === "inline") return { ok: true, value: none };
     const match = DIGEST.exec(result.digest);

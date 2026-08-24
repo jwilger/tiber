@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { parseInlineOutputMaximumBytes } from "../../src/core/artifacts/artifact-values.js";
-import { virtualizeCommandOutput } from "../../src/core/artifacts/output-virtualization.js";
+import {
+  virtualizeCommandOutput,
+  virtualizeTextOutput,
+} from "../../src/core/artifacts/output-virtualization.js";
 import {
   commandOutput,
   inlineOutputMaximumBytes as limit,
@@ -12,6 +15,33 @@ function output(stdout: string, stderr = "") {
 }
 
 describe("bounded command output", () => {
+  it("virtualizes generic text with UTF-8-safe bounded previews", () => {
+    const maximum = parseInlineOutputMaximumBytes(16);
+    if (!maximum.ok) throw new Error("invalid fixture");
+    expect(virtualizeTextOutput("x".repeat(16), maximum.value)).toEqual({
+      kind: "inline",
+      text: "x".repeat(16),
+      byteLength: 16,
+    });
+    expect(virtualizeTextOutput("docs", maximum.value)).toEqual({
+      kind: "inline",
+      text: "docs",
+      byteLength: 4,
+    });
+    const artifact = virtualizeTextOutput(
+      `head${"é".repeat(20)}tail`,
+      maximum.value,
+    );
+    expect(artifact.kind).toBe("artifact");
+    if (artifact.kind !== "artifact") throw new Error("expected artifact");
+    expect(artifact.preview.omittedBytes).toBe(32);
+    expect(artifact.preview.head).not.toContain("�");
+    expect(artifact.preview.tail).not.toContain("�");
+    expect(
+      Buffer.byteLength(artifact.preview.head) +
+        Buffer.byteLength(artifact.preview.tail),
+    ).toBeLessThanOrEqual(16);
+  });
   it("returns small UTF-8 output inline", () => {
     expect(virtualizeCommandOutput(output("passed\n"), limit(128))).toEqual({
       kind: "inline",

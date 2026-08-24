@@ -28,23 +28,33 @@ export interface CommandOutput {
   readonly durationMs: CommandDurationMilliseconds;
 }
 
+export interface VirtualizedTextArtifact {
+  readonly kind: "artifact";
+  readonly digest: ArtifactDigest;
+  readonly byteLength: ArtifactByteLength;
+  readonly content: ArtifactContent;
+  readonly preview: {
+    readonly head: ArtifactPreviewHead;
+    readonly tail: ArtifactPreviewTail;
+    readonly omittedBytes: ArtifactOmittedBytes;
+  };
+}
+
+export type VirtualizedTextOutput =
+  | {
+      readonly kind: "inline";
+      readonly text: string;
+      readonly byteLength: ArtifactByteLength;
+    }
+  | VirtualizedTextArtifact;
+
 export type VirtualizedCommandOutput =
   | {
       readonly kind: "inline";
       readonly output: CommandOutput;
       readonly byteLength: ArtifactByteLength;
     }
-  | {
-      readonly kind: "artifact";
-      readonly digest: ArtifactDigest;
-      readonly byteLength: ArtifactByteLength;
-      readonly content: ArtifactContent;
-      readonly preview: {
-        readonly head: ArtifactPreviewHead;
-        readonly tail: ArtifactPreviewTail;
-        readonly omittedBytes: ArtifactOmittedBytes;
-      };
-    };
+  | VirtualizedTextArtifact;
 
 function generated<Value>(
   result: { readonly ok: true; readonly value: Value } | { readonly ok: false },
@@ -69,6 +79,40 @@ function utf8Suffix(buffer: Buffer, maximumBytes: number): string {
     .subarray(Math.max(0, buffer.length - maximumBytes))
     .toString("utf8")
     .replace(/^�+/u, "");
+}
+
+export function virtualizeTextOutput(
+  text: string,
+  maximumInlineBytes: InlineOutputMaximumBytes,
+): VirtualizedTextOutput {
+  // Stryker disable next-line StringLiteral: Node treats an empty encoding as UTF-8; the explicit encoding documents artifact identity.
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maximumInlineBytes)
+    return {
+      kind: "inline",
+      text,
+      byteLength: generated(parseArtifactByteLength(bytes.length)),
+    };
+  const headBudget = Math.floor(maximumInlineBytes / 2);
+  const tailBudget = maximumInlineBytes - headBudget;
+  const head = utf8Prefix(bytes, headBudget);
+  const tail = utf8Suffix(bytes, tailBudget);
+  const shown = Buffer.byteLength(head) + Buffer.byteLength(tail);
+  return {
+    kind: "artifact",
+    digest: generated(
+      parseArtifactDigest(
+        `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+      ),
+    ),
+    byteLength: generated(parseArtifactByteLength(bytes.length)),
+    content: generated(parseArtifactContent(text)),
+    preview: {
+      head: generated(parseArtifactPreviewHead(head)),
+      tail: generated(parseArtifactPreviewTail(tail)),
+      omittedBytes: generated(parseArtifactOmittedBytes(bytes.length - shown)),
+    },
+  };
 }
 
 export function virtualizeCommandOutput(
