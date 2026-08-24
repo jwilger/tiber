@@ -280,8 +280,15 @@ compliant route remains. An independent review establishes necessity before one
 deduplicated attention item reaches the user.
 
 Approval freezes an operation and binds it to task, run, exact revision, paths,
-preimages, arguments, expiry, and one use. Tiber executes that frozen operation
-directly. Replay, near matches, drift, or expiry fail. The model cannot create,
+preimages, executable, arguments, environment, working directory, output and
+time bounds, state digest, expiry, and one use. A tool-free independent reviewer
+must first establish that the stated goal is blocked and no compliant route
+remains; escalation is deduplicated by the complete claim digest. Human approval
+is interactive, lasts at most fifteen minutes, and never exposes capability
+material to model context. Consumption is atomically audited before Tiber
+executes the frozen shell-free operation directly, followed by a digest-bearing
+observation receipt. Replay, near matches, drift, future use, expiry, corrupt
+audit state, or concurrent double consumption fail. The model cannot create,
 approve, see, or reuse a capability.
 
 ## External context services

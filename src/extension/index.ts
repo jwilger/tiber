@@ -35,6 +35,8 @@ import { handleCommandGrant } from "./command-grant.js";
 import { handleDeliveryCommand } from "./delivery-command.js";
 import { handleDoneCommand } from "./done-command.js";
 import { handleFinalReviewCommand } from "./final-review-command.js";
+import { handleExceptionCommand } from "./exception-command.js";
+import { registerExceptionRequestTool } from "./exception-request-tool.js";
 import { handleGreenCommand } from "./green-command.js";
 import { registerCommandTools } from "./command-tools.js";
 import { registerGovernedTools } from "./governed-tools.js";
@@ -53,6 +55,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
   registerCommandTools(pi);
   registerTaskCommands(pi);
   registerWorkflowRequestTool(pi);
+  registerExceptionRequestTool(pi);
   registerAutomaticWorkflowOrchestration(pi);
   let containment: ContainmentStatus = {
     state: "lockdown",
@@ -116,6 +119,11 @@ export default function registerTiber(pi: ExtensionAPI): void {
     handler: handleDoneCommand,
   });
 
+  pi.registerCommand("tiber:exception", {
+    description: "Inspect and approve one exact short-lived human exception",
+    handler: handleExceptionCommand,
+  });
+
   pi.registerCommand("tiber:final-review", {
     description:
       "Run full verification and one complete final review iteration",
@@ -160,6 +168,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
       "tiber_command",
       "tiber_artifact_range",
       "tiber_artifact_search",
+      "tiber_exception_request",
       "tiber_workflow_request",
     ]);
     const agentDirectory = getAgentDir();
