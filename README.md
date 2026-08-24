@@ -154,6 +154,14 @@ release-please branch or release title is always held for explicit human merge;
 Tiber never enables its auto-merge. Signed task events retain the exact PR,
 gates, disposition, and observed merge.
 
+Current library documentation is available through first-party `resolve_library`
+and `query_docs` tools. Network use is denied unless
+`TIBER_CONTEXT7_NETWORK=enabled`; `TIBER_CONTEXT7_ENDPOINT` defaults to the exact
+`https://context7.com/api/v2` endpoint, and `CONTEXT7_API_KEY` optionally supplies
+the service credential. Direct bounded HTTP is used—never an MCP bridge.
+Responses carry library/version, endpoint, digest, and cache provenance, while
+oversized documentation is exposed through Tiber's artifact tools.
+
 Tiber follows normal Pi conversation without requiring users to memorize
 workflow commands. The active `tiber_workflow_request` tool lets Pi request a
 typed task or campaign operation inferred from ordinary intent. Tiber injects
