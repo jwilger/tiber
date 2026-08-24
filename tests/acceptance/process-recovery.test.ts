@@ -13,6 +13,16 @@ import {
 } from "../fixtures/process-values.js";
 import { taskClaimId, taskId } from "../fixtures/task-values.js";
 
+function detachedChild() {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  if (child.pid === undefined) throw new Error("child process did not start");
+  child.unref();
+  return { child, pid: child.pid };
+}
+
 describe("owned process-group recovery", () => {
   it.skipIf(process.platform === "win32")(
     "reconciles a live detached group after restart and terminates it on shutdown",
@@ -55,6 +65,51 @@ describe("owned process-group recovery", () => {
         value: [],
       });
       expect(() => process.kill(child.pid ?? 0, 0)).toThrow();
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "terminates only the exact task claim during completion cleanup",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "tiber-process-task-"));
+      const first = detachedChild();
+      const second = detachedChild();
+      const registry = new FileProcessGroupRegistry(root);
+      const firstTask = taskId("2424c876-6180-4c64-976e-9ea4bd540744");
+      const firstClaim = taskClaimId("00000000-0000-4000-8000-000000000001");
+      const secondTask = taskId("3434c876-6180-4c64-976e-9ea4bd540744");
+      const secondClaim = taskClaimId("00000000-0000-4000-8000-000000000002");
+      for (const owned of [
+        {
+          schemaVersion: 1 as const,
+          taskId: firstTask,
+          claimId: firstClaim,
+          pid: processId(first.pid),
+          processGroupId: processGroupId(first.pid),
+          startedAt: processStartedAt("2026-08-23T16:00:00.000Z"),
+        },
+        {
+          schemaVersion: 1 as const,
+          taskId: secondTask,
+          claimId: secondClaim,
+          pid: processId(second.pid),
+          processGroupId: processGroupId(second.pid),
+          startedAt: processStartedAt("2026-08-23T16:00:01.000Z"),
+        },
+      ])
+        expect(registry.register(owned)).toMatchObject({ ok: true });
+      expect(registry.terminateTask(firstTask, firstClaim)).toEqual({
+        ok: true,
+        value: [first.pid],
+      });
+      expect(registry.read()).toMatchObject({
+        ok: true,
+        value: [{ taskId: secondTask, claimId: secondClaim }],
+      });
+      expect(registry.terminateAll()).toMatchObject({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(() => process.kill(first.pid, 0)).toThrow();
+      expect(() => process.kill(second.pid, 0)).toThrow();
     },
   );
 });

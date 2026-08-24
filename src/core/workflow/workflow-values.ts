@@ -32,6 +32,14 @@ export type GreenDiagnosticDigest = WorkflowValue<
 >;
 export type SourceDiffDigest = WorkflowValue<string, "source-diff-digest">;
 export type SourceDiffText = WorkflowValue<string, "source-diff-text">;
+export type SourceSnapshotDigest = WorkflowValue<
+  string,
+  "source-snapshot-digest"
+>;
+export type VerificationDiagnosticDigest = WorkflowValue<
+  string,
+  "verification-diagnostic-digest"
+>;
 export type ScenarioFeatureText = WorkflowValue<
   string,
   "scenario-feature-text"
@@ -41,9 +49,17 @@ export type IncrementReviewRationale = WorkflowValue<
   string,
   "increment-review-rationale"
 >;
+export type FinalReviewRationale = WorkflowValue<
+  string,
+  "final-review-rationale"
+>;
 export type IncrementReviewFindingCount = WorkflowValue<
   number,
   "increment-review-finding-count"
+>;
+export type FinalReviewFindingCount = WorkflowValue<
+  number,
+  "final-review-finding-count"
 >;
 
 type Field =
@@ -55,10 +71,14 @@ type Field =
   | "greenDiagnosticDigest"
   | "sourceDiffDigest"
   | "sourceDiffText"
+  | "sourceSnapshotDigest"
+  | "verificationDiagnosticDigest"
   | "scenarioFeatureText"
   | "redReviewRationale"
   | "incrementReviewRationale"
-  | "incrementReviewFindingCount";
+  | "finalReviewRationale"
+  | "incrementReviewFindingCount"
+  | "finalReviewFindingCount";
 type Failure = TiberFailure<
   "TIBER_WORKFLOW_VALUE_INVALID",
   { readonly field: Field },
@@ -139,6 +159,13 @@ export function parseScenarioFeatureText(
 export const parseSourceDiffDigest = (
   value: unknown,
 ): Result<SourceDiffDigest> => digest(value, "sourceDiffDigest");
+export const parseSourceSnapshotDigest = (
+  value: unknown,
+): Result<SourceSnapshotDigest> => digest(value, "sourceSnapshotDigest");
+export const parseVerificationDiagnosticDigest = (
+  value: unknown,
+): Result<VerificationDiagnosticDigest> =>
+  digest(value, "verificationDiagnosticDigest");
 
 function rationale<Purpose extends string>(
   value: unknown,
@@ -159,15 +186,28 @@ export const parseIncrementReviewRationale = (
   value: unknown,
 ): Result<IncrementReviewRationale> =>
   rationale(value, "incrementReviewRationale");
+export const parseFinalReviewRationale = (
+  value: unknown,
+): Result<FinalReviewRationale> => rationale(value, "finalReviewRationale");
+
+function findingCount<Purpose extends string>(
+  value: unknown,
+  field: Field,
+): Result<WorkflowValue<number, Purpose>> {
+  // Stryker disable next-line ConditionalExpression, LogicalOperator: Number.isSafeInteger independently rejects every non-number; typeof establishes narrowing.
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? { ok: true, value: value as WorkflowValue<number, Purpose> }
+    : invalid(field);
+}
 
 export function parseIncrementReviewFindingCount(
   value: unknown,
 ): Result<IncrementReviewFindingCount> {
-  // Stryker disable next-line ConditionalExpression, LogicalOperator: Number.isSafeInteger independently rejects every non-number; typeof establishes narrowing.
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-    ? {
-        ok: true,
-        value: value as IncrementReviewFindingCount,
-      }
-    : invalid("incrementReviewFindingCount");
+  return findingCount(value, "incrementReviewFindingCount");
+}
+
+export function parseFinalReviewFindingCount(
+  value: unknown,
+): Result<FinalReviewFindingCount> {
+  return findingCount(value, "finalReviewFindingCount");
 }

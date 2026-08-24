@@ -17,7 +17,11 @@ import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
 import { GitOwnedWorktrees } from "../adapters/worktrees/git-owned-worktrees.js";
 import { parseInlineOutputMaximumBytes } from "../core/artifacts/artifact-values.js";
 import { virtualizeCommandOutput } from "../core/artifacts/output-virtualization.js";
-import { parseScenarioName, parseTaskId } from "../core/tasks/task-values.js";
+import {
+  parseScenarioName,
+  parseTaskId,
+  parseTestMappingPath,
+} from "../core/tasks/task-values.js";
 import { some } from "../core/types/option.js";
 import { parseCommandName } from "../core/commands/command-values.js";
 import { decideCommandExecution } from "../core/commands/structured-command.js";
@@ -32,17 +36,18 @@ export async function handleRedCommand(
   argumentsText: string,
   context: ExtensionCommandContext,
 ): Promise<void> {
-  const match = /^(\S+)\s+(\S+)\s+(.+)$/u.exec(argumentsText.trim());
+  const match = /^(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/u.exec(argumentsText.trim());
   if (match === null) {
     context.ui.notify(
-      "Usage: /tiber:red <task-id> <test-command> <exact-scenario-name>",
+      "Usage: /tiber:red <task-id> <test-command> <test-mapping> <exact-scenario-name>",
       "info",
     );
     return;
   }
   const taskId = parseTaskId(match[1]);
   const commandName = parseCommandName(match[2]);
-  const scenarioName = parseScenarioName(match[3]);
+  const testMapping = parseTestMappingPath(match[3]);
+  const scenarioName = parseScenarioName(match[4]);
   const board = new GitTaskRemote(context.cwd).read();
   const task = taskId.ok
     ? board.tasks.find((candidate) => candidate.id === taskId.value)
@@ -55,10 +60,11 @@ export async function handleRedCommand(
     task.specificationDigest.kind !== "some" ||
     !commandName.ok ||
     !scenarioName.ok ||
-    task.specification.value.testMappings.length !== 1
+    !testMapping.ok ||
+    !task.specification.value.testMappings.includes(testMapping.value)
   ) {
     context.ui.notify(
-      "TIBER_RED_AUTHORITY_INVALID: exact claim and one mapped test are required",
+      "TIBER_RED_AUTHORITY_INVALID: exact claim, scenario, and mapped test are required",
       "error",
     );
     return;
@@ -166,15 +172,14 @@ export async function handleRedCommand(
     context.ui.notify("TIBER_RED_DIAGNOSTIC_UNAVAILABLE", "error");
     return;
   }
-  const testMapping = specification.testMappings[0];
   const diagnosticDigest = parseRedDiagnosticDigest(diagnostic.digest);
-  if (testMapping === undefined || !diagnosticDigest.ok) return;
+  if (!diagnosticDigest.ok) return;
   const observation: RedObservation = {
     schemaVersion: 1,
     taskId: task.id,
     specificationDigest,
     scenarioName: scenarioName.value,
-    testMapping,
+    testMapping: testMapping.value,
     baselineRevision: claim.baselineRevision,
     commandCatalogDigest: catalog.value.digest,
     commandName: commandName.value,

@@ -24,6 +24,8 @@ import {
   formatDoctorReport,
 } from "../core/doctor/report.js";
 import { handleCommandGrant } from "./command-grant.js";
+import { handleDoneCommand } from "./done-command.js";
+import { handleFinalReviewCommand } from "./final-review-command.js";
 import { handleGreenCommand } from "./green-command.js";
 import { registerCommandTools } from "./command-tools.js";
 import { registerGovernedTools } from "./governed-tools.js";
@@ -73,6 +75,17 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:commands", {
     description: "Grant the exact project structured command catalog",
     handler: handleCommandGrant,
+  });
+
+  pi.registerCommand("tiber:done", {
+    description: "Release, clean up, and mark an exactly reviewed task Done",
+    handler: handleDoneCommand,
+  });
+
+  pi.registerCommand("tiber:final-review", {
+    description:
+      "Run full verification and one complete final review iteration",
+    handler: handleFinalReviewCommand,
   });
 
   pi.registerCommand("tiber:green", {
