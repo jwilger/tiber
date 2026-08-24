@@ -22,6 +22,7 @@ import { handleCommandGrant } from "./command-grant.js";
 import { registerCommandTools } from "./command-tools.js";
 import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
+import { handleRedCommand } from "./red-command.js";
 import { handleSettingsCommand } from "./settings-command.js";
 import { registerTaskCommands } from "./task-commands.js";
 import { handleWorkCommand } from "./work-command.js";
@@ -60,6 +61,11 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:commands", {
     description: "Grant the exact project structured command catalog",
     handler: handleCommandGrant,
+  });
+
+  pi.registerCommand("tiber:red", {
+    description: "Observe and independently classify one exact scenario RED",
+    handler: handleRedCommand,
   });
 
   pi.registerCommand("tiber:work", {

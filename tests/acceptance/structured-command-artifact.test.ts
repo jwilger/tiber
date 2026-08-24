@@ -29,6 +29,7 @@ describe("structured command artifact boundary", () => {
         {
           name: "large-output",
           executable: process.execPath,
+          purpose: "test",
           argv: [
             "-e",
             "for(let i=0;i<500;i++) process.stdout.write(`result-${i}\\n`)",
