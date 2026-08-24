@@ -115,6 +115,7 @@ export const parseTaskClaimId = (value: unknown): Result<TaskClaimId> =>
 export function parseTaskEventOccurredAt(
   value: unknown,
 ): Result<TaskEventOccurredAt> {
+  // Stryker disable next-line ConditionalExpression: canonical ISO equality below independently rejects non-strings accepted by Date.parse; typeof establishes narrowing.
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value)))
     return invalid("taskEventOccurredAt");
   return new Date(value).toISOString() === value
