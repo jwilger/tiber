@@ -38,6 +38,7 @@ import { handleFinalReviewCommand } from "./final-review-command.js";
 import { handleExceptionCommand } from "./exception-command.js";
 import { registerExceptionRequestTool } from "./exception-request-tool.js";
 import { handleGreenCommand } from "./green-command.js";
+import { registerHeadroomCompaction } from "./headroom-compaction.js";
 import { registerCommandTools } from "./command-tools.js";
 import { registerGovernedTools } from "./governed-tools.js";
 import { readPackageVersion } from "./package-version.js";
@@ -57,6 +58,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
   registerWorkflowRequestTool(pi);
   registerExceptionRequestTool(pi);
   registerAutomaticWorkflowOrchestration(pi);
+  registerHeadroomCompaction(pi);
   let containment: ContainmentStatus = {
     state: "lockdown",
     level: "host-trusted",

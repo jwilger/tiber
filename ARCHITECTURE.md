@@ -232,10 +232,20 @@ fixed tool schemas, and hard token, cost, time, concurrency, and effect budgets.
 Missing model routes block instead of silently substituting.
 
 Within a cache epoch, prompt, initial context, tool schemas, and ordering are
-byte-stable. Dynamic state is append-only suffix content. Compaction starts a
-new explicit epoch. Typed context priorities and configurable headroom reserve
-capacity for completion and tool results. Summaries are advisory and preserve
-links to original artifacts.
+byte-stable. Dynamic state is append-only suffix content. Context segments have
+closed authority, verification, goal, working, or optional priority. Hard token
+and byte planning may omit only non-mandatory lower priorities; authority or
+verification overflow blocks. Pi's configured native compaction reserve keeps
+capacity for completion and tool results.
+
+Compaction starts a new explicit digest-identified epoch. Tiber privately
+preserves the complete serialized source as a content-addressed artifact,
+bounds the summarizer input and output, disables cache retention for the
+one-off request, and binds the new epoch to the prior epoch, source digest,
+advisory-summary digest, and first retained entry. Summaries are advisory,
+grant no authority or verification, and retain provenance to original
+artifacts. Missing routes, empty output, cancellation, or persistence failure
+fails closed rather than falling back to unproven context.
 
 Oversized Tiber-controlled results are stored as content-addressed local
 artifacts. Models receive bounded previews and searchable/range-readable

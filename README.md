@@ -173,6 +173,18 @@ defer; post-mutation blockers retain their work. Both remain as non-modal
 goal <title>` publishes a provenance-bearing ad-hoc Backlog task. Session
 shutdown records a restart-safe campaign checkpoint before process cleanup.
 
+Tiber reserves context headroom through Pi's native `compaction.reserveTokens`
+setting (default `16384`) and uses hard typed budgets for mandatory authority,
+verification, goal, working, and optional context. Its automatic workflow
+context has a byte-stable prompt/tool prefix; freshly folded signed state is an
+append-only authority suffix. Lower-priority segments may be omitted at a hard
+bound, but authority and verification overflow blocks instead of weakening
+policy. Every Pi compaction starts an explicit cache epoch, privately preserves
+the complete serialized source under its SHA-256 identity, sends only a bounded
+input to an advisory summarizer, and appends normative provenance. Missing
+model routes, malformed state, empty summaries, and artifact failures cancel
+compaction rather than silently losing verification context.
+
 When a consequential goal is genuinely blocked and no compliant route remains,
 `tiber_exception_request` obtains an independent tool-free necessity review and
 creates one deduplicated human attention item and prompts the human with the
