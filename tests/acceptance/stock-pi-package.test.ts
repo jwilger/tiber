@@ -190,6 +190,7 @@ describe("the packed stock-Pi package", () => {
       "tiber:final-review",
     );
     expect(JSON.stringify(commandResponse?.data)).toContain("tiber:done");
+    expect(JSON.stringify(commandResponse?.data)).toContain("tiber:deliver");
 
     const notification = messages.find(
       (message) =>

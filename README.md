@@ -122,6 +122,15 @@ consecutive complete clean iterations are required. `/tiber:done <task-id>`
 then terminates only that claim's processes, releases the claim, preserves dirty
 source privately, removes its owned worktree, and publishes local-only Done.
 
+`/tiber:deliver <task-id> <mode> <destination-ref-or-> <subject> -- <body>`
+creates a signed Conventional Commit from the exact reviewed source snapshot.
+The closed modes are `local-only`, `branch-push`, `direct`, and `review`;
+non-local modes require an exact `refs/heads/...` destination and use only
+fast-forward Git pushes. The signed task receipt records the exact commit, tree,
+source snapshot, destination, and independently observed remote revision. Source
+drift or a non-fast-forward remote head denies delivery and requires
+revalidation; Tiber never force-pushes.
+
 ## Status and architecture
 
 The accepted replacement plan is in

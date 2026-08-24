@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +15,12 @@ afterEach(() => {
   }
 });
 
+async function stopProcess(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null) return;
+  child.kill("SIGTERM");
+  await once(child, "exit");
+}
+
 function waitForResponse(
   child: ReturnType<typeof spawn>,
   id: string,
@@ -28,18 +35,19 @@ function waitForResponse(
     }
     stdout.setEncoding("utf8");
     stderr.setEncoding("utf8");
+    const timeout = setTimeout(() => {
+      rejectPromise(new Error(`Pi RPC timed out: ${errors}`));
+    }, 10_000);
     stdout.on("data", (chunk: string) => {
       output += chunk;
       if (output.includes(`"id":"${id}","type":"response"`)) {
+        clearTimeout(timeout);
         resolvePromise(output);
       }
     });
     stderr.on("data", (chunk: string) => {
       errors += chunk;
     });
-    setTimeout(() => {
-      rejectPromise(new Error(`Pi RPC timed out: ${errors}`));
-    }, 10_000);
   });
 }
 
@@ -97,7 +105,7 @@ describe("stock Pi provider veto", () => {
       `${JSON.stringify({ id: "settings", type: "prompt", message: "/tiber:settings set project assuranceLevel workspace-isolated" })}\n`,
     );
     await waitForResponse(settingsProcess, "settings");
-    settingsProcess.kill("SIGTERM");
+    await stopProcess(settingsProcess);
 
     const promptProcess = launch();
     promptProcess.stdin.write(
@@ -105,8 +113,13 @@ describe("stock Pi provider veto", () => {
     );
     const output = await waitForResponse(promptProcess, "prompt");
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
-    promptProcess.kill("SIGTERM");
-    server.close();
+    await stopProcess(promptProcess);
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      server.close((error) => {
+        if (error) rejectPromise(error);
+        else resolvePromise();
+      });
+    });
 
     expect(output).toContain("TIBER_CONTAINMENT_ATTESTATION_MISSING");
     expect(providerRequests).toBe(0);

@@ -7,7 +7,10 @@ import {
 
 import { FileCommandAuthority } from "../adapters/commands/file-command-authority.js";
 import { StructuredCommandRunner } from "../adapters/commands/structured-command-runner.js";
-import { observeSourceDiff } from "../adapters/git/git-source-diff.js";
+import {
+  observeSourceDiff,
+  observeSourceSnapshot,
+} from "../adapters/git/git-source-diff.js";
 import { reviewFinalLens } from "../adapters/models/pi-final-reviewer.js";
 import { FileProcessGroupRegistry } from "../adapters/processes/file-process-group-registry.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
@@ -25,10 +28,7 @@ import {
   finalReviewRiskSignals,
   selectFinalReviewLenses,
 } from "../core/workflow/final-review.js";
-import {
-  parseSourceSnapshotDigest,
-  parseVerificationDiagnosticDigest,
-} from "../core/workflow/workflow-values.js";
+import { parseVerificationDiagnosticDigest } from "../core/workflow/workflow-values.js";
 
 export async function handleFinalReviewCommand(
   argumentsText: string,
@@ -119,8 +119,9 @@ export async function handleFinalReviewCommand(
     context.ui.notify(sourceDiff.failure.code, "error");
     return;
   }
-  const sourceSnapshotDigest = parseSourceSnapshotDigest(
-    `sha256:${createHash("sha256").update(sourceDiff.value).digest("hex")}`,
+  const sourceSnapshotDigest = observeSourceSnapshot(
+    worktree.path,
+    claim.baselineRevision,
   );
   if (!sourceSnapshotDigest.ok) {
     context.ui.notify(sourceSnapshotDigest.failure.code, "error");

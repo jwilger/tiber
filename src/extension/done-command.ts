@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import {
   getAgentDir,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 
-import { observeSourceDiff } from "../adapters/git/git-source-diff.js";
+import { observeSourceSnapshot } from "../adapters/git/git-source-diff.js";
 import { FileProcessGroupRegistry } from "../adapters/processes/file-process-group-registry.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
 import { GitOwnedWorktrees } from "../adapters/worktrees/git-owned-worktrees.js";
@@ -20,7 +20,6 @@ import {
 } from "../core/tasks/task-values.js";
 import { none, some, type Option } from "../core/types/option.js";
 import { decideReviewedCompletion } from "../core/workflow/final-review.js";
-import { parseSourceSnapshotDigest } from "../core/workflow/workflow-values.js";
 import { parseWorktreeAbandonedAt } from "../core/worktrees/worktree-values.js";
 
 function coordinates(): Option<{
@@ -80,16 +79,9 @@ function runDoneCommand(
     (entry) => entry.taskId === taskId.value && entry.claimId === claimId,
   );
   if (ownedEntry !== undefined) {
-    const sourceDiff = observeSourceDiff(
+    const observedSnapshot = observeSourceSnapshot(
       ownedEntry.path,
       ownedEntry.baselineRevision,
-    );
-    if (!sourceDiff.ok) {
-      context.ui.notify(sourceDiff.failure.code, "error");
-      return;
-    }
-    const observedSnapshot = parseSourceSnapshotDigest(
-      `sha256:${createHash("sha256").update(sourceDiff.value).digest("hex")}`,
     );
     if (!observedSnapshot.ok) {
       context.ui.notify(observedSnapshot.failure.code, "error");

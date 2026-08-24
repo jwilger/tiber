@@ -256,6 +256,28 @@ describe("signed final completion authority", () => {
     eventId: "eaeaeaea-eaea-4aea-8aea-eaeaeaeaeaea",
     reason: "completed",
   });
+  const deliveryDocument = {
+    schemaVersion: 1 as const,
+    eventId: "15151515-1515-4515-8515-151515151515",
+    kind: "task-delivery-recorded" as const,
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    claimId: claimed.claim.claimId,
+    receipt: {
+      mode: "branch-push" as const,
+      baselineRevision: claimed.claim.baselineRevision,
+      commit: "1".repeat(40),
+      tree: "2".repeat(40),
+      sourceSnapshotDigest:
+        finalReviewDocument.verification.sourceSnapshotDigest,
+      destination: { kind: "some" as const, value: "refs/heads/feature/task" },
+      observedRemoteCommit: {
+        kind: "some" as const,
+        value: "1".repeat(40),
+      },
+    },
+  };
   const completed = parsedEvent({
     schemaVersion: 1,
     eventId: "fafafafa-fafa-4afa-8afa-fafafafafafa",
@@ -632,6 +654,235 @@ describe("signed final completion authority", () => {
     });
   });
 
+  it.each(["local-only", "branch-push", "direct", "review"] as const)(
+    "parses the closed %s Git delivery mode",
+    (deliveryMode) => {
+      const local = deliveryMode === "local-only";
+      const candidate = {
+        ...deliveryDocument,
+        receipt: {
+          ...deliveryDocument.receipt,
+          mode: deliveryMode,
+          destination: local
+            ? { kind: "none" as const }
+            : deliveryDocument.receipt.destination,
+          observedRemoteCommit: local
+            ? { kind: "none" as const }
+            : deliveryDocument.receipt.observedRemoteCommit,
+        },
+      };
+      expect(parseTaskEvent(candidate)).toEqual({
+        ok: true,
+        value: candidate,
+      });
+    },
+  );
+
+  it("records one exact Git-only delivery receipt", () => {
+    const delivery = parsedEvent(deliveryDocument);
+    expect(delivery).toEqual(deliveryDocument);
+    const prefix = [
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+      secondIncrement,
+      review,
+      secondReview,
+      thirdReview,
+    ];
+    const recorded = foldTaskEvents([...prefix, delivery]);
+    expect(recorded.tasks[0]).toMatchObject({
+      delivery: {
+        kind: "some",
+        value: {
+          commit: deliveryDocument.receipt.commit,
+          observedRemoteCommit: {
+            kind: "some",
+            value: deliveryDocument.receipt.commit,
+          },
+        },
+      },
+    });
+    const failureCases = [
+      parsedEvent({
+        ...deliveryDocument,
+        eventId: "26262626-2626-4626-8626-262626262626",
+        claimId: "27272727-2727-4727-8727-272727272727",
+      }),
+      parsedEvent({
+        ...deliveryDocument,
+        eventId: "28282828-2828-4828-8828-282828282828",
+        specificationDigest: `sha256:${"8".repeat(64)}`,
+      }),
+      parsedEvent({
+        ...deliveryDocument,
+        eventId: "30303030-3030-4030-8030-303030303030",
+        receipt: {
+          ...deliveryDocument.receipt,
+          baselineRevision: "3".repeat(40),
+        },
+      }),
+      parsedEvent({
+        ...deliveryDocument,
+        eventId: "29292929-2929-4929-8929-292929292929",
+        receipt: {
+          ...deliveryDocument.receipt,
+          sourceSnapshotDigest: `sha256:${"8".repeat(64)}`,
+        },
+      }),
+    ];
+    for (const invalid of failureCases)
+      expect(foldTaskEvents([...prefix, invalid])).toMatchObject({
+        mode: "degraded-read-only",
+        failure: {
+          kind: "some",
+          value: { safeContext: { reason: "invalid-delivery-receipt" } },
+        },
+      });
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        ready,
+        claimed,
+        incrementPreserved,
+        secondIncrement,
+        delivery,
+      ]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "invalid-delivery-receipt" } },
+      },
+    });
+    expect(
+      foldTaskEvents([
+        created,
+        specified,
+        ready,
+        claimed,
+        incrementPreserved,
+        secondIncrement,
+        review,
+        secondReview,
+        delivery,
+      ]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "invalid-delivery-receipt" } },
+      },
+    });
+    const duplicateDelivery = parsedEvent({
+      ...deliveryDocument,
+      eventId: "25252525-2525-4525-8525-252525252525",
+    });
+    const duplicate = foldTaskEvents([...prefix, delivery, duplicateDelivery]);
+    expect(duplicate.failure).toEqual(
+      some(
+        taskBoardFailure(
+          "invalid-delivery-receipt",
+          "delivery receipt is duplicate, stale, or not state-bound",
+        ),
+      ),
+    );
+    expect(duplicate.tasks).toHaveLength(1);
+    expect(duplicate).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "invalid-delivery-receipt" } },
+      },
+    });
+  });
+
+  it.each([
+    { ...deliveryDocument, kind: "unknown" },
+    { ...deliveryDocument, receipt: null },
+    { ...deliveryDocument, claimId: "bad" },
+    {
+      ...deliveryDocument,
+      receipt: { ...deliveryDocument.receipt, mode: "unknown" },
+    },
+    {
+      ...deliveryDocument,
+      receipt: { ...deliveryDocument.receipt, baselineRevision: "bad" },
+    },
+    {
+      ...deliveryDocument,
+      receipt: { ...deliveryDocument.receipt, commit: "bad" },
+    },
+    {
+      ...deliveryDocument,
+      receipt: { ...deliveryDocument.receipt, tree: "bad" },
+    },
+    {
+      ...deliveryDocument,
+      receipt: {
+        ...deliveryDocument.receipt,
+        sourceSnapshotDigest: "bad",
+      },
+    },
+    {
+      ...deliveryDocument,
+      receipt: { ...deliveryDocument.receipt, destination: null },
+    },
+    {
+      ...deliveryDocument,
+      receipt: {
+        ...deliveryDocument.receipt,
+        destination: {
+          kind: "unknown",
+          value: "refs/heads/feature/task",
+        },
+      },
+    },
+    {
+      ...deliveryDocument,
+      receipt: {
+        ...deliveryDocument.receipt,
+        destination: { kind: "some", value: "bad" },
+      },
+    },
+    {
+      ...deliveryDocument,
+      receipt: {
+        ...deliveryDocument.receipt,
+        observedRemoteCommit: {
+          kind: "unknown",
+          value: "1".repeat(40),
+        },
+      },
+    },
+    {
+      ...deliveryDocument,
+      receipt: {
+        ...deliveryDocument.receipt,
+        observedRemoteCommit: { kind: "some", value: "bad" },
+      },
+    },
+    {
+      ...deliveryDocument,
+      receipt: {
+        ...deliveryDocument.receipt,
+        observedRemoteCommit: null,
+      },
+    },
+    {
+      ...deliveryDocument,
+      receipt: {
+        ...deliveryDocument.receipt,
+        observedRemoteCommit: { kind: "none" },
+      },
+    },
+  ])("rejects malformed delivery receipt %#", (candidate) => {
+    expect(parseTaskEvent(candidate)).toMatchObject({ ok: false });
+  });
+
   it("requires three clean exact iterations, completed release, and cleanup", () => {
     const events = [
       created,
@@ -798,6 +1049,7 @@ describe("exclusive claims", () => {
       preservedIncrements: [],
       finalReviewProgress: none,
       completionRelease: none,
+      delivery: none,
     });
   });
 
@@ -1217,6 +1469,7 @@ describe("reviewed Ready events", () => {
           preservedIncrements: [],
           finalReviewProgress: none,
           completionRelease: none,
+          delivery: none,
         },
       ],
       failure: some(
@@ -1342,6 +1595,7 @@ describe("reviewed Ready events", () => {
           preservedIncrements: [],
           finalReviewProgress: none,
           completionRelease: none,
+          delivery: none,
         },
       ],
       failure: some(
@@ -1397,6 +1651,7 @@ describe("Kanban projection", () => {
           preservedIncrements: [],
           finalReviewProgress: none,
           completionRelease: none,
+          delivery: none,
         },
       ],
       failure: some(
@@ -1429,6 +1684,7 @@ describe("Kanban projection", () => {
           preservedIncrements: [],
           finalReviewProgress: none,
           completionRelease: none,
+          delivery: none,
         },
       ],
       failure: some(
