@@ -5,10 +5,37 @@ for [Pi](https://github.com/badlogic/pi-mono). It runs inside an unmodified Pi
 Node.js process and is being rebuilt as the public npm package
 `@jwilger/tiber`.
 
-The current bootstrap release is deliberately read-only. It provides
-`/tiber:doctor`, inherited global/project settings through `/tiber:settings`,
-and blocks Pi's known mutation tools while governed task workflows are
-implemented.
+Tiber provides signed shared tasks, exact claims, semantic RED/GREEN workflow,
+review-bound delivery, independent CI/review authority, bounded campaigns,
+human exceptions, context headroom, Context7, and optional Hindsight memory.
+It preserves a read-only bootstrap mode until governed authority is available.
+
+## Install, upgrade, and uninstall
+
+Tiber 1.x supports Node.js 22.23.1 through the Node 22 line and unmodified Pi
+0.84.2 or newer before Pi 1.0. Install the stable npm package into stock Pi:
+
+```shell
+pi install npm:@jwilger/tiber@1
+```
+
+Upgrade or reconcile the installed package, then restart Pi:
+
+```shell
+pi update npm:@jwilger/tiber
+```
+
+Remove the user-global installation and retained package checkout:
+
+```shell
+pi remove npm:@jwilger/tiber
+```
+
+A project-local installation uses `-l` on install/remove and is recorded in
+`.pi/settings.json`. Removing Tiber does not delete signed task history,
+worktrees, artifacts, or user-local authority records; inspect and remove those
+separately only after their governing tasks and processes are closed. Never
+delete `refs/heads/tiber/tasks/v1` as an uninstall shortcut.
 
 ## Development
 

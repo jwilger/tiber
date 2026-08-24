@@ -1,5 +1,11 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -92,7 +98,7 @@ function packedFilename(value: unknown): string | undefined {
 }
 
 describe("the packed stock-Pi package", () => {
-  it("installs from its packed contents and reports read-only bootstrap status", async () => {
+  it("installs, exercises signed task discovery, upgrades, and uninstalls outside the source repository", async () => {
     const root = resolve(import.meta.dirname, "../..");
     const temporaryDirectory = mkdtempSync(join(tmpdir(), "tiber-package-"));
     temporaryDirectories.push(temporaryDirectory);
@@ -113,15 +119,63 @@ describe("the packed stock-Pi package", () => {
     expect(archiveEntries).toContain("package/dist/extension/index.js");
     expect(archiveEntries).not.toContain("Cargo.toml");
     expect(archiveEntries).not.toContain("package/crates/");
+    expect(archiveEntries).not.toContain("package/src/");
+    expect(archiveEntries).not.toContain("package/tests/");
+    expect(archiveEntries).not.toMatch(/\.d\.ts(?:\.map)?$/mu);
+    expect(archiveEntries).not.toMatch(/\.js\.map$/mu);
 
     execFileSync("tar", ["-xzf", tarball, "-C", temporaryDirectory]);
+    const packedManifest: unknown = JSON.parse(
+      readFileSync(join(temporaryDirectory, "package", "package.json"), "utf8"),
+    );
+    expect(
+      typeof packedManifest === "object" && packedManifest !== null
+        ? Reflect.get(packedManifest, "engines")
+        : undefined,
+    ).toEqual({ node: ">=22.23.1 <23" });
+    expect(
+      typeof packedManifest === "object" && packedManifest !== null
+        ? Reflect.get(packedManifest, "peerDependencies")
+        : undefined,
+    ).toMatchObject({
+      "@earendil-works/pi-coding-agent": ">=0.84.2 <1",
+      "@earendil-works/pi-ai": ">=0.84.2 <1",
+      "@earendil-works/pi-tui": ">=0.84.2 <1",
+      typebox: ">=1.3.7 <2",
+    });
 
     const home = join(temporaryDirectory, "home");
     const agentDirectory = join(temporaryDirectory, "pi-agent");
     const workspace = join(temporaryDirectory, "workspace");
+    const remote = join(temporaryDirectory, "remote.git");
+    const signingKey = join(temporaryDirectory, "signing-key");
+    const allowedSigners = join(temporaryDirectory, "allowed-signers");
     mkdirSync(home);
     mkdirSync(agentDirectory);
-    mkdirSync(workspace);
+    mkdirSync(remote);
+    execFileSync("git", ["init", "--bare", "--quiet", remote]);
+    execFileSync("git", ["clone", "--quiet", remote, workspace]);
+    execFileSync("ssh-keygen", [
+      "-q",
+      "-t",
+      "ed25519",
+      "-N",
+      "",
+      "-f",
+      signingKey,
+    ]);
+    writeFileSync(
+      allowedSigners,
+      `release@example.test ${readFileSync(`${signingKey}.pub`, "utf8").trim()}\n`,
+    );
+    for (const [name, value] of [
+      ["user.name", "Release Candidate"],
+      ["user.email", "release@example.test"],
+      ["user.signingkey", signingKey],
+      ["gpg.format", "ssh"],
+      ["gpg.ssh.allowedSignersFile", allowedSigners],
+    ] as const)
+      execFileSync("git", ["config", name, value], { cwd: workspace });
 
     const piBinary = resolve(root, "node_modules/.bin/pi");
     const environment = {
@@ -157,6 +211,12 @@ describe("the packed stock-Pi package", () => {
     child.stdin.write(
       '{"id":"doctor","type":"prompt","message":"/tiber:doctor"}\n',
     );
+    child.stdin.write(
+      '{"id":"create","type":"prompt","message":"/tiber:task create Release candidate smoke"}\n',
+    );
+    child.stdin.write(
+      '{"id":"tasks","type":"prompt","message":"/tiber:tasks"}\n',
+    );
 
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
@@ -166,8 +226,10 @@ describe("the packed stock-Pi package", () => {
 
       const poll = setInterval(() => {
         const messages = parseMessages(standardOutput);
-        const completed = messages.some(
-          (message) => message.id === "doctor" && message.success === true,
+        const completed = ["doctor", "create", "tasks"].every((id) =>
+          messages.some(
+            (message) => message.id === id && message.success === true,
+          ),
         );
         if (!completed) {
           return;
@@ -206,5 +268,31 @@ describe("the packed stock-Pi package", () => {
     );
     expect(notification?.message).toContain("Mode: read-only-bootstrap");
     expect(notification?.message).toContain(`Repository: ${workspace}`);
+    expect(
+      messages.some(
+        (message) =>
+          message.type === "extension_ui_request" &&
+          message.method === "notify" &&
+          typeof message.message === "string" &&
+          message.message.includes("Release candidate smoke"),
+      ),
+    ).toBe(true);
+
+    if (child.exitCode === null)
+      await new Promise<void>((resolvePromise) => {
+        child.once("exit", () => {
+          resolvePromise();
+        });
+      });
+    execFileSync(piBinary, ["update", join(temporaryDirectory, "package")], {
+      cwd: workspace,
+      env: environment,
+      stdio: "pipe",
+    });
+    execFileSync(piBinary, ["remove", join(temporaryDirectory, "package")], {
+      cwd: workspace,
+      env: environment,
+      stdio: "pipe",
+    });
   }, 30_000);
 });

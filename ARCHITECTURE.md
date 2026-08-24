@@ -356,7 +356,13 @@ check. An authorized ordinary PR author may enable squash auto-merge only after
 all exact gates; missing permission leaves the PR open. Release-please branch or
 title identity deterministically classifies a release PR, which Tiber never
 auto-merges. Human merge is the publication boundary; tag, GitHub Release, and
-npm OIDC/provenance publication follow automatically.
+npm OIDC/provenance publication follow automatically. Stable package contents
+are compiled JavaScript plus licenses, user documentation, prompts, skills, and
+default workflow—never TypeScript source, tests, source maps, declarations,
+legacy native artifacts, or install-time native builds. Tiber 1.x supports
+Node 22.23.1 through Node 22 and stock Pi 0.84.2 through the pre-1.0 line.
+Marketplace submission names the exact immutable npm release and occurs only
+after clean stock-Pi installation verifies that publication.
 
 Local hooks remain fast: formatting, strict lint, incremental type checking,
 fast unit tests, and commit-message validation. There is no heavy pre-push
