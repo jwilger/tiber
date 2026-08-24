@@ -3,6 +3,7 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 
+import { FileCiAuthorityStore } from "../adapters/ci/file-ci-authority-store.js";
 import { verifyFileContainment } from "../adapters/containment/file-containment-verifier.js";
 import { FileProcessGroupRegistry } from "../adapters/processes/file-process-group-registry.js";
 import { FileAuthorityStore } from "../adapters/settings/file-authority-store.js";
@@ -23,6 +24,7 @@ import {
   createDoctorReport,
   formatDoctorReport,
 } from "../core/doctor/report.js";
+import { handleCiCommand } from "./ci-command.js";
 import { handleCommandGrant } from "./command-grant.js";
 import { handleDeliveryCommand } from "./delivery-command.js";
 import { handleDoneCommand } from "./done-command.js";
@@ -71,6 +73,11 @@ export default function registerTiber(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:settings", {
     description: "Inspect or edit inherited Tiber settings",
     handler: handleSettingsCommand,
+  });
+
+  pi.registerCommand("tiber:ci", {
+    description: "Observe every required exact-revision CI authority",
+    handler: handleCiCommand,
   });
 
   pi.registerCommand("tiber:commands", {
@@ -175,6 +182,20 @@ export default function registerTiber(pi: ExtensionAPI): void {
         ? `Tiber: ${containment.level}`
         : "Tiber: containment lockdown",
     );
+    try {
+      const ciHold = new FileCiAuthorityStore(
+        context.cwd,
+        agentDirectory,
+      ).readHold();
+      if (!ciHold.ok) {
+        context.ui.notify(ciHold.failure.code, "error");
+        context.ui.setStatus("tiber", "Tiber: invalid CI hold state");
+      } else if (ciHold.value.kind === "some") {
+        context.ui.setStatus("tiber", "Tiber: CI delivery hold");
+      }
+    } catch {
+      // A non-repository session has no repository-wide CI state.
+    }
   });
 
   pi.on("session_shutdown", () => {

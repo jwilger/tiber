@@ -278,6 +278,35 @@ describe("signed final completion authority", () => {
       },
     },
   };
+  const ciDocument = {
+    schemaVersion: 1 as const,
+    eventId: "16161616-1616-4616-8616-161616161616",
+    kind: "task-ci-recorded" as const,
+    occurredAt: event.occurredAt,
+    taskId: event.task.id,
+    specificationDigest: digest,
+    claimId: claimed.claim.claimId,
+    receipt: {
+      revision: deliveryDocument.receipt.commit,
+      requiredAuthorities: ["quality", "acceptance"],
+      observations: [
+        {
+          authority: "quality",
+          revision: deliveryDocument.receipt.commit,
+          status: "success" as const,
+          adapterDigest: "5".repeat(64),
+          observationDigest: "3".repeat(64),
+        },
+        {
+          authority: "acceptance",
+          revision: deliveryDocument.receipt.commit,
+          status: "success" as const,
+          adapterDigest: "6".repeat(64),
+          observationDigest: "4".repeat(64),
+        },
+      ],
+    },
+  };
   const completed = parsedEvent({
     schemaVersion: 1,
     eventId: "fafafafa-fafa-4afa-8afa-fafafafafafa",
@@ -800,6 +829,250 @@ describe("signed final completion authority", () => {
     });
   });
 
+  it("records exact success from every required CI authority", () => {
+    const reviewedPrefix = [
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+      secondIncrement,
+      review,
+      secondReview,
+      thirdReview,
+    ];
+    const delivery = parsedEvent(deliveryDocument);
+    const ci = parsedEvent(ciDocument);
+    expect(ci).toEqual(ciDocument);
+    const board = foldTaskEvents([...reviewedPrefix, delivery, ci]);
+    expect(board.mode).toBe("writable");
+    expect(board.tasks[0]?.ci).toEqual(some(ciDocument.receipt));
+
+    const wrongRevision = parsedEvent({
+      ...ciDocument,
+      eventId: "17171717-1717-4717-8717-171717171717",
+      receipt: {
+        ...ciDocument.receipt,
+        revision: "5".repeat(40),
+        observations: ciDocument.receipt.observations.map((observation) => ({
+          ...observation,
+          revision: "5".repeat(40),
+        })),
+      },
+    });
+    expect(
+      foldTaskEvents([...reviewedPrefix, delivery, wrongRevision]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "invalid-ci-receipt" } },
+      },
+    });
+  });
+
+  it("rejects malformed CI receipts", () => {
+    const candidates = [
+      { ...ciDocument, kind: "unknown" },
+      { ...ciDocument, receipt: null },
+      { ...ciDocument, receipt: { ...ciDocument.receipt, extra: true } },
+      { ...ciDocument, claimId: "bad" },
+      { ...ciDocument, receipt: { ...ciDocument.receipt, revision: "bad" } },
+      {
+        ...ciDocument,
+        receipt: { ...ciDocument.receipt, requiredAuthorities: null },
+      },
+      {
+        ...ciDocument,
+        receipt: { ...ciDocument.receipt, requiredAuthorities: ["bad_name"] },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          requiredAuthorities: ["quality"],
+        },
+      },
+      { ...ciDocument, receipt: { ...ciDocument.receipt, observations: null } },
+      {
+        ...ciDocument,
+        receipt: { ...ciDocument.receipt, observations: [] },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          requiredAuthorities: [],
+          observations: [],
+        },
+      },
+      {
+        ...ciDocument,
+        receipt: { ...ciDocument.receipt, observations: [null] },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          observations: ciDocument.receipt.observations.map(
+            (observation, index) =>
+              index === 0 ? { ...observation, extra: true } : observation,
+          ),
+        },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          observations: ciDocument.receipt.observations.map(
+            (observation, index) =>
+              index === 0 ? { ...observation, status: "pending" } : observation,
+          ),
+        },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          observations: ciDocument.receipt.observations.map(
+            (observation, index) =>
+              index === 0
+                ? { ...observation, authority: "bad_name" }
+                : observation,
+          ),
+        },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          observations: ciDocument.receipt.observations.map(
+            (observation, index) =>
+              index === 0 ? { ...observation, revision: "bad" } : observation,
+          ),
+        },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          observations: ciDocument.receipt.observations.map(
+            (observation, index) =>
+              index === 0
+                ? { ...observation, adapterDigest: "bad" }
+                : observation,
+          ),
+        },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          observations: ciDocument.receipt.observations.map(
+            (observation, index) =>
+              index === 0
+                ? { ...observation, observationDigest: "bad" }
+                : observation,
+          ),
+        },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          observations: [
+            ciDocument.receipt.observations[0],
+            ciDocument.receipt.observations[0],
+          ],
+        },
+      },
+      {
+        ...ciDocument,
+        receipt: {
+          ...ciDocument.receipt,
+          observations: [
+            {
+              ...ciDocument.receipt.observations[0],
+              revision: "5".repeat(40),
+            },
+          ],
+        },
+      },
+    ];
+    for (const candidate of candidates)
+      expect(parseTaskEvent(candidate).ok).toBe(false);
+  });
+
+  it("rejects duplicate and stale CI task authority", () => {
+    const reviewedPrefix = [
+      created,
+      specified,
+      ready,
+      claimed,
+      incrementPreserved,
+      secondIncrement,
+      review,
+      secondReview,
+      thirdReview,
+    ];
+    const delivery = parsedEvent(deliveryDocument);
+    const ci = parsedEvent(ciDocument);
+    const releasedBoard = foldTaskEvents([
+      ...reviewedPrefix,
+      delivery,
+      released,
+    ]);
+    expect(releasedBoard.tasks[0]?.state).toBe("Ready");
+    expect(releasedBoard.tasks[0]?.claim).toEqual(none);
+
+    const invalidEvents = [
+      [...reviewedPrefix, ci],
+      [
+        ...reviewedPrefix,
+        delivery,
+        parsedEvent({
+          ...ciDocument,
+          claimId: "77777777-7777-4777-8777-777777777777",
+        }),
+      ],
+      [
+        ...reviewedPrefix,
+        delivery,
+        parsedEvent({
+          ...ciDocument,
+          specificationDigest:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        }),
+      ],
+      [
+        ...reviewedPrefix,
+        delivery,
+        ci,
+        {
+          ...ci,
+          eventId: parsedEvent({
+            ...ciDocument,
+            eventId: "18181818-1818-4818-8818-181818181818",
+          }).eventId,
+        },
+      ],
+      [...reviewedPrefix, delivery, released, ci],
+    ];
+    for (const events of invalidEvents) {
+      const board = foldTaskEvents(events);
+      expect(board.mode).toBe("degraded-read-only");
+      expect(board.tasks).toHaveLength(1);
+      expect(board.failure).toEqual(
+        some(
+          taskBoardFailure(
+            "invalid-ci-receipt",
+            "CI receipt is duplicate, stale, or not state-bound",
+          ),
+        ),
+      );
+    }
+  });
+
   it.each([
     { ...deliveryDocument, kind: "unknown" },
     { ...deliveryDocument, receipt: null },
@@ -927,7 +1200,21 @@ describe("signed final completion authority", () => {
         value: { safeContext: { reason: "non-exact-claim-release" } },
       },
     });
-    const releasable = [...events, thirdReview];
+    const reviewedButNotCi = [...events, thirdReview];
+    expect(
+      foldTaskEvents([...reviewedButNotCi, completedRelease]),
+    ).toMatchObject({
+      mode: "degraded-read-only",
+      failure: {
+        kind: "some",
+        value: { safeContext: { reason: "non-exact-claim-release" } },
+      },
+    });
+    const releasable = [
+      ...reviewedButNotCi,
+      parsedEvent(deliveryDocument),
+      parsedEvent(ciDocument),
+    ];
     const releasedForCompletion = [...releasable, completedRelease];
     expect(
       foldTaskEvents([
@@ -967,7 +1254,7 @@ describe("signed final completion authority", () => {
     for (const invalidCompletion of [
       parsedEvent({
         ...completed,
-        eventId: "16161616-1616-4616-8616-161616161616",
+        eventId: "26262626-2626-4626-8626-262626262626",
         specificationDigest: `sha256:${"6".repeat(64)}`,
       }),
       parsedEvent({
@@ -1050,6 +1337,7 @@ describe("exclusive claims", () => {
       finalReviewProgress: none,
       completionRelease: none,
       delivery: none,
+      ci: none,
     });
   });
 
@@ -1470,6 +1758,7 @@ describe("reviewed Ready events", () => {
           finalReviewProgress: none,
           completionRelease: none,
           delivery: none,
+          ci: none,
         },
       ],
       failure: some(
@@ -1596,6 +1885,7 @@ describe("reviewed Ready events", () => {
           finalReviewProgress: none,
           completionRelease: none,
           delivery: none,
+          ci: none,
         },
       ],
       failure: some(
@@ -1652,6 +1942,7 @@ describe("Kanban projection", () => {
           finalReviewProgress: none,
           completionRelease: none,
           delivery: none,
+          ci: none,
         },
       ],
       failure: some(
@@ -1685,6 +1976,7 @@ describe("Kanban projection", () => {
           finalReviewProgress: none,
           completionRelease: none,
           delivery: none,
+          ci: none,
         },
       ],
       failure: some(

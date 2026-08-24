@@ -118,9 +118,7 @@ After all scenarios and mappings are preserved,
 `/tiber:final-review <task-id> <verification-command>` runs an exact granted
 verification-purpose command and fresh risk-selected, tool-free review lenses.
 Findings or source/verification deltas reset the signed clean streak; three
-consecutive complete clean iterations are required. `/tiber:done <task-id>`
-then terminates only that claim's processes, releases the claim, preserves dirty
-source privately, removes its owned worktree, and publishes local-only Done.
+consecutive complete clean iterations are required.
 
 `/tiber:deliver <task-id> <mode> <destination-ref-or-> <subject> -- <body>`
 creates a signed Conventional Commit from the exact reviewed source snapshot.
@@ -130,6 +128,22 @@ fast-forward Git pushes. The signed task receipt records the exact commit, tree,
 source snapshot, destination, and independently observed remote revision. Source
 drift or a non-fast-forward remote head denies delivery and requires
 revalidation; Tiber never force-pushes.
+
+`/tiber:ci <task-id>` observes every required CI authority for that delivered
+commit. Authorities are configured only in the user-local
+`$PI_CODING_AGENT_DIR/tiber/ci-authorities.v1.json` as unique names, absolute
+executable paths, SHA-256 executable pins, and fixed argv containing exactly one
+`{revision}` argument. Tiber copies the verified executable bytes to a private
+temporary file before shell-free execution and accepts only closed schema-v1
+JSON observations naming the requested authority and full commit SHA. Every
+authority must report terminal `success`; `pending` remains incomplete and any
+terminal `failure` creates a repository-wide delivery hold shared by all
+worktrees. After causal repair and a successful exact-revision rerun,
+`/tiber:ci <task-id> --recover <causal-diagnosis>` records recovery evidence and
+releases the hold. CI receipts remain separate from Git delivery receipts.
+Only after an exact delivery and its complete CI receipt may
+`/tiber:done <task-id>` terminate that claim's processes, release the claim,
+preserve dirty source privately, remove its owned worktree, and publish Done.
 
 ## Status and architecture
 
