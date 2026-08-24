@@ -3,6 +3,18 @@ name: Publish npm package
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Exact immutable release tag to publish
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Exact existing GitHub Release tag to recover
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,12 +24,19 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     environment: npm
+    env:
+      RELEASE_TAG: ${{ inputs.release-tag || github.event.release.tag_name }}
     steps:
       - name: Check out the released revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
+      - name: Verify the GitHub Release target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)" = "$(git rev-parse HEAD)"
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -26,8 +45,6 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Verify release tag and package version
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: test "$RELEASE_TAG" = "v$(node -p \"require('./package.json').version\")"
       - run: npm run verify
       - name: Build the exact publication tarball

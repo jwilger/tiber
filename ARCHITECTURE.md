@@ -355,8 +355,13 @@ Commit-compatible titles, resolved conversations, and an aggregate full-CI
 check. An authorized ordinary PR author may enable squash auto-merge only after
 all exact gates; missing permission leaves the PR open. Release-please branch or
 title identity deterministically classifies a release PR, which Tiber never
-auto-merges. Human merge is the publication boundary; tag, GitHub Release, and
-npm OIDC/provenance publication follow automatically. Stable package contents
+auto-merges. Human merge is the publication boundary. The release-please job
+creates the tag and GitHub Release, then invokes a separate least-privilege
+reusable publication workflow from its validated `release_created` and
+`tag_name` outputs. Publication does not depend on a release event emitted by
+the workflow token, because GitHub suppresses recursive workflow triggers for
+those events. An explicit exact-tag dispatch is retained only for audited
+recovery. Stable package contents
 are compiled JavaScript plus licenses, user documentation, prompts, skills, and
 default workflow—never TypeScript source, tests, source maps, declarations,
 legacy native artifacts, or install-time native builds. Tiber 1.x supports
