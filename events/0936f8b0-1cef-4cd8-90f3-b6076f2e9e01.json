@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "eventId": "0936f8b0-1cef-4cd8-90f3-b6076f2e9e01",
+  "kind": "task-created",
+  "occurredAt": "2026-08-24T12:23:40.542Z",
+  "task": {
+    "id": "edea26e4-c973-4957-9b6b-30491dfbd6dd",
+    "title": "Deliver Slice 17: bounded autonomous campaigns",
+    "description": ""
+  }
+}
