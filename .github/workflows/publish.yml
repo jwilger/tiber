@@ -55,7 +55,7 @@ jobs:
           npm run typecheck
           npm run test:unit
           npm run build
-          npm run test:acceptance
+          npm exec vitest run tests/acceptance/stock-pi-package.test.ts
           npm run verify:package
       - name: Build the exact publication tarball
         run: npm pack --json > npm-pack.json

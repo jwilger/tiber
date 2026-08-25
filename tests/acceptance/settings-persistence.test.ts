@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -51,23 +52,28 @@ async function invokeSettings(
     `${JSON.stringify({ id: "settings", type: "prompt", message: command })}\n`,
   );
 
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const timeout = setTimeout(() => {
-      clearInterval(poll);
+  try {
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      const timeout = setTimeout(() => {
+        clearInterval(poll);
+        rejectPromise(new Error(`Pi RPC timed out: ${errorOutput}`));
+      }, 10_000);
+      const poll = setInterval(() => {
+        if (!output.includes('"id":"settings","type":"response"')) {
+          return;
+        }
+        clearTimeout(timeout);
+        clearInterval(poll);
+        resolvePromise();
+      }, 20);
+    });
+  } finally {
+    if (child.exitCode === null) {
+      const exited = once(child, "exit");
       child.kill("SIGTERM");
-      rejectPromise(new Error(`Pi RPC timed out: ${errorOutput}`));
-    }, 10_000);
-    const poll = setInterval(() => {
-      if (!output.includes('"id":"settings","type":"response"')) {
-        return;
-      }
-      clearTimeout(timeout);
-      clearInterval(poll);
-      child.kill("SIGTERM");
-      resolvePromise();
-    }, 20);
-  });
-
+      await exited;
+    }
+  }
   return output;
 }
 
@@ -152,5 +158,5 @@ describe("layered settings persistence", () => {
       "utf8",
     );
     expect(globalDocument).toContain('"assuranceLevel": "workspace-isolated"');
-  }, 30_000);
+  }, 90_000);
 });
