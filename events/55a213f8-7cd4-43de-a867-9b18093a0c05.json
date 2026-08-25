@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "eventId": "55a213f8-7cd4-43de-a867-9b18093a0c05",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-25T15:29:53.333Z",
+  "taskId": "2424c876-6180-4c64-976e-9ea4bd540744",
+  "specificationDigest": "sha256:a9b42b2401e00db4f540076301845463b3e04d7b5c9e679cf58545dd4f600800",
+  "specification": {
+    "outcome": "Verify that this repository is correctly configured for the current stock-Pi TypeScript Tiber workflow and correct any repository-local setup defects found.",
+    "scenarios": [
+      {
+        "name": "Valid Tiber repository setup",
+        "given": [
+          "The repository contains its current project guidance, architecture, workflow rules, package configuration, and Tiber integration files"
+        ],
+        "when": [
+          "The repository setup is inspected against the current documented Tiber requirements"
+        ],
+        "then": [
+          "Required Tiber configuration and integration files are present and internally consistent",
+          "Obsolete Rust/Codex compatibility setup is not active",
+          "Focused setup verification passes"
+        ]
+      },
+      {
+        "name": "Setup defect is found",
+        "given": [
+          "A repository-local Tiber setup requirement is missing, stale, or inconsistent"
+        ],
+        "when": [
+          "The defect is confirmed by a failing or otherwise concrete observation"
+        ],
+        "then": [
+          "The smallest conforming correction is applied",
+          "A focused check demonstrates the corrected setup"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "Repository-local Tiber setup is assessed against authoritative in-repository documentation and configuration",
+      "Any confirmed setup defects within scope are corrected using behavior-focused verification",
+      "No obsolete Rust/Codex product path is restored or invoked",
+      "Relevant focused checks pass and changed file paths are reported"
+    ],
+    "exclusions": [
+      "Implementing unfinished product slices unrelated to repository setup",
+      "Changing machine-global Pi or Tiber installation state",
+      "Running the complete CI suite as a local delivery ritual",
+      "Publishing, releasing, or merging changes"
+    ],
+    "dependencies": [
+      "Current repository documentation and active ADRs",
+      "Available repository-local focused verification commands"
+    ],
+    "testMappings": [
+      "Setup/configuration defects map to the narrowest applicable repository check or behavior-focused test",
+      "Absence of defects maps to concrete inspection evidence and existing focused verification"
+    ],
+    "architectureImplications": "Preserve the stock-Pi TypeScript architecture, functional-core/imperative-shell boundary, deterministic authorization, strict TypeScript constraints, and durable consequential-effect protocol."
+  }
+}
