@@ -43,7 +43,8 @@ export function workflowGuidance(board: TaskBoard): string {
       initialContext: [
         "Infer the needed governed workflow request from ordinary user intent.",
         "Use tiber_workflow_request for safe progression; do not ask the user to type /tiber commands.",
-        "A workflow request is not authority; report deterministic host denials and evidence requirements.",
+        "A workflow request is not authority. Proactively address actionable host feedback and retry compliant recovery; stop only for a genuine external or human-only blocker.",
+        "Report deterministic denials and exact evidence requirements when no compliant autonomous recovery remains.",
       ],
       toolSchemas: ["tiber_workflow_request:v1", "tiber_exception_request:v1"],
     },

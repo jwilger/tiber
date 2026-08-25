@@ -95,12 +95,15 @@ function ensureSpecification(
     return some("TIBER_TASK_NOT_FOUND: begin-task requires signed task state");
   if (specification.kind === "none") return none;
   const digest = digestTaskSpecification(specification.value);
-  if (task.specificationDigest.kind === "some")
-    return task.specificationDigest.value === digest
-      ? none
-      : some(
-          "TIBER_SPECIFICATION_STALE: begin-task specification conflicts with signed task state",
-        );
+  if (
+    task.specificationDigest.kind === "some" &&
+    task.specificationDigest.value === digest
+  )
+    return none;
+  if (task.specificationDigest.kind === "some" && task.state !== "Backlog")
+    return some(
+      "TIBER_SPECIFICATION_STALE: only a Backlog specification can be corrected before work",
+    );
   const eventId = parseTaskEventId(randomUUID());
   const occurredAt = parseTaskEventOccurredAt(new Date().toISOString());
   if (!eventId.ok || !occurredAt.ok)
@@ -125,6 +128,8 @@ function ensureSpecification(
 async function ensureReady(
   taskId: TaskId,
   context: ExtensionContext,
+  signal: AbortSignal | undefined,
+  onProgress: (message: string) => void,
 ): Promise<Option<string>> {
   const remote = new GitTaskRemote(context.cwd);
   const board = remote.read();
@@ -143,12 +148,16 @@ async function ensureReady(
     context.cwd,
     task.specification.value,
     task.specificationDigest.value,
+    signal === undefined ? { onProgress } : { signal, onProgress },
   );
   if (!review.ok)
     return some(`${review.failure.code}: independent readiness review failed`);
-  if (review.value.findingCount !== 0)
+  if (review.value.findings.length !== 0)
     return some(
-      "TIBER_SPECIFICATION_NOT_READY: independent readiness review returned findings",
+      [
+        "TIBER_SPECIFICATION_NOT_READY: revise the Backlog canonical specification to address every finding, then retry begin-task:",
+        ...review.value.findings.map((finding) => `- ${finding}`),
+      ].join("\n"),
     );
   const eventId = parseTaskEventId(randomUUID());
   const occurredAt = parseTaskEventOccurredAt(new Date().toISOString());
@@ -163,7 +172,7 @@ async function ensureReady(
     occurredAt: occurredAt.value,
     taskId,
     specificationDigest: task.specificationDigest.value,
-    review: review.value,
+    review: review.value.review,
   };
   const published = remote.publish(event);
   return published.mode === "writable"
@@ -176,6 +185,8 @@ async function ensureReady(
 async function dispatch(
   value: unknown,
   context: ExtensionContext,
+  signal: AbortSignal | undefined,
+  onProgress: (message: string) => void,
 ): Promise<string> {
   const observations: string[] = [];
   const requestContext = new Proxy(context, {
@@ -212,6 +223,8 @@ async function dispatch(
     const readinessFailure = await ensureReady(
       request.value.taskId,
       requestContext,
+      signal,
+      onProgress,
     );
     if (readinessFailure.kind === "some") return readinessFailure.value;
     await handleWorkCommand(request.value.taskId, requestContext);
@@ -255,17 +268,27 @@ export function registerWorkflowRequestTool(pi: ExtensionAPI): void {
       "Use tiber_workflow_request when normal user intent requires beginning governed task work or advancing a bounded campaign; never ask the user to translate ordinary intent into /tiber commands.",
     ],
     parameters: workflowRequestSchema,
-    async execute(_toolCallId, parameters, signal, _onUpdate, context) {
+    async execute(_toolCallId, parameters, signal, onUpdate, context) {
       if (signal?.aborted)
         return {
           content: [{ type: "text", text: "TIBER_WORKFLOW_REQUEST_CANCELLED" }],
           details: { disposition: "cancelled" },
         };
-      const result = await dispatch(parameters, context);
-      return {
-        content: [{ type: "text", text: result }],
-        details: { disposition: "evaluated" },
-      };
+      const result = await dispatch(parameters, context, signal, (message) => {
+        onUpdate?.({
+          content: [{ type: "text", text: message }],
+          details: { disposition: "reviewing" },
+        });
+      });
+      return signal?.aborted
+        ? {
+            content: [{ type: "text", text: result }],
+            details: { disposition: "cancelled" },
+          }
+        : {
+            content: [{ type: "text", text: result }],
+            details: { disposition: "evaluated" },
+          };
     },
   });
 }

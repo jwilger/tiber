@@ -89,13 +89,19 @@ export function registerTaskCommands(pi: ExtensionAPI): void {
           decoded = undefined;
         }
         const specification = parseTaskSpecification(decoded);
-        if (
-          !specification.ok ||
-          !taskId.ok ||
-          !board.tasks.some((task) => task.id === taskId.value)
-        ) {
+        const task = taskId.ok
+          ? board.tasks.find((candidate) => candidate.id === taskId.value)
+          : undefined;
+        if (!specification.ok || !taskId.ok || task === undefined) {
           context.ui.notify(
             "TIBER_SPECIFICATION_INVALID: expected an existing task and base64url specification JSON",
+            "error",
+          );
+          return;
+        }
+        if (task.state !== "Backlog") {
+          context.ui.notify(
+            "TIBER_SPECIFICATION_STALE: only a Backlog specification can be corrected",
             "error",
           );
           return;
@@ -125,11 +131,12 @@ export function registerTaskCommands(pi: ExtensionAPI): void {
       if (operation === "ready" && rest.length === 1) {
         const task = board.tasks.find((candidate) => candidate.id === rest[0]);
         if (
-          task?.specification.kind !== "some" ||
+          task?.state !== "Backlog" ||
+          task.specification.kind !== "some" ||
           task.specificationDigest.kind !== "some"
         ) {
           context.ui.notify(
-            "TIBER_SPECIFICATION_NOT_READY: task has no canonical specification",
+            "TIBER_SPECIFICATION_NOT_READY: task must be Backlog with a canonical specification",
             "error",
           );
           return;
@@ -139,9 +146,19 @@ export function registerTaskCommands(pi: ExtensionAPI): void {
           task.specification.value,
           task.specificationDigest.value,
         );
-        if (!review.ok || review.value.findingCount !== 0) {
+        if (!review.ok) {
           context.ui.notify(
-            "TIBER_SPECIFICATION_NOT_READY: independent review failed or returned findings",
+            `${review.failure.code}: independent readiness review failed`,
+            "error",
+          );
+          return;
+        }
+        if (review.value.findings.length !== 0) {
+          context.ui.notify(
+            [
+              "TIBER_SPECIFICATION_NOT_READY: independent readiness review returned actionable findings:",
+              ...review.value.findings.map((finding) => `- ${finding}`),
+            ].join("\n"),
             "error",
           );
           return;
@@ -162,7 +179,7 @@ export function registerTaskCommands(pi: ExtensionAPI): void {
           occurredAt: occurredAt.value,
           taskId: task.id,
           specificationDigest: task.specificationDigest.value,
-          review: review.value,
+          review: review.value.review,
         };
         context.ui.notify(formatTaskBoard(remote.publish(event)), "info");
         return;

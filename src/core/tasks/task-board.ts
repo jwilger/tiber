@@ -323,6 +323,7 @@ export type TaskBoardFailureReason =
   | "invalid-delivery-receipt"
   | "invalid-preserved-increment"
   | "invalid-task-completion"
+  | "invalid-task-specification"
   | "non-exclusive-claim"
   | "non-exact-claim-release"
   | "non-exact-claim-takeover"
@@ -1059,6 +1060,17 @@ export function foldTaskEvents(events: readonly TaskEvent[]): TaskBoard {
       };
     }
     if (event.kind === "task-specified") {
+      if (task.state !== "Backlog")
+        return {
+          mode: "degraded-read-only",
+          tasks: [...tasks.values()],
+          failure: some(
+            taskBoardFailure(
+              "invalid-task-specification",
+              "task specification can only change while the task is Backlog",
+            ),
+          ),
+        };
       tasks.set(task.id, {
         ...task,
         specification: some(event.specification),

@@ -9,7 +9,10 @@ export type ModelReviewFailureCode =
   | "TIBER_EXCEPTION_REVIEW_INVALID"
   | "TIBER_READINESS_REVIEW_INVALID"
   | "TIBER_RED_REVIEW_INVALID"
+  | "TIBER_REVIEW_BUDGET_EXCEEDED"
+  | "TIBER_REVIEW_CANCELLED"
   | "TIBER_REVIEW_EXECUTION_FAILED"
+  | "TIBER_REVIEW_TIMED_OUT"
   | "TIBER_REVIEW_RESPONSE_MISSING";
 
 export type ModelReviewFailure = TiberFailure<
@@ -26,9 +29,13 @@ export function modelReviewFailure(
     code,
     "model-review",
     message,
-    code === "TIBER_REVIEW_RESPONSE_MISSING" ||
-      code === "TIBER_REVIEW_EXECUTION_FAILED"
-      ? "transient"
-      : "retry-after-input",
+    code === "TIBER_REVIEW_CANCELLED"
+      ? "not-retryable"
+      : code === "TIBER_REVIEW_RESPONSE_MISSING" ||
+          code === "TIBER_REVIEW_BUDGET_EXCEEDED" ||
+          code === "TIBER_REVIEW_EXECUTION_FAILED" ||
+          code === "TIBER_REVIEW_TIMED_OUT"
+        ? "transient"
+        : "retry-after-input",
   );
 }
