@@ -2139,9 +2139,9 @@ describe("reviewed Ready events", () => {
       "task-specified",
     );
 
-    expect(
-      foldTaskEvents([created, specified, ready, lateAmendment]),
-    ).toMatchObject({
+    const result = foldTaskEvents([created, specified, ready, lateAmendment]);
+
+    expect(result).toMatchObject({
       mode: "degraded-read-only",
       failure: some(
         taskBoardFailure(
@@ -2150,6 +2150,8 @@ describe("reviewed Ready events", () => {
         ),
       ),
     });
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]?.state).toBe("Ready");
   });
 
   it("projects Ready only after the canonical specification and clean review", () => {
