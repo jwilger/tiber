@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.1](https://github.com/jwilger/tiber/compare/v1.0.0...v1.0.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **release:** connect publication workflow ([#33](https://github.com/jwilger/tiber/issues/33)) ([34ce449](https://github.com/jwilger/tiber/commit/34ce4493c1112d2eecb1ac3f61528c52e736d0f7))
+* **release:** partition candidate verification ([#36](https://github.com/jwilger/tiber/issues/36)) ([b88b24f](https://github.com/jwilger/tiber/commit/b88b24f165e9aa4a0cce2b2e363c735e8992bdc9))
+* **release:** publish resolved tarball safely ([#37](https://github.com/jwilger/tiber/issues/37)) ([01ef599](https://github.com/jwilger/tiber/commit/01ef599937f83d5270e9774609a2521b5a02c7a3))
+* **release:** validate tag without escaped shell ([#35](https://github.com/jwilger/tiber/issues/35)) ([8261ee3](https://github.com/jwilger/tiber/commit/8261ee327eb6650192042881e594506a948ee20b))
+* **release:** verify immutable package boundary ([#38](https://github.com/jwilger/tiber/issues/38)) ([38d60ff](https://github.com/jwilger/tiber/commit/38d60ff0c9cb30f24702ebc477ed83ea73bbed1a))
+* **workflow:** surface actionable readiness feedback ([#39](https://github.com/jwilger/tiber/issues/39)) ([e680c3c](https://github.com/jwilger/tiber/commit/e680c3c848ae4bf42b7f06c8b6fe83c7d961d3c5))
+
 ## 1.0.0 (2026-08-24)
 
 
