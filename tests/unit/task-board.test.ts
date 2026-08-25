@@ -2129,6 +2129,31 @@ describe("reviewed Ready events", () => {
     expect(parsedEvent(ready)).toEqual(ready);
   });
 
+  it("rejects specification amendments after Backlog authority has ended", () => {
+    const created = createdEvent(event);
+    const lateAmendment = requireTaskEvent(
+      {
+        ...specified,
+        eventId: "34343434-3434-4434-8434-343434343434",
+      },
+      "task-specified",
+    );
+
+    const result = foldTaskEvents([created, specified, ready, lateAmendment]);
+
+    expect(result).toMatchObject({
+      mode: "degraded-read-only",
+      failure: some(
+        taskBoardFailure(
+          "invalid-task-specification",
+          "task specification can only change while the task is Backlog",
+        ),
+      ),
+    });
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]?.state).toBe("Ready");
+  });
+
   it("projects Ready only after the canonical specification and clean review", () => {
     const created = createdEvent(event);
     expect(foldTaskEvents([created, specified, ready]).tasks[0]?.state).toBe(
