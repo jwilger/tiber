@@ -10,7 +10,7 @@ pre-commit:
     typecheck:
       run: npm run typecheck
     unit:
-      run: npm run test:unit
+      run: env -u GIT_DIR -u GIT_WORK_TREE npm run test:unit
 
 commit-msg:
   commands:
