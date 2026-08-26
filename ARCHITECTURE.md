@@ -79,6 +79,8 @@ Authority domains remain separate behind these ports:
 - `Clock`
 - `IdentifierSource`
 - `SecretResolver`
+- `PermissionStore`
+- `PermissionPrompt`
 
 GitHub may implement GitHub-specific CI and review adapters, but its credentials,
 permissions, failures, and receipts remain separate from Git transport.
@@ -101,9 +103,10 @@ the board to read-only at the last verified head.
 
 ### Repository-shared declarations
 
-Tracked files may declare versioned data-only workflows, named commands, test
-mappings, and narrower project policy. They are untrusted input and cannot grant
-more authority than user-local settings and the policy floor already permit.
+Tracked files may declare versioned data-only workflows, test mappings,
+command suggestions, and narrower project policy. They are untrusted input and
+cannot grant more authority than user-local settings and the policy floor
+already permit. Command suggestions never grant execution authority.
 
 ### Local private state
 
@@ -129,25 +132,43 @@ effective value, and its source. Empty project text values mean inheritance.
 Global settings can forbid broader project overrides; unlocking requires an
 explicit human confirmation and conflict preview.
 
-`/tiber-setup` is the ordinary setup and reconfiguration entry point. Its
-conversational agent inspects a host-generated closed catalog, explains and
-recommends each supported choice, gathers explicit user intent, and proposes a
-typed setup plan. A deterministic `tiber_setup` host validates the complete
-plan and requires interactive confirmation before settings, authority, or
-repository declarations change. The conversation is bound to the trusted
-repository that invoked it; stale authority observations, cross-repository tool
-calls, and setup-tool calls from ordinary conversations are denied. Model
-output never grants command authority, loosens a ceiling, selects secret
-material, or writes arbitrary paths. A complete confirmed plan is journaled
-before effects, observed afterward, and closed by a digest-bound receipt;
-startup reconciles interrupted confirmed setup before restoring ordinary
-operation. Setup reports externally provisioned
-containment, signing, CI, review, context, and memory prerequisites as blockers
-or optional capabilities rather than fabricating their evidence.
+`/tiber-setup` is the ordinary setup and reconfiguration entry point. A
+deterministic wizard presents plain-language autonomy and isolation choices,
+recommends routine autonomy in the current repository, and leaves internal
+layering and integration details to explicit diagnostics and recovery surfaces. Autonomy
+choices are Ask first, Routine autonomy, and Repository autonomy. Isolation
+choices are Use this repository, Require an isolated workspace, Require
+workspace and network isolation, and Require a hermetic environment. The two
+axes remain independent: autonomy never implies containment, and containment
+never grants an effect.
 
-Settings contain references to externally provisioned secrets. Child process
-environments are scrubbed by default. Tightening applies immediately. Loosening
-applies to a new run or an explicitly rebound existing run.
+The setup host inspects the trusted repository, installed executables, normal
+Git configuration, GitHub CLI authentication, manifests, and GitHub Actions.
+For a standard GitHub repository it proposes and, after human confirmation,
+creates the private validated CI authority catalog using Tiber's first-party
+GitHub Actions observer and selected required checks. The setup operation is
+repository-bound, typed, journaled before effects, observed afterward, and
+closed by a digest-bound receipt. Stale observations and cross-repository calls
+are denied. Model output may explain choices but never approves setup, selects
+secret material, grants permissions, or writes arbitrary paths.
+
+Tiber uses established host credential mechanisms for dedicated Git and forge
+adapters: normal Git configuration, credential helpers, SSH agents, and an
+installed authenticated `gh`. Credential material is never returned to model
+context, logs, receipts, or persisted Tiber state. Explicit secret references
+remain available for optional services that require them. Tightening applies
+immediately. Loosening applies to a new run or an explicitly rebound existing
+run.
+
+Every requested effect passes the immutable workflow floor, agent-role ceiling,
+repository/path boundary, deterministic risk policy, and repository-local
+remembered permission in that order. An undecided eligible effect prompts with
+Deny once, Always deny, Allow once, and Always allow. Persistent decisions are
+private, repository-bound, audited, and keyed by a host-derived semantic action
+scope. They are not model-visible capabilities. Persistent allow is unavailable
+for arbitrary shell, privilege escalation, force operations, publication,
+exceptions, or unsafely broad scopes; those require exact single-use approval
+when otherwise eligible. No permission can weaken an earlier denial.
 
 Tiber is the only executable extension trusted by default in governed mode. An
 observed unallowlisted executable extension or incomplete inventory causes
@@ -241,11 +262,14 @@ surfaces. Bootstrap always leaves this effect-request path reachable, and human
 interaction is reserved for explicit trust, takeover, exception, authority
 loosening, and release-publication boundaries.
 
-Each worker is an
-isolated in-process Pi agent session with typed assignment input and completion
-output, one bounded initial context pack, a role-specific immutable prompt,
-fixed tool schemas, and hard token, cost, time, concurrency, and effect budgets.
-Missing model routes block instead of silently substituting.
+Each worker is an isolated in-process Pi agent session with typed assignment
+input and completion output, one bounded initial context pack, a role-specific
+immutable prompt, fixed tool schemas, and hard token, cost, time, concurrency,
+and effect budgets. Planning, readiness, review, setup, and semantic-classifier
+roles have no arbitrary process capability. Implementation roles request
+shell-free executable-plus-argv effects. Delivery and CI roles receive only
+dedicated Git and forge effects bound to exact repository state. Missing model
+routes block instead of silently substituting.
 
 Within a cache epoch, prompt, initial context, tool schemas, and ordering are
 byte-stable. Dynamic state is append-only suffix content. Context segments have
@@ -269,10 +293,15 @@ handles. This replaces arbitrary context-mode execution with closed effects.
 
 ## Processes and containment
 
-A named command has an executable, argv vector, canonical cwd, scrubbed
-environment, timeout, output limits, and local grant. Tiber does not accept
-model-authored shell strings, interpolation, pipes, redirects, substitutions,
-or executable paths. It owns and terminates process groups it starts.
+A process request names an installed executable, argv vector, semantic purpose,
+canonical cwd class, timeout, and output limit. Tiber resolves the executable;
+a model cannot provide its path. Execution uses an argv API, never a hidden
+shell, and Tiber owns and terminates every process group it starts. Recognized
+low-risk requests may be authorized by the selected autonomy profile; unfamiliar
+eligible requests use the first-use permission flow. Invoking a shell
+interpreter or supplying shell text is an arbitrary-shell effect, never receives
+persistent allow, and requires exact interactive single-use approval whenever
+the role and workflow permit it at all.
 
 Containment assurance levels are `host-trusted`, `workspace-isolated`,
 `workspace-and-network-isolated`, and `hermetic`. Strong levels require an
@@ -283,15 +312,14 @@ closed when strong assurance is required.
 Failure enters persistent configuration-only lockdown by default. An optional
 policy requests graceful Pi shutdown. Stock Pi must prove that startup abort
 prevents provider dispatch; otherwise pre-inference refusal is unsupported and
-release is blocked. The explicit human-invoked guided-setup conversation is the
-only bounded exception: while it is active, Pi exposes only governed repository
-reads and the typed, independently confirmed `tiber_setup` host. Automatic
-workflow context, Hindsight recall, and Tiber compaction are suppressed. Every
-other tool remains
-denied, setup proposals grant no authority, and the ordinary inventory is
-restored and containment re-evaluated immediately after apply or cancellation.
-Lockdown input is handled before agent startup; provider dispatch is not used
-as the refusal mechanism.
+release is blocked. The explicit human-invoked guided setup wizard is the only
+bounded exception. It uses deterministic host UI and repository inspection;
+explanatory model conversation, when requested, receives only governed reads
+and a typed setup proposal surface. Automatic workflow context, Hindsight
+recall, Tiber compaction, and every unrelated tool remain denied. Setup grants
+no runtime permission, and the ordinary inventory is restored and containment
+re-evaluated immediately after apply or cancellation. Lockdown input is handled
+before agent startup; provider dispatch is not used as the refusal mechanism.
 
 ## Worktrees and recovery
 
@@ -357,19 +385,24 @@ exact reviewed source snapshot with a signed Conventional Commit and non-empty
 body, never force-pushes, and records the exact commit, tree, destination, and
 observed remote revision in its receipt. Every required CI authority must report
 terminal success for the exact delivered revision.
-Generic CI commands are user-local, digest-pinned executable/argv templates
-returning validated JSON; mutable repository scripts cannot assert remote CI
-success. Tiber executes a private copy of the exact bytes whose SHA-256 digest
-was granted, without a shell, and requires closed observations naming both the
-configured authority and requested full commit revision. Pending observations
-remain incomplete. Terminal failure creates a Git-common-directory hold visible
-to every worktree; only a recorded causal diagnosis followed by terminal success
-for the exact failed revision releases that hold. CI success is also published
-as a signed task event and never inferred from a Git delivery receipt.
+For GitHub repositories, guided setup creates a private CI authority catalog
+from human-approved GitHub Actions checks. The first-party observer uses the
+installed authenticated `gh`, binds observations to repository identity and
+full commit revision, validates closed output, and pins the shipping adapter
+implementation. Generic third-party CI commands remain an Advanced option: they
+are user-local, digest-pinned executable/argv templates returning validated
+JSON. Mutable repository scripts cannot assert remote CI success. Pending
+observations remain incomplete. Terminal failure creates a
+Git-common-directory hold visible to every checkout; only a recorded causal
+diagnosis followed by terminal success for the exact failed revision releases
+that hold. CI success is also published as a signed task event and never
+inferred from a Git delivery receipt.
 
 The generic review-service port separates pull-request creation, review
 observation, CI observation, and merge authority. GitHub implements each as a
-thin direct HTTP adapter with a distinct credential capability. Review receipts
+dedicated adapter over the user's installed authenticated `gh`; credential
+material remains host-private and each effect still has a distinct typed
+capability and receipt. Review receipts
 bind the PR, delivered head revision, current approvals, complete resolved
 conversation set, exact-SHA checks, author permission, auto-merge disposition,
 and observed merge state.

@@ -12,6 +12,7 @@ the former Rust/Codex implementation without compatibility or data migration.
 A developer can install `@jwilger/tiber`, open an ordinary Git repository in Pi,
 and:
 
+- Choose autonomy and isolation in plain language and become productive without manually authoring Tiber authority files.
 - Configure local authority without trusting repository declarations.
 - Share signed tasks, specifications, priorities, dependencies, and claims
   through Git.
@@ -40,8 +41,12 @@ and:
 - Resolve built-in, user-global, and project-local values with visible
   inheritance.
 - Let global settings constrain project overrides to more restrictive values.
-- Keep project authority and secret references outside repository-controlled
-  files.
+- Keep project authority, remembered permissions, and secret references outside
+  repository-controlled files.
+- Offer repository-bound Deny once, Always deny, Allow once, and Always allow
+  decisions for eligible first-use effects after workflow and role ceilings.
+- Use established host Git credentials and installed authenticated forge clients
+  without exposing credential material to models.
 - Bind project trust to generated identity, canonical Git common directory,
   and expected remotes.
 - Enter visible read-only lockdown when required authority, extension inventory,
@@ -99,8 +104,12 @@ and:
 ### Effects and containment
 
 - Let models request but never execute or authorize effects.
-- Expose structured file operations and named executable/argv commands rather
-  than arbitrary shell text.
+- Expose structured file operations and executable/argv requests by default.
+- Deny arbitrary process capability to planning, setup, classifier, readiness,
+  and review roles; require exact single-use human approval for eligible
+  arbitrary shell requests from implementation roles.
+- Never let a remembered permission weaken workflow, role, repository,
+  publication, or exception guardrails.
 - Persist intent and validate observations and receipts for consequential
   effects.
 - Support host-trusted and externally attested isolation levels.
@@ -127,8 +136,11 @@ and:
   delivered revision.
 - Create a repository-wide hold after terminal CI failure until causally
   resolved.
-- Support GitHub through a thin first-party adapter while retaining generic
-  ports for other services.
+- Support GitHub through a first-party adapter using installed authenticated
+  `gh` while retaining generic ports for other services.
+- Let guided setup discover GitHub Actions and create the private validated CI
+  authority catalog without requiring user-authored adapters or duplicate token
+  environment variables.
 
 ### Context and integrations
 
@@ -143,8 +155,11 @@ and:
 
 ### UI
 
+- Provide a short deterministic setup wizard organized around plain-language
+  autonomy and isolation choices, with internal layering kept in explicit
+  diagnostics and recovery surfaces.
 - Provide status, doctor, settings, Kanban, task detail, work, campaign,
-  attention, containment, and artifact surfaces.
+  attention, containment, permission, and artifact surfaces.
 - Keep lockdown, active workflow state, budgets, claim state, CI hold, and human
   attention visible without modal prompts for ordinary denial.
 

@@ -16,12 +16,16 @@ import {
   parseCiAuthorityName,
   parseCiExecutableDigest,
   parseCiExecutablePath,
+  parseCiGithubCheckName,
+  parseCiGithubRepository,
   parseCiObservationDigest,
   parseCiRevision,
   type CiAdapterArgument,
   type CiAuthorityName,
   type CiExecutableDigest,
   type CiExecutablePath,
+  type CiGithubCheckName,
+  type CiGithubRepository,
   type CiRevision,
 } from "../../core/ci/ci-values.js";
 import {
@@ -37,9 +41,20 @@ export interface CiAuthorityDefinition {
   readonly argv: readonly CiAdapterArgument[];
 }
 
+export interface GithubActionsAuthorityDefinition {
+  readonly kind: "github-actions";
+  readonly name: CiAuthorityName;
+  readonly repository: CiGithubRepository;
+  readonly requiredChecks: readonly CiGithubCheckName[];
+  readonly adapterSha256: CiExecutableDigest;
+}
+
+export type ConfiguredCiAuthority =
+  CiAuthorityDefinition | GithubActionsAuthorityDefinition;
+
 export interface CiAuthorityCatalog {
   readonly schemaVersion: 1;
-  readonly authorities: readonly CiAuthorityDefinition[];
+  readonly authorities: readonly ConfiguredCiAuthority[];
 }
 
 type CiAdapterFailure = TiberFailure<
@@ -47,7 +62,7 @@ type CiAdapterFailure = TiberFailure<
   { readonly domain: "ci-adapter" },
   "corrected-input" | "state-change" | "retry-operation"
 >;
-type CiAdapterResult<T> = TiberResult<T, CiAdapterFailure>;
+export type CiAdapterResult<T> = TiberResult<T, CiAdapterFailure>;
 
 function failure(
   code: CiAdapterFailure["code"],
@@ -64,6 +79,10 @@ function failure(
         : "retry-after-input",
     ),
   };
+}
+
+export function invalidCiAdapter(message: string): CiAdapterResult<never> {
+  return failure("TIBER_CI_ADAPTER_INVALID", message);
 }
 
 function record(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -92,10 +111,64 @@ export function parseCiAuthorityCatalog(
       "CI authority catalog shape is invalid",
     );
 
-  const authorities: CiAuthorityDefinition[] = [];
+  const authorities: ConfiguredCiAuthority[] = [];
   for (const authority of input.authorities) {
+    if (!record(authority))
+      return failure(
+        "TIBER_CI_ADAPTER_INVALID",
+        "CI authority definition shape is invalid",
+      );
+    if (authority.kind === "github-actions") {
+      if (
+        !exactKeys(authority, [
+          "kind",
+          "name",
+          "repository",
+          "requiredChecks",
+          "adapterSha256",
+        ]) ||
+        !Array.isArray(authority.requiredChecks) ||
+        authority.requiredChecks.length === 0 ||
+        authority.requiredChecks.length > 100
+      )
+        return failure(
+          "TIBER_CI_ADAPTER_INVALID",
+          "GitHub Actions authority shape is invalid",
+        );
+      const name = parseCiAuthorityName(authority.name);
+      const repository = parseCiGithubRepository(authority.repository);
+      const requiredChecks = authority.requiredChecks.map(
+        parseCiGithubCheckName,
+      );
+      const adapterSha256 = parseCiExecutableDigest(authority.adapterSha256);
+      if (
+        !name.ok ||
+        !repository.ok ||
+        !adapterSha256.ok ||
+        requiredChecks.some((check) => !check.ok)
+      )
+        return failure(
+          "TIBER_CI_ADAPTER_INVALID",
+          "GitHub Actions authority values are invalid",
+        );
+      const checks = requiredChecks.flatMap((check) =>
+        check.ok ? [check.value] : [],
+      );
+      if (new Set(checks).size !== checks.length)
+        return failure(
+          "TIBER_CI_ADAPTER_INVALID",
+          "GitHub Actions check names must be unique",
+        );
+      authorities.push({
+        kind: "github-actions",
+        name: name.value,
+        repository: repository.value,
+        requiredChecks: checks,
+        adapterSha256: adapterSha256.value,
+      });
+      continue;
+    }
     if (
-      !record(authority) ||
       !exactKeys(authority, [
         "name",
         "executable",
@@ -209,9 +282,14 @@ export function parseCiAuthorityOutput(
 }
 
 export function observeCiAuthority(
-  definition: CiAuthorityDefinition,
+  definition: ConfiguredCiAuthority,
   revision: CiRevision,
 ): CiAdapterResult<CiAuthorityObservation> {
+  if ("kind" in definition)
+    return failure(
+      "TIBER_CI_ADAPTER_INVALID",
+      "GitHub Actions authority requires the first-party observer",
+    );
   let executionDirectory: string | undefined;
   try {
     const executable = readFileSync(definition.executable);

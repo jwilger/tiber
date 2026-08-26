@@ -24,6 +24,35 @@ describe("user-local CI authority boundary", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("parses a setup-generated GitHub Actions authority", () => {
+    expect(
+      parseCiAuthorityCatalog({
+        schemaVersion: 1,
+        authorities: [
+          {
+            kind: "github-actions",
+            name: "github-actions",
+            repository: "jwilger/tiber",
+            requiredChecks: ["CI"],
+            adapterSha256: digest,
+          },
+        ],
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        authorities: [
+          {
+            kind: "github-actions",
+            name: "github-actions",
+            repository: "jwilger/tiber",
+            requiredChecks: ["CI"],
+          },
+        ],
+      },
+    });
+  });
+
   it("rejects unknown catalog fields and relative executables", () => {
     expect(
       parseCiAuthorityCatalog({

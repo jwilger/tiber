@@ -5,11 +5,13 @@ import {
   linkSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { FileSettingsStore } from "../settings/file-settings-store.js";
 import {
   decideCiHoldRecovery,
   type CiSuccessReceipt,
@@ -61,11 +63,26 @@ function record(value: unknown): value is Readonly<Record<string, unknown>> {
 
 export class FileCiAuthorityStore {
   private readonly catalogPath: string;
+  private readonly legacyCatalogPath: string;
   private readonly holdPath: string;
   private readonly receiptsDirectory: string;
 
   public constructor(repository: string, agentDirectory: string) {
-    this.catalogPath = join(agentDirectory, "tiber", "ci-authorities.v1.json");
+    this.legacyCatalogPath = join(
+      agentDirectory,
+      "tiber",
+      "ci-authorities.v1.json",
+    );
+    const settings = new FileSettingsStore(agentDirectory, repository).load();
+    this.catalogPath = settings.ok
+      ? join(
+          agentDirectory,
+          "tiber",
+          "projects",
+          settings.value.projectId,
+          "ci-authorities.v1.json",
+        )
+      : this.legacyCatalogPath;
     const common = execFileSync(
       "git",
       ["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -79,10 +96,48 @@ export class FileCiAuthorityStore {
     this.receiptsDirectory = join(common, "tiber", "ci-receipts");
   }
 
+  public saveCatalog(catalog: CiAuthorityCatalog): CiStoreResult<void> {
+    const parsed = parseCiAuthorityCatalog(catalog);
+    if (!parsed.ok)
+      return failure(
+        "TIBER_CI_STATE_INVALID",
+        "CI authority catalog is invalid",
+      );
+    const temporary = `${this.catalogPath}.${randomUUID()}.tmp`;
+    try {
+      mkdirSync(dirname(this.catalogPath), { recursive: true, mode: 0o700 });
+      writeFileSync(temporary, `${JSON.stringify(parsed.value, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+      renameSync(temporary, this.catalogPath);
+      return this.loadCatalog().ok
+        ? { ok: true, value: undefined }
+        : failure(
+            "TIBER_CI_STATE_INVALID",
+            "CI authority catalog observation is invalid",
+          );
+    } catch {
+      rmSync(temporary, { force: true });
+      return failure(
+        "TIBER_CI_STATE_IO",
+        "CI authority catalog could not be persisted",
+      );
+    }
+  }
+
+  public catalogExists(): boolean {
+    return existsSync(this.catalogPath) || existsSync(this.legacyCatalogPath);
+  }
+
   public loadCatalog(): CiStoreResult<CiAuthorityCatalog> {
+    const path = existsSync(this.catalogPath)
+      ? this.catalogPath
+      : this.legacyCatalogPath;
     try {
       const parsed = parseCiAuthorityCatalog(
-        JSON.parse(readFileSync(this.catalogPath, "utf8")),
+        JSON.parse(readFileSync(path, "utf8")),
       );
       return parsed.ok
         ? parsed

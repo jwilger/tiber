@@ -41,6 +41,7 @@ export const GOVERNED_TOOL_NAMES = [
   "tiber_exception_request",
   "tiber_memory_checkpoint",
   "tiber_memory_recall",
+  "tiber_process",
   "tiber_setup",
   "tiber_workflow_request",
   "write",

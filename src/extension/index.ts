@@ -76,6 +76,7 @@ const ACTIVE_TIBER_TOOLS = [
   "edit",
   "write",
   "tiber_command",
+  "tiber_process",
   "tiber_artifact_range",
   "tiber_artifact_search",
   "tiber_exception_request",

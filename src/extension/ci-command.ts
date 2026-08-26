@@ -6,7 +6,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { FileCiAuthorityStore } from "../adapters/ci/file-ci-authority-store.js";
+import { observeGithubActionsAuthority } from "../adapters/ci/github-actions-ci-authority.js";
 import { observeCiAuthority } from "../adapters/ci/user-local-ci-authority.js";
+import { GhGitHubHttpClient } from "../adapters/github/gh-github-http-client.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
 import {
   decideCiEvaluation,
@@ -23,10 +25,10 @@ import {
   type TaskId,
 } from "../core/tasks/task-values.js";
 
-function evaluate(
+async function evaluate(
   taskText: string,
   context: ExtensionCommandContext,
-):
+): Promise<
   | {
       readonly store: FileCiAuthorityStore;
       readonly decision: ReturnType<typeof decideCiEvaluation>;
@@ -35,7 +37,8 @@ function evaluate(
       readonly claimId: TaskClaimId;
       readonly specificationDigest: SpecificationDigest;
     }
-  | undefined {
+  | undefined
+> {
   const taskId = parseTaskId(taskText);
   const remote = new GitTaskRemote(context.cwd);
   const board = remote.read();
@@ -67,8 +70,13 @@ function evaluate(
     context.ui.notify(catalog.failure.code, "error");
     return undefined;
   }
-  const observations = catalog.value.authorities.map((authority) =>
-    observeCiAuthority(authority, revision.value),
+  const github = new GhGitHubHttpClient();
+  const observations = await Promise.all(
+    catalog.value.authorities.map((authority) =>
+      "kind" in authority
+        ? observeGithubActionsAuthority(authority, revision.value, github)
+        : Promise.resolve(observeCiAuthority(authority, revision.value)),
+    ),
   );
   const failed = observations.find((observation) => !observation.ok);
   if (failed !== undefined) {
@@ -92,7 +100,7 @@ function evaluate(
 }
 
 function publishCiReceipt(
-  result: NonNullable<ReturnType<typeof evaluate>>,
+  result: NonNullable<Awaited<ReturnType<typeof evaluate>>>,
   receipt: CiSuccessReceipt,
 ): boolean {
   const eventId = parseTaskEventId(randomUUID());
@@ -116,7 +124,7 @@ function publishCiReceipt(
   );
 }
 
-export function handleCiCommand(
+export async function handleCiCommand(
   argumentsText: string,
   context: ExtensionCommandContext,
 ): Promise<void> {
@@ -128,7 +136,7 @@ export function handleCiCommand(
     );
     return Promise.resolve();
   }
-  const result = evaluate(taskText, context);
+  const result = await evaluate(taskText, context);
   if (result === undefined) return Promise.resolve();
   const { decision, store } = result;
   if (diagnosisParts[0] === "--recover") {

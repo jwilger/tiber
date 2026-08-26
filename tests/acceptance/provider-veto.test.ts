@@ -7,6 +7,8 @@ import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { FileCommandAuthority } from "../../src/adapters/commands/file-command-authority.js";
+
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
@@ -58,8 +60,54 @@ function waitForResponse(
   return waitForOutput(child, `"id":"${id}","type":"response"`);
 }
 
+function waitForUiRequest(
+  child: ReturnType<typeof spawn>,
+  method: "select" | "confirm",
+): Promise<{ readonly id: string; readonly output: string }> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let output = "";
+    const { stdout } = child;
+    if (stdout === null) {
+      rejectPromise(new Error("Pi RPC output is unavailable"));
+      return;
+    }
+    stdout.setEncoding("utf8");
+    const timeout = setTimeout(() => {
+      rejectPromise(new Error(`Pi RPC UI timed out: ${output}`));
+    }, 10_000);
+    const observe = (chunk: string) => {
+      output += chunk;
+      for (const line of output.split("\n")) {
+        if (line.length === 0) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          "type" in parsed &&
+          parsed.type === "extension_ui_request" &&
+          "method" in parsed &&
+          parsed.method === method &&
+          "id" in parsed &&
+          typeof parsed.id === "string"
+        ) {
+          clearTimeout(timeout);
+          stdout.off("data", observe);
+          resolvePromise({ id: parsed.id, output });
+          return;
+        }
+      }
+    };
+    stdout.on("data", observe);
+  });
+}
+
 describe("stock Pi provider veto", () => {
-  it("blocks ordinary inference but admits the explicit bounded setup conversation", async () => {
+  it("blocks ordinary inference but admits deterministic setup without provider dispatch", async () => {
     const root = resolve(import.meta.dirname, "../..");
     const temporaryDirectory = mkdtempSync(join(tmpdir(), "tiber-veto-"));
     temporaryDirectories.push(temporaryDirectory);
@@ -69,6 +117,10 @@ describe("stock Pi provider veto", () => {
     for (const directory of [workspace, home, agentDirectory])
       mkdirSync(directory);
     execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    writeFileSync(
+      join(workspace, "package.json"),
+      `${JSON.stringify({ scripts: { test: "node --test", lint: "eslint ." } })}\n`,
+    );
 
     let providerRequests = 0;
     const providerBodies: string[] = [];
@@ -84,23 +136,10 @@ describe("stock Pi provider veto", () => {
         providerBodies.push(Buffer.concat(chunks).toString("utf8"));
         observeProviderRequest?.();
         response.writeHead(200, { "content-type": "text/event-stream" });
-        const delta =
-          providerRequests === 1
-            ? {
-                role: "assistant",
-                tool_calls: [
-                  {
-                    index: 0,
-                    id: "call_setup_inspect",
-                    type: "function",
-                    function: {
-                      name: "tiber_setup",
-                      arguments: '{"operation":"inspect"}',
-                    },
-                  },
-                ],
-              }
-            : { role: "assistant", content: "Setup inspection completed." };
+        const delta = {
+          role: "assistant",
+          content: "Provider reached after setup.",
+        };
         response.write(
           `data: ${JSON.stringify({
             id: `response-${String(providerRequests)}`,
@@ -120,7 +159,7 @@ describe("stock Pi provider veto", () => {
               {
                 index: 0,
                 delta: {},
-                finish_reason: providerRequests === 1 ? "tool_calls" : "stop",
+                finish_reason: "stop",
               },
             ],
           })}\n\n`,
@@ -194,40 +233,70 @@ describe("stock Pi provider veto", () => {
     expect(output).toContain("TIBER_CONTAINMENT_ATTESTATION_MISSING");
     expect(providerRequests).toBe(0);
 
+    const cancelledSetupProcess = launch();
+    const cancelledSetupResponse = waitForResponse(
+      cancelledSetupProcess,
+      "setup-to-cancel",
+    );
+    cancelledSetupProcess.stdin.write(
+      `${JSON.stringify({ id: "setup-to-cancel", type: "prompt", message: "/tiber-setup" })}\n`,
+    );
+    const cancelledRequest = await waitForUiRequest(
+      cancelledSetupProcess,
+      "select",
+    );
+    cancelledSetupProcess.stdin.write(
+      `${JSON.stringify({
+        type: "extension_ui_response",
+        id: cancelledRequest.id,
+        cancelled: true,
+      })}\n`,
+    );
+    const cancelledOutput = await cancelledSetupResponse;
+    await stopProcess(cancelledSetupProcess);
+    expect(cancelledOutput).toContain("TIBER_SETUP_CANCELLED");
+    expect(providerBodies).toEqual([]);
+
     const setupProcess = launch();
-    const setupStarted = waitForOutput(setupProcess, '"type":"agent_start"');
-    const setupCompleted = waitForOutput(setupProcess, '"type":"agent_end"');
+    const setupResponse = waitForResponse(setupProcess, "setup");
     setupProcess.stdin.write(
       `${JSON.stringify({ id: "setup", type: "prompt", message: "/tiber-setup" })}\n`,
     );
-    await waitForResponse(setupProcess, "setup");
-    const setupOutput = await setupStarted;
-    const setupReachedProvider = await Promise.race([
-      providerRequested.then(() => true),
-      new Promise<false>((resolvePromise) =>
-        setTimeout(() => {
-          resolvePromise(false);
-        }, 3_000),
-      ),
-    ]);
-    const completedSetupOutput = await setupCompleted;
-    const commandDuringSetup = waitForResponse(setupProcess, "other-command");
+    const autonomyRequest = await waitForUiRequest(setupProcess, "select");
     setupProcess.stdin.write(
-      `${JSON.stringify({ id: "other-command", type: "prompt", message: "/tiber:settings show" })}\n`,
+      `${JSON.stringify({
+        type: "extension_ui_response",
+        id: autonomyRequest.id,
+        value:
+          "Handle routine work, ask before risky or unfamiliar actions (recommended)",
+      })}\n`,
     );
-    const commandDuringSetupOutput = await commandDuringSetup;
-    const cancelResponse = waitForResponse(setupProcess, "cancel");
+    const isolationRequest = await waitForUiRequest(setupProcess, "select");
     setupProcess.stdin.write(
-      `${JSON.stringify({ id: "cancel", type: "prompt", message: "/tiber-setup cancel" })}\n`,
+      `${JSON.stringify({
+        type: "extension_ui_response",
+        id: isolationRequest.id,
+        value: "Use this repository with Tiber guardrails (recommended)",
+      })}\n`,
     );
-    const cancelOutput = await cancelResponse;
-    const requestsAfterCancel = providerRequests;
-    const blockedAfterCancel = waitForResponse(setupProcess, "blocked");
+    const confirmationRequest = await waitForUiRequest(setupProcess, "confirm");
     setupProcess.stdin.write(
-      `${JSON.stringify({ id: "blocked", type: "prompt", message: "Attempt provider dispatch after setup cancellation" })}\n`,
+      `${JSON.stringify({
+        type: "extension_ui_response",
+        id: confirmationRequest.id,
+        confirmed: true,
+      })}\n`,
     );
-    const blockedOutput = await blockedAfterCancel;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+    const setupOutput = await setupResponse;
+    expect(providerBodies).toEqual([]);
+
+    const ordinaryResponse = waitForResponse(setupProcess, "ordinary");
+    setupProcess.stdin.write(
+      `${JSON.stringify({ id: "ordinary", type: "prompt", message: "Attempt provider dispatch after setup" })}\n`,
+    );
+    const ordinaryOutput = await ordinaryResponse;
+    await providerRequested;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
     await stopProcess(setupProcess);
     await new Promise<void>((resolvePromise, rejectPromise) => {
       server.close((error) => {
@@ -236,22 +305,24 @@ describe("stock Pi provider veto", () => {
       });
     });
 
-    expect(setupOutput).toContain('"type":"agent_start"');
-    expect(setupReachedProvider).toBe(true);
-    expect(providerRequests).toBeGreaterThan(1);
-    expect(completedSetupOutput).toContain('"toolName":"tiber_setup"');
-    expect(completedSetupOutput).toContain('"disposition":"inspected"');
-    expect(providerBodies.some((body) => body.includes('"name":"read"'))).toBe(
-      true,
-    );
-    expect(
-      providerBodies.some((body) => body.includes('"name":"tiber_setup"')),
-    ).toBe(true);
-    expect(providerBodies.join("\n")).not.toContain('"name":"bash"');
-    expect(providerBodies.join("\n")).not.toContain("TIBER_WORKFLOW_STATE");
-    expect(commandDuringSetupOutput).toContain("TIBER_SETUP_IN_PROGRESS");
-    expect(cancelOutput).toContain("TIBER_SETUP_CANCELLED");
-    expect(blockedOutput).toContain("TIBER_CONTAINMENT_ATTESTATION_MISSING");
-    expect(providerRequests).toBe(requestsAfterCancel);
+    expect(setupOutput).toContain("Tiber is ready");
+    expect(setupOutput).toContain("routine work");
+    const commands = new FileCommandAuthority(workspace);
+    const catalog = commands.loadCatalog();
+    const grant = commands.readGrant();
+    expect(catalog.ok).toBe(true);
+    expect(grant.ok).toBe(true);
+    if (catalog.ok && grant.ok) {
+      expect(catalog.value.commands.map(({ name }) => name)).toEqual([
+        "test",
+        "lint",
+      ]);
+      expect(grant.value).toEqual({
+        kind: "some",
+        value: catalog.value.digest,
+      });
+    }
+    expect(ordinaryOutput).toContain('"success":true');
+    expect(providerRequests).toBe(1);
   }, 30_000);
 });
