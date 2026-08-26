@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/jwilger/tiber/compare/v1.0.1...v1.1.0) (2026-08-26)
+
+
+### Features
+
+* **setup:** add guided conversational setup ([#41](https://github.com/jwilger/tiber/issues/41)) ([ade50a0](https://github.com/jwilger/tiber/commit/ade50a08edbd8493aa5f49ae1305ac406a2ebf48))
+
 ## [1.0.1](https://github.com/jwilger/tiber/compare/v1.0.0...v1.0.1) (2026-08-25)
 
 
