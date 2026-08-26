@@ -82,6 +82,7 @@ describe("governed tool policy", () => {
         "edit",
         "bash",
         "read",
+        "tiber_setup",
         "tiber_workflow_request",
       ]),
     ).toEqual({

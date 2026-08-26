@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 
 import { reviewSpecification } from "../adapters/models/pi-readiness-reviewer.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
@@ -22,10 +25,19 @@ import {
   parseTaskTitle,
 } from "../core/tasks/task-values.js";
 
-export function registerTaskCommands(pi: ExtensionAPI): void {
+export type TiberCommandGuard = (
+  command: "tiber:task" | "tiber:tasks",
+  context: ExtensionCommandContext,
+) => boolean;
+
+export function registerTaskCommands(
+  pi: ExtensionAPI,
+  commandAllowed: TiberCommandGuard = () => true,
+): void {
   pi.registerCommand("tiber:tasks", {
     description: "Show the signed shared Kanban board",
     handler: (_arguments, context) => {
+      if (!commandAllowed("tiber:tasks", context)) return Promise.resolve();
       context.ui.notify(
         formatTaskBoard(new GitTaskRemote(context.cwd).read()),
         "info",
@@ -37,6 +49,7 @@ export function registerTaskCommands(pi: ExtensionAPI): void {
   pi.registerCommand("tiber:task", {
     description: "Create, specify, review, or inspect a signed shared task",
     handler: async (argumentsText, context) => {
+      if (!commandAllowed("tiber:task", context)) return;
       const [operation, ...rest] = argumentsText.trim().split(/\s+/u);
       const remote = new GitTaskRemote(context.cwd);
       if (operation === "create" && rest.join(" ").trim().length > 0) {

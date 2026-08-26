@@ -129,6 +129,22 @@ effective value, and its source. Empty project text values mean inheritance.
 Global settings can forbid broader project overrides; unlocking requires an
 explicit human confirmation and conflict preview.
 
+`/tiber-setup` is the ordinary setup and reconfiguration entry point. Its
+conversational agent inspects a host-generated closed catalog, explains and
+recommends each supported choice, gathers explicit user intent, and proposes a
+typed setup plan. A deterministic `tiber_setup` host validates the complete
+plan and requires interactive confirmation before settings, authority, or
+repository declarations change. The conversation is bound to the trusted
+repository that invoked it; stale authority observations, cross-repository tool
+calls, and setup-tool calls from ordinary conversations are denied. Model
+output never grants command authority, loosens a ceiling, selects secret
+material, or writes arbitrary paths. A complete confirmed plan is journaled
+before effects, observed afterward, and closed by a digest-bound receipt;
+startup reconciles interrupted confirmed setup before restoring ordinary
+operation. Setup reports externally provisioned
+containment, signing, CI, review, context, and memory prerequisites as blockers
+or optional capabilities rather than fabricating their evidence.
+
 Settings contain references to externally provisioned secrets. Child process
 environments are scrubbed by default. Tightening applies immediately. Loosening
 applies to a new run or an explicitly rebound existing run.
@@ -267,7 +283,15 @@ closed when strong assurance is required.
 Failure enters persistent configuration-only lockdown by default. An optional
 policy requests graceful Pi shutdown. Stock Pi must prove that startup abort
 prevents provider dispatch; otherwise pre-inference refusal is unsupported and
-release is blocked.
+release is blocked. The explicit human-invoked guided-setup conversation is the
+only bounded exception: while it is active, Pi exposes only governed repository
+reads and the typed, independently confirmed `tiber_setup` host. Automatic
+workflow context, Hindsight recall, and Tiber compaction are suppressed. Every
+other tool remains
+denied, setup proposals grant no authority, and the ordinary inventory is
+restored and containment re-evaluated immediately after apply or cancellation.
+Lockdown input is handled before agent startup; provider dispatch is not used
+as the refusal mechanism.
 
 ## Worktrees and recovery
 

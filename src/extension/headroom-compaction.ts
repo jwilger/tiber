@@ -54,8 +54,12 @@ export function previousEpochId(
   return fallback;
 }
 
-export function registerHeadroomCompaction(pi: ExtensionAPI): void {
+export function registerHeadroomCompaction(
+  pi: ExtensionAPI,
+  contextAllowed: () => boolean = () => true,
+): void {
   pi.on("session_before_compact", async (event, context) => {
+    if (!contextAllowed()) return { cancel: true };
     const model = context.model;
     if (model === undefined) {
       context.ui.notify(

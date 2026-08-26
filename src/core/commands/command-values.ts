@@ -39,6 +39,18 @@ export type CommandCatalogDigest = CommandValue<
   "command-catalog-digest"
 >;
 
+export const COMMAND_CATALOG_LIMITS = {
+  maximumArguments: 64,
+  maximumCommands: 64,
+  maximumEnvironmentEntries: 32,
+  maximumTextLength: 4_096,
+  timeoutMilliseconds: { minimum: 1, maximum: 3_600_000 },
+  outputBytes: { minimum: 1, maximum: 1_048_576 },
+} as const;
+
+export const COMMAND_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+export const COMMAND_ENVIRONMENT_NAME_PATTERN = /^[A-Z_][A-Z0-9_]{0,63}$/u;
+
 type CommandValueField =
   | "commandName"
   | "commandExecutable"
@@ -74,7 +86,7 @@ function valid<Value, Purpose extends string>(
 }
 
 export function parseCommandName(value: unknown): Result<CommandName> {
-  return typeof value === "string" && /^[a-z][a-z0-9-]{0,63}$/u.test(value)
+  return typeof value === "string" && COMMAND_NAME_PATTERN.test(value)
     ? { ok: true, value: valid<string, "command-name">(value) }
     : invalid("commandName");
 }
@@ -82,13 +94,15 @@ export function parseCommandName(value: unknown): Result<CommandName> {
 export const parseCommandArgument = (
   value: unknown,
 ): Result<CommandArgument> =>
-  typeof value === "string" && value.length <= 4_096 && !value.includes("\0")
+  typeof value === "string" &&
+  value.length <= COMMAND_CATALOG_LIMITS.maximumTextLength &&
+  !value.includes("\0")
     ? { ok: true, value: valid<string, "command-argument">(value) }
     : invalid("commandArgument");
 export const parseCommandEnvironmentName = (
   value: unknown,
 ): Result<CommandEnvironmentName> =>
-  typeof value === "string" && /^[A-Z_][A-Z0-9_]{0,63}$/u.test(value)
+  typeof value === "string" && COMMAND_ENVIRONMENT_NAME_PATTERN.test(value)
     ? {
         ok: true,
         value: valid<string, "command-environment-name">(value),
@@ -97,7 +111,9 @@ export const parseCommandEnvironmentName = (
 export const parseCommandEnvironmentValue = (
   value: unknown,
 ): Result<CommandEnvironmentValue> =>
-  typeof value === "string" && value.length <= 4_096 && !value.includes("\0")
+  typeof value === "string" &&
+  value.length <= COMMAND_CATALOG_LIMITS.maximumTextLength &&
+  !value.includes("\0")
     ? {
         ok: true,
         value: valid<string, "command-environment-value">(value),
@@ -132,8 +148,8 @@ export function parseCommandTimeoutMilliseconds(
   // Stryker disable next-line ConditionalExpression, LogicalOperator: Number.isSafeInteger independently rejects every non-number; typeof establishes narrowing.
   return typeof value === "number" &&
     Number.isSafeInteger(value) &&
-    value >= 1 &&
-    value <= 3_600_000
+    value >= COMMAND_CATALOG_LIMITS.timeoutMilliseconds.minimum &&
+    value <= COMMAND_CATALOG_LIMITS.timeoutMilliseconds.maximum
     ? {
         ok: true,
         value: valid<number, "command-timeout-milliseconds">(value),
@@ -147,8 +163,8 @@ export function parseCommandMaximumOutputBytes(
   // Stryker disable next-line ConditionalExpression, LogicalOperator: Number.isSafeInteger independently rejects every non-number; typeof establishes narrowing.
   return typeof value === "number" &&
     Number.isSafeInteger(value) &&
-    value >= 1 &&
-    value <= 1_048_576
+    value >= COMMAND_CATALOG_LIMITS.outputBytes.minimum &&
+    value <= COMMAND_CATALOG_LIMITS.outputBytes.maximum
     ? {
         ok: true,
         value: valid<number, "command-maximum-output-bytes">(value),
