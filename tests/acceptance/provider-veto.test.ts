@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -71,9 +71,62 @@ describe("stock Pi provider veto", () => {
     execFileSync("git", ["init", "--quiet"], { cwd: workspace });
 
     let providerRequests = 0;
-    const server = createServer((_request, response) => {
+    const providerBodies: string[] = [];
+    let observeProviderRequest: (() => void) | undefined;
+    const providerRequested = new Promise<void>((resolvePromise) => {
+      observeProviderRequest = resolvePromise;
+    });
+    const server = createServer((request, response) => {
       providerRequests += 1;
-      response.writeHead(500).end();
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        providerBodies.push(Buffer.concat(chunks).toString("utf8"));
+        observeProviderRequest?.();
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        const delta =
+          providerRequests === 1
+            ? {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_setup_inspect",
+                    type: "function",
+                    function: {
+                      name: "tiber_setup",
+                      arguments: '{"operation":"inspect"}',
+                    },
+                  },
+                ],
+              }
+            : { role: "assistant", content: "Setup inspection completed." };
+        response.write(
+          `data: ${JSON.stringify({
+            id: `response-${String(providerRequests)}`,
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "test-model",
+            choices: [{ index: 0, delta, finish_reason: null }],
+          })}\n\n`,
+        );
+        response.write(
+          `data: ${JSON.stringify({
+            id: `response-${String(providerRequests)}`,
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "test-model",
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: providerRequests === 1 ? "tool_calls" : "stop",
+              },
+            ],
+          })}\n\n`,
+        );
+        response.end("data: [DONE]\n\n");
+      });
     });
     await new Promise<void>((resolvePromise) =>
       server.listen(0, "127.0.0.1", resolvePromise),
@@ -82,21 +135,37 @@ describe("stock Pi provider veto", () => {
     if (address === null || typeof address === "string")
       throw new Error("fake provider did not bind");
 
+    writeFileSync(
+      join(agentDirectory, "models.json"),
+      `${JSON.stringify(
+        {
+          providers: {
+            test: {
+              baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
+              api: "openai-completions",
+              apiKey: "test-only",
+              models: [{ id: "test-model" }],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
     const environment = {
       ...process.env,
       HOME: home,
       PI_CODING_AGENT_DIR: agentDirectory,
-      OPENAI_API_KEY: "test-only",
-      OPENAI_BASE_URL: `http://127.0.0.1:${String(address.port)}/v1`,
     };
     const args = [
       "--mode",
       "rpc",
       "--no-session",
+      "--approve",
       "--provider",
-      "openai",
+      "test",
       "--model",
-      "gpt-4o-mini",
+      "test-model",
       "-e",
       resolve(root, "src/extension/index.ts"),
     ];
@@ -127,11 +196,37 @@ describe("stock Pi provider veto", () => {
 
     const setupProcess = launch();
     const setupStarted = waitForOutput(setupProcess, '"type":"agent_start"');
+    const setupCompleted = waitForOutput(setupProcess, '"type":"agent_end"');
     setupProcess.stdin.write(
       `${JSON.stringify({ id: "setup", type: "prompt", message: "/tiber-setup" })}\n`,
     );
     await waitForResponse(setupProcess, "setup");
     const setupOutput = await setupStarted;
+    const setupReachedProvider = await Promise.race([
+      providerRequested.then(() => true),
+      new Promise<false>((resolvePromise) =>
+        setTimeout(() => {
+          resolvePromise(false);
+        }, 3_000),
+      ),
+    ]);
+    const completedSetupOutput = await setupCompleted;
+    const commandDuringSetup = waitForResponse(setupProcess, "other-command");
+    setupProcess.stdin.write(
+      `${JSON.stringify({ id: "other-command", type: "prompt", message: "/tiber:settings show" })}\n`,
+    );
+    const commandDuringSetupOutput = await commandDuringSetup;
+    const cancelResponse = waitForResponse(setupProcess, "cancel");
+    setupProcess.stdin.write(
+      `${JSON.stringify({ id: "cancel", type: "prompt", message: "/tiber-setup cancel" })}\n`,
+    );
+    const cancelOutput = await cancelResponse;
+    const requestsAfterCancel = providerRequests;
+    const blockedAfterCancel = waitForResponse(setupProcess, "blocked");
+    setupProcess.stdin.write(
+      `${JSON.stringify({ id: "blocked", type: "prompt", message: "Attempt provider dispatch after setup cancellation" })}\n`,
+    );
+    const blockedOutput = await blockedAfterCancel;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
     await stopProcess(setupProcess);
     await new Promise<void>((resolvePromise, rejectPromise) => {
@@ -142,6 +237,21 @@ describe("stock Pi provider veto", () => {
     });
 
     expect(setupOutput).toContain('"type":"agent_start"');
-    expect(providerRequests).toBe(0);
+    expect(setupReachedProvider).toBe(true);
+    expect(providerRequests).toBeGreaterThan(1);
+    expect(completedSetupOutput).toContain('"toolName":"tiber_setup"');
+    expect(completedSetupOutput).toContain('"disposition":"inspected"');
+    expect(providerBodies.some((body) => body.includes('"name":"read"'))).toBe(
+      true,
+    );
+    expect(
+      providerBodies.some((body) => body.includes('"name":"tiber_setup"')),
+    ).toBe(true);
+    expect(providerBodies.join("\n")).not.toContain('"name":"bash"');
+    expect(providerBodies.join("\n")).not.toContain("TIBER_WORKFLOW_STATE");
+    expect(commandDuringSetupOutput).toContain("TIBER_SETUP_IN_PROGRESS");
+    expect(cancelOutput).toContain("TIBER_SETUP_CANCELLED");
+    expect(blockedOutput).toContain("TIBER_CONTAINMENT_ATTESTATION_MISSING");
+    expect(providerRequests).toBe(requestsAfterCancel);
   }, 30_000);
 });

@@ -4,6 +4,7 @@ import {
   type TiberFailure,
 } from "../failures/tiber-failure.js";
 import {
+  COMMAND_CATALOG_LIMITS,
   parseCanonicalCommandCatalogJson,
   parseCommandArgument,
   parseCommandCatalogDigest,
@@ -99,11 +100,12 @@ function parseCommand(value: unknown): StructuredCommand | undefined {
     !executable.ok ||
     (value.purpose !== "test" && value.purpose !== "verification") ||
     !Array.isArray(value.argv) ||
-    value.argv.length > 64 ||
+    value.argv.length > COMMAND_CATALOG_LIMITS.maximumArguments ||
     arguments_.some((argument) => !argument.ok) ||
     value.cwd !== "worktree" ||
     !record(value.environment) ||
-    Object.keys(value.environment).length > 32 ||
+    Object.keys(value.environment).length >
+      COMMAND_CATALOG_LIMITS.maximumEnvironmentEntries ||
     environmentEntries.some((entry) => !entry.key.ok || !entry.value.ok) ||
     !timeout.ok ||
     !maximumOutput.ok
@@ -140,10 +142,10 @@ export function compileCommandCatalog(value: unknown): CommandCatalogResult {
     value.schemaVersion !== 1 ||
     !Array.isArray(value.commands) ||
     value.commands.length < 1 ||
-    value.commands.length > 64
+    value.commands.length > COMMAND_CATALOG_LIMITS.maximumCommands
   )
     return invalid(
-      "command catalog must contain 1 to 64 closed command definitions",
+      `command catalog must contain 1 to ${String(COMMAND_CATALOG_LIMITS.maximumCommands)} closed command definitions`,
     );
   const commands = value.commands.map(parseCommand);
   if (

@@ -47,17 +47,18 @@ After Tiber is loaded, run one command in the repository:
 
 The setup assistant inspects the repository and current layered configuration,
 then discusses one choice at a time. It explains and recommends every shipping
-setting, authority floor, secret reference, project command declaration, and
-optional integration. After a complete preview and explicit approval, its typed
-setup host validates and persists the configuration and can write and locally
-grant the exact `.tiber/commands.json` digest. No manual JSON editing or
+setting, authority floor, secret reference, project command and workflow
+declaration, and optional integration. After a complete preview and explicit
+approval, its typed setup host validates and persists the configuration, can
+write or remove project declarations, and locally grants only the exact
+`.tiber/commands.json` digest the user confirms. No manual JSON editing or
 sequence of Tiber commands is required.
 
 Secret values, strong-containment attestations, service administration, and
 other externally provisioned authority never enter model context. Setup reports
 those as explicit blockers or optional disabled capabilities rather than
-fabricating them. Rerun `/tiber-setup` at any time to inspect or modify the
-setup.
+fabricating them. Cancelling restores ordinary tools and containment policy.
+Rerun `/tiber-setup` at any time to inspect or modify the setup.
 
 ## Development
 

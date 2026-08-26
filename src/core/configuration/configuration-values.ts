@@ -31,6 +31,11 @@ export type SecretEnvironmentVariableName = ConfigurationValue<
   "secret-environment-variable-name"
 >;
 
+export const OUTPUT_PREVIEW_BYTES_RANGE = {
+  minimum: 1_024,
+  maximum: 1_048_576,
+} as const;
+
 type Field =
   | "projectId"
   | "outputPreviewBytes"
@@ -71,8 +76,8 @@ export function parseOutputPreviewBytes(
   // Stryker disable next-line ConditionalExpression, LogicalOperator: Number.isSafeInteger independently rejects every non-number; typeof establishes narrowing.
   return typeof value === "number" &&
     Number.isSafeInteger(value) &&
-    value >= 1_024 &&
-    value <= 1_048_576
+    value >= OUTPUT_PREVIEW_BYTES_RANGE.minimum &&
+    value <= OUTPUT_PREVIEW_BYTES_RANGE.maximum
     ? { ok: true, value: value as OutputPreviewBytes }
     : invalid("outputPreviewBytes");
 }

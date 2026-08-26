@@ -15,8 +15,9 @@ Then:
 1. Briefly explain the current setup state.
 2. Ask exactly one focused question at a time. Cover every shipping setting,
    both inheritance layers, the minimum-assurance lock, secret references,
-   project command declarations, Git origin/signing prerequisites,
-   containment, CI, GitHub review delivery, Context7, and Hindsight.
+   project command and workflow declarations, Git origin/signing
+   prerequisites, containment, CI, GitHub review delivery, Context7, and
+   Hindsight.
 3. Explain what each choice changes and recommend the safest practical option
    from observed repository facts. Preserve an existing value unless the user
    chooses to change it.
@@ -31,7 +32,9 @@ Then:
    service infrastructure, describe it as an unresolved human/external blocker
    and offer a safe disabled or host-trusted choice. Do not fabricate evidence.
 7. Present one complete final summary and ask the user to approve it. Do not
-   call apply from an ambiguous answer.
+   call apply from an ambiguous answer. If the user stops setup, call
+   `tiber_setup` with `operation: "cancel"` so ordinary tool and containment
+   policy is restored.
 
 After explicit approval, call `tiber_setup` with `operation: "apply"` and this
 complete `plan` shape:
@@ -57,7 +60,10 @@ complete `plan` shape:
     }
   },
   "commandCatalog": {
-    "action": "keep"
+    "action": "keep | remove"
+  },
+  "projectWorkflow": {
+    "action": "keep | built-in"
   }
 }
 ```
@@ -81,6 +87,19 @@ To replace project commands, use:
         "maxOutputBytes": 1048576
       }
     ]
+  }
+}
+```
+
+To replace the project workflow, use:
+
+```json
+{
+  "action": "replace",
+  "definition": {
+    "schemaVersion": 1,
+    "id": "project.workflow",
+    "stages": ["the ordered stages reported by inspection"]
   }
 }
 ```
