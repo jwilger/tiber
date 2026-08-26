@@ -117,6 +117,7 @@ describe("the packed stock-Pi package", () => {
       encoding: "utf8",
     });
     expect(archiveEntries).toContain("package/dist/extension/index.js");
+    expect(archiveEntries).toContain("package/prompts/tiber-setup-agent.md");
     expect(archiveEntries).not.toContain("Cargo.toml");
     expect(archiveEntries).not.toContain("package/crates/");
     expect(archiveEntries).not.toContain("package/src/");
@@ -247,6 +248,10 @@ describe("the packed stock-Pi package", () => {
       (message) => message.id === "commands",
     );
     expect(JSON.stringify(commandResponse?.data)).toContain("tiber:doctor");
+    expect(JSON.stringify(commandResponse?.data)).toContain("tiber-setup");
+    expect(JSON.stringify(commandResponse?.data)).not.toContain(
+      "tiber-setup-agent",
+    );
     expect(JSON.stringify(commandResponse?.data)).toContain("tiber:green");
     expect(JSON.stringify(commandResponse?.data)).toContain(
       "tiber:final-review",

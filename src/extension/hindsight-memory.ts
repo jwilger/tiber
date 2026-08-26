@@ -101,13 +101,16 @@ export async function retainReviewedCompletion(
       : "failed";
 }
 
-export function registerHindsightMemory(pi: ExtensionAPI): void {
+export function registerHindsightMemory(
+  pi: ExtensionAPI,
+  contextAllowed: () => boolean = () => true,
+): void {
   let initialRecallAttempted = false;
   pi.on("session_start", () => {
     initialRecallAttempted = false;
   });
   pi.on("before_agent_start", async (_event, context) => {
-    if (initialRecallAttempted) return;
+    if (!contextAllowed() || initialRecallAttempted) return;
     initialRecallAttempted = true;
     const client = service(context.cwd);
     if (client === undefined) return;

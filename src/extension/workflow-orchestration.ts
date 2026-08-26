@@ -75,8 +75,12 @@ function writableWorkflowState(board: TaskBoard): string {
   ].join("\n");
 }
 
-export function registerAutomaticWorkflowOrchestration(pi: ExtensionAPI): void {
+export function registerAutomaticWorkflowOrchestration(
+  pi: ExtensionAPI,
+  contextAllowed: () => boolean = () => true,
+): void {
   pi.on("before_agent_start", (_event, context) => {
+    if (!contextAllowed()) return undefined;
     const board = new GitTaskRemote(context.cwd).read();
     return {
       message: {
