@@ -1149,6 +1149,19 @@ export interface SetupToolHost {
   readonly isConversationActive: (repository: SetupRepositoryPath) => boolean;
 }
 
+export function inspectActiveSetup(
+  agentDirectory: SetupAgentDirectoryPath,
+  repository: SetupRepositoryPath,
+  host: SetupToolHost,
+) {
+  const inspected = inspectSetup(agentDirectory, repository);
+  if (inspected.ok) {
+    return setupResponse(JSON.stringify(inspected.value, null, 2), "inspected");
+  }
+  host.endConversation(repository);
+  return setupResponse(renderSetupFailure(inspected.failure), "denied");
+}
+
 async function applyRequestedSetup(
   parameters: SetupToolInput,
   context: ExtensionContext,
@@ -1335,10 +1348,7 @@ export function registerSetupTool(pi: ExtensionAPI, host: SetupToolHost): void {
         );
       }
       if (parameters.operation === "inspect") {
-        const inspected = inspectSetup(agentDirectory, repository);
-        return inspected.ok
-          ? setupResponse(JSON.stringify(inspected.value, null, 2), "inspected")
-          : setupResponse(renderSetupFailure(inspected.failure), "denied");
+        return inspectActiveSetup(agentDirectory, repository, host);
       }
       if (parameters.operation === "cancel") {
         applyAbortController?.abort();
