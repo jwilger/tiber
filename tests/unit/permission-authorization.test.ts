@@ -15,7 +15,10 @@ const scope = permissionScope({
   role: "implementation",
   effect: "process",
   executable: "npm",
+  argv: ["run", "test"],
   purpose: "test",
+  cwd: "task-worktree",
+  environment: {},
 });
 
 function decisionAt() {

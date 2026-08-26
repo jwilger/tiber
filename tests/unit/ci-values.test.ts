@@ -6,6 +6,8 @@ import {
   parseCiDiagnosis,
   parseCiExecutableDigest,
   parseCiExecutablePath,
+  parseCiGithubCheckName,
+  parseCiGithubRepository,
   parseCiObservationDigest,
   parseCiRevision,
 } from "../../src/core/ci/ci-values.js";
@@ -91,6 +93,38 @@ describe("CI semantic values", () => {
     ]);
   });
 
+  it("parses exact bounded GitHub repository identities", () => {
+    accepts(parseCiGithubRepository, "owner/repository");
+    accepts(parseCiGithubRepository, `${"o".repeat(100)}/${"r".repeat(100)}`);
+    rejects(parseCiGithubRepository, [
+      { toString: () => "owner/repository" },
+      1,
+      "",
+      "/repository",
+      "owner/",
+      "owner/repository/extra",
+      "!owner/repository",
+      "owner/repository-suffix!",
+      "owner name/repository",
+      `${"o".repeat(101)}/repository`,
+      `owner/${"r".repeat(101)}`,
+    ]);
+  });
+
+  it("parses trimmed bounded NUL-free GitHub check names", () => {
+    accepts(parseCiGithubCheckName, "Q");
+    accepts(parseCiGithubCheckName, "Q".repeat(256));
+    rejects(parseCiGithubCheckName, [
+      { trim: () => "Q", length: 1, includes: () => false },
+      1,
+      "",
+      " Q",
+      "Q ",
+      "Q".repeat(257),
+      "Q\0check",
+    ]);
+  });
+
   it("parses bounded NUL-free adapter arguments including empty literals", () => {
     accepts(parseCiAdapterArgument, "");
     accepts(parseCiAdapterArgument, "a".repeat(4_096));
@@ -122,6 +156,8 @@ describe("CI semantic values", () => {
       parseCiDiagnosis("bad"),
       parseCiExecutablePath("bad"),
       parseCiExecutableDigest("bad"),
+      parseCiGithubRepository("bad"),
+      parseCiGithubCheckName(""),
       parseCiAdapterArgument("a\0b"),
     ];
     expect(
@@ -134,6 +170,8 @@ describe("CI semantic values", () => {
       "CI diagnosis is invalid",
       "CI executable path is invalid",
       "CI executable digest is invalid",
+      "GitHub CI repository is invalid",
+      "GitHub CI check name is invalid",
       "CI adapter argument is invalid",
     ]);
   });

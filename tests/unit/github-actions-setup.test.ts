@@ -126,12 +126,17 @@ describe("GitHub Actions setup discovery", () => {
     expect(otherStore.catalogExists()).toBe(false);
   });
 
-  it("does not invent CI authority for a non-GitHub remote", async () => {
-    expect(
-      await discoverGithubActionsCatalog(
-        "https://gitlab.example.test/team/project.git",
-        client,
-      ),
-    ).toEqual({ ok: true, value: { kind: "none" } });
-  });
+  it.each([
+    "https://gitlab.example.test/team/project.git",
+    "https://evilgithub.com/team/project.git",
+    "https://example.test/github.com/team/project.git",
+  ])(
+    "does not invent CI authority for non-GitHub remote %s",
+    async (origin) => {
+      expect(await discoverGithubActionsCatalog(origin, client)).toEqual({
+        ok: true,
+        value: { kind: "none" },
+      });
+    },
+  );
 });

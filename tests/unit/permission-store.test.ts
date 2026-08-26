@@ -43,7 +43,10 @@ describe("repository-local permission store", () => {
       role: "implementation",
       effect: "process",
       executable: "npm",
+      argv: ["run", "test"],
       purpose: "test",
+      cwd: "task-worktree",
+      environment: {},
     });
 
     expect(
@@ -62,7 +65,10 @@ describe("repository-local permission store", () => {
       role: "implementation",
       effect: "process",
       executable: "npm",
+      argv: ["run", "test"],
       purpose: "test",
+      cwd: "task-worktree",
+      environment: {},
     });
     const first = new FilePermissionStore(
       agentDirectory,
@@ -105,7 +111,10 @@ describe("repository-local permission store", () => {
           role: "implementation",
           effect: "process",
           executable: "npm",
+          argv: ["run", "test"],
           purpose: "test",
+          cwd: "task-worktree",
+          environment: {},
         }),
       ),
     ).toMatchObject({

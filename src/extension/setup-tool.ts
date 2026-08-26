@@ -19,7 +19,10 @@ import {
 import { Type, type Static } from "typebox";
 
 import { FileCiAuthorityStore } from "../adapters/ci/file-ci-authority-store.js";
-import { discoverGithubActionsCatalog } from "../adapters/ci/github-actions-setup.js";
+import {
+  discoverGithubActionsCatalog,
+  githubRepositoryFromOrigin,
+} from "../adapters/ci/github-actions-setup.js";
 import { GhGitHubHttpClient } from "../adapters/github/gh-github-http-client.js";
 import { FilePermissionSettingsStore } from "../adapters/permissions/file-permission-settings-store.js";
 import { FileCommandAuthority } from "../adapters/commands/file-command-authority.js";
@@ -548,7 +551,7 @@ function githubIntegrationStatus(
   origin: string | undefined,
   environment: SetupEnvironment,
 ): SetupInspection["integrations"]["githubReview"] {
-  if (origin === undefined || !/(?:github\.com)[/:]/u.test(origin))
+  if (origin === undefined || githubRepositoryFromOrigin(origin) === undefined)
     return { status: "not-github", client: "gh" };
   const gh = discoverExecutable("gh", environment);
   if (gh.status === "missing") return { status: "gh-missing", client: "gh" };
