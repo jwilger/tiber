@@ -5,6 +5,8 @@
   "ignorePatterns": ["dist", "node_modules", ".direnv", ".stryker-tmp"],
   "reporters": ["clear-text", "progress"],
   "coverageAnalysis": "perTest",
+  "incremental": true,
+  "incrementalFile": "reports/stryker-incremental.json",
   "thresholds": {
     "high": 100,
     "low": 100,
