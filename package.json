@@ -1,6 +1,6 @@
 {
   "name": "@jwilger/tiber",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Deterministic development workflows and shared task tracking for stock Pi",
   "license": "MIT OR Apache-2.0",
   "author": "John Wilger",
