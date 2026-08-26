@@ -63,24 +63,27 @@ export type PermissionDecision =
       readonly choices: readonly PermissionChoice[];
     };
 
-const RESTRICTED_PROCESS_ROLES = new Set<AgentRole>([
-  "coordinator",
-  "planning",
-  "readiness",
-  "review",
-  "setup",
-  "classifier",
-]);
-const EXACT_APPROVAL_RISKS = new Set<PermissionRisk>([
-  "destructive",
-  "publication",
-  "privileged",
-]);
+function roleRestrictsProcess(role: AgentRole): boolean {
+  return (
+    role === "coordinator" ||
+    role === "planning" ||
+    role === "readiness" ||
+    role === "review" ||
+    role === "setup" ||
+    role === "classifier"
+  );
+}
+
+function riskRequiresExactApproval(risk: PermissionRisk): boolean {
+  return (
+    risk === "destructive" || risk === "publication" || risk === "privileged"
+  );
+}
 
 function roleAllows(request: PermissionRequest): boolean {
   if (request.effect === "repository-read") return true;
   if (
-    RESTRICTED_PROCESS_ROLES.has(request.role) &&
+    roleRestrictsProcess(request.role) &&
     (request.effect === "process" || request.effect === "arbitrary-shell")
   )
     return false;
@@ -95,21 +98,27 @@ function roleAllows(request: PermissionRequest): boolean {
   return true;
 }
 
-function prompt(request: PermissionRequest): PermissionDecision {
-  const exact =
+function requiresExactApproval(request: PermissionRequest): boolean {
+  return (
     request.effect === "arbitrary-shell" ||
     request.boundary === "external" ||
-    EXACT_APPROVAL_RISKS.has(request.risk) ||
-    !request.persistable;
-  return {
-    status: "prompt",
-    code: exact
-      ? "TIBER_PERMISSION_EXACT_APPROVAL_REQUIRED"
-      : "TIBER_PERMISSION_REQUIRED",
-    choices: exact
-      ? ["deny-once", "deny-always", "allow-once"]
-      : ["deny-once", "deny-always", "allow-once", "allow-always"],
-  };
+    riskRequiresExactApproval(request.risk) ||
+    !request.persistable
+  );
+}
+
+function prompt(exact: boolean): PermissionDecision {
+  return exact
+    ? {
+        status: "prompt",
+        code: "TIBER_PERMISSION_EXACT_APPROVAL_REQUIRED",
+        choices: ["deny-once", "deny-always", "allow-once"],
+      }
+    : {
+        status: "prompt",
+        code: "TIBER_PERMISSION_REQUIRED",
+        choices: ["deny-once", "deny-always", "allow-once", "allow-always"],
+      };
 }
 
 export function decidePermission(
@@ -121,23 +130,16 @@ export function decidePermission(
     return { status: "denied", code: "TIBER_PERMISSION_ROLE_DENIED" };
   if (request.effect === "repository-read")
     return { status: "allowed", code: "TIBER_PERMISSION_READ_ONLY" };
-  if (request.remembered.kind === "some" && request.remembered.value === "deny")
-    return { status: "denied", code: "TIBER_PERMISSION_ALWAYS_DENIED" };
-
-  const exact =
-    request.effect === "arbitrary-shell" ||
-    request.boundary === "external" ||
-    EXACT_APPROVAL_RISKS.has(request.risk) ||
-    !request.persistable;
-  if (
-    !exact &&
-    request.remembered.kind === "some" &&
-    request.remembered.value === "allow"
-  )
-    return { status: "allowed", code: "TIBER_PERMISSION_REMEMBERED" };
+  const exact = requiresExactApproval(request);
+  if (request.remembered.kind === "some") {
+    if (request.remembered.value === "deny")
+      return { status: "denied", code: "TIBER_PERMISSION_ALWAYS_DENIED" };
+    if (!exact)
+      return { status: "allowed", code: "TIBER_PERMISSION_REMEMBERED" };
+  }
   if (exact)
     return request.interactive
-      ? prompt(request)
+      ? prompt(exact)
       : {
           status: "denied",
           code: "TIBER_PERMISSION_INTERACTION_REQUIRED",
@@ -150,7 +152,7 @@ export function decidePermission(
   if (request.autonomy === "routine" && request.risk === "routine")
     return { status: "allowed", code: "TIBER_PERMISSION_ROUTINE" };
   return request.interactive
-    ? prompt(request)
+    ? prompt(exact)
     : {
         status: "denied",
         code: "TIBER_PERMISSION_INTERACTION_REQUIRED",

@@ -15,11 +15,14 @@ type PermissionValue<Purpose extends string> = string & {
 export type PermissionScope = PermissionValue<"permission-scope">;
 export type PermissionDecisionAt = PermissionValue<"permission-decision-at">;
 
-interface PermissionScopeFacts {
+export interface PermissionScopeFacts {
   readonly role: AgentRole;
   readonly effect: PermissionEffect;
   readonly executable: string;
+  readonly argv: readonly string[];
   readonly purpose: string;
+  readonly cwd: "task-worktree" | "repository";
+  readonly environment: Readonly<Record<string, string>>;
 }
 
 type PermissionValueFailure = TiberFailure<
@@ -43,11 +46,15 @@ function invalid(
 }
 
 export function permissionScope(facts: PermissionScopeFacts): PermissionScope {
+  const environment = Object.entries(facts.environment).sort();
   const canonical = JSON.stringify({
     role: facts.role,
     effect: facts.effect,
     executable: facts.executable,
+    argv: facts.argv,
     purpose: facts.purpose,
+    cwd: facts.cwd,
+    environment,
   });
   return `sha256:${createHash("sha256").update(canonical).digest("hex")}` as PermissionScope;
 }

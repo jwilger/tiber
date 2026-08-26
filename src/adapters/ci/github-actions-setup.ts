@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 
 import {
   parseCiExecutableDigest,
+  parseCiGithubRepository,
   type CiExecutableDigest,
+  type CiGithubRepository,
 } from "../../core/ci/ci-values.js";
 import { none, some, type Option } from "../../core/types/option.js";
 import type { GitHubHttpClient } from "../github/github-review-service.js";
@@ -19,14 +21,16 @@ function record(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function repositoryFromOrigin(origin: string): string | undefined {
+export function githubRepositoryFromOrigin(
+  origin: string,
+): CiGithubRepository | undefined {
   const match =
-    /github\.com(?::|\/)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/u.exec(
+    /^(?:https?:\/\/github\.com\/|ssh:\/\/(?:git@)?github\.com\/|git@github\.com:)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/iu.exec(
       origin,
     );
-  return match?.[1] === undefined || match[2] === undefined
-    ? undefined
-    : `${match[1]}/${match[2]}`;
+  if (match?.[1] === undefined || match[2] === undefined) return undefined;
+  const parsed = parseCiGithubRepository(`${match[1]}/${match[2]}`);
+  return parsed.ok ? parsed.value : undefined;
 }
 
 function shippingPackageVersion(): string {
@@ -60,7 +64,7 @@ export async function discoverGithubActionsCatalog(
   origin: string,
   client: GitHubHttpClient,
 ): Promise<CiAdapterResult<Option<CiAuthorityCatalog>>> {
-  const repository = repositoryFromOrigin(origin);
+  const repository = githubRepositoryFromOrigin(origin);
   if (repository === undefined) return { ok: true, value: none };
   const credential = parseGitHubCiCredential("host-gh");
   if (!credential.ok)
