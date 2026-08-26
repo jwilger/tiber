@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
+import { GhGitHubHttpClient } from "../adapters/github/gh-github-http-client.js";
 import {
-  FetchGitHubHttpClient,
   GitHubCiAdapter,
   GitHubMergeAdapter,
   GitHubPullRequestAdapter,
@@ -73,9 +73,7 @@ async function openReview(
   const baseRef = parseReviewBaseRef(match[3]);
   const title = parseReviewTitle(match[4]);
   const body = parseReviewBody(match[5]);
-  const credential = parseGitHubPullRequestCredential(
-    process.env.TIBER_GITHUB_PR_TOKEN,
-  );
+  const credential = parseGitHubPullRequestCredential("host-gh");
   const remote = new GitTaskRemote(context.cwd);
   const board = remote.read();
   const task = taskId.ok
@@ -119,7 +117,7 @@ async function openReview(
     body: body.value,
   };
   const opened = await new GitHubPullRequestAdapter(
-    new FetchGitHubHttpClient(),
+    new GhGitHubHttpClient(),
     credential.value,
   ).create(request);
   if (!opened.ok) {
@@ -158,15 +156,9 @@ async function observeReview(
   context: ExtensionCommandContext,
 ): Promise<void> {
   const taskId = parseTaskId(taskText.trim());
-  const reviewCredential = parseGitHubReviewCredential(
-    process.env.TIBER_GITHUB_REVIEW_TOKEN,
-  );
-  const ciCredential = parseGitHubCiCredential(
-    process.env.TIBER_GITHUB_CI_TOKEN,
-  );
-  const mergeCredential = parseGitHubMergeCredential(
-    process.env.TIBER_GITHUB_MERGE_TOKEN,
-  );
+  const reviewCredential = parseGitHubReviewCredential("host-gh");
+  const ciCredential = parseGitHubCiCredential("host-gh");
+  const mergeCredential = parseGitHubMergeCredential("host-gh");
   const remote = new GitTaskRemote(context.cwd);
   const board = remote.read();
   const task = taskId.ok
@@ -188,7 +180,7 @@ async function observeReview(
     return;
   }
   const opened = task.openedReview.value;
-  const client = new FetchGitHubHttpClient();
+  const client = new GhGitHubHttpClient();
   const reviewAdapter = new GitHubReviewAdapter(client, reviewCredential.value);
   const ciAdapter = new GitHubCiAdapter(client, ciCredential.value);
   const mergeAdapter = new GitHubMergeAdapter(client, mergeCredential.value);

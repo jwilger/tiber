@@ -45,20 +45,27 @@ After Tiber is loaded, run one command in the repository:
 /tiber-setup
 ```
 
-The setup assistant inspects the repository and current layered configuration,
-then discusses one choice at a time. It explains and recommends every shipping
-setting, authority floor, secret reference, project command and workflow
-declaration, and optional integration. After a complete preview and explicit
-approval, its typed setup host validates and persists the configuration, can
-write or remove project declarations, and locally grants only the exact
-`.tiber/commands.json` digest the user confirms. No manual JSON editing or
-sequence of Tiber commands is required.
+Setup presents two short, plain-language choices: how independently Tiber may
+work and how strongly its environment must be isolated. The recommended setup
+handles routine repository work automatically, asks before unfamiliar or risky
+actions, and applies Tiber's repository guardrails without claiming operating-
+system isolation. Advanced externally attested isolation remains available.
 
-Secret values, strong-containment attestations, service administration, and
-other externally provisioned authority never enter model context. Setup reports
-those as explicit blockers or optional disabled capabilities rather than
-fabricating them. Cancelling restores ordinary tools and containment policy.
-Rerun `/tiber-setup` at any time to inspect or modify the setup.
+The deterministic host detects ordinary project test and verification scripts,
+Git configuration, an installed authenticated `gh`, and GitHub Actions. After
+one complete preview and explicit approval it creates the private validated
+configuration, including detected project checks and GitHub CI authority. No
+manual Tiber files, duplicated GitHub token variables, digest grants, or
+sequence of setup commands is required. Rerun `/tiber-setup` at any time to
+change the setup.
+
+When an eligible unfamiliar action is first requested, Tiber offers Deny this
+time, Always deny, Allow this time, and Always allow. Remembered decisions are
+private and repository-bound. Workflow and agent-role guardrails are evaluated
+first and cannot be bypassed by a permission choice. Arbitrary shell,
+publication, privilege, force, and exception boundaries never receive a
+persistent allow and require exact human approval whenever they are eligible at
+all.
 
 ## Development
 
@@ -140,12 +147,16 @@ interactive exact task-and-claim confirmation, publishes a state-bound takeover
 event, and transfers durable worktree ownership; stale heartbeat alone never
 transfers authority.
 
-Projects may define closed, shell-free command data in
-`.tiber/commands.json`: a name, absolute executable, fixed argv, exact literal
-environment, worktree cwd, timeout, and inline-output bound. A human grants the
-canonical catalog digest with `/tiber:commands grant`; repository edits revoke
-the grant automatically. `tiber_command` runs only a granted name for an exact
-active task claim and records its detached process group.
+Setup detects ordinary project test and verification scripts and compiles them
+into shell-free executable/argv operations. Eligible implementation agents can
+request those operations under the selected autonomy policy; first-use prompts
+replace manual command-catalog grants. Advanced projects may still provide
+narrower command suggestions, but repository data never grants execution
+authority. `tiber_process` accepts a shell-free executable name and argv for an
+active task; ad-hoc operations require exact human approval. Planning,
+readiness, setup, classifier, and review agents have no arbitrary process
+capability. An implementation agent requesting exact shell text always crosses
+a conspicuous single-use human approval boundary.
 
 Oversized stdout/stderr is stored privately by SHA-256 instead of entering the
 model context. Results include only bounded UTF-8 head/tail previews and an
@@ -182,25 +193,24 @@ drift or a non-fast-forward remote head denies delivery and requires
 revalidation; Tiber never force-pushes.
 
 `/tiber:ci <task-id>` observes every required CI authority for that delivered
-commit. Authorities are configured only in the user-local
-`$PI_CODING_AGENT_DIR/tiber/ci-authorities.v1.json` as unique names, absolute
-executable paths, SHA-256 executable pins, and fixed argv containing exactly one
-`{revision}` argument. Tiber copies the verified executable bytes to a private
-temporary file before shell-free execution and accepts only closed schema-v1
-JSON observations naming the requested authority and full commit SHA. Every
-authority must report terminal `success`; `pending` remains incomplete and any
-terminal `failure` creates a repository-wide delivery hold shared by all
-worktrees. After causal repair and a successful exact-revision rerun,
+commit. For GitHub repositories, setup creates a private authority catalog from
+the detected GitHub Actions checks and Tiber's pinned first-party observer.
+Generic digest-pinned executable/argv observers remain an advanced option for
+other CI systems. Every observation uses the requested full commit SHA and a
+closed schema. Every authority must report terminal `success`; `pending` remains
+incomplete and any terminal `failure` creates a repository-wide delivery hold
+shared by all checkouts. After causal repair and a successful exact-revision rerun,
 `/tiber:ci <task-id> --recover <causal-diagnosis>` records recovery evidence and
 releases the hold. CI receipts remain separate from Git delivery receipts.
 For review-mode delivery, `/tiber:review open <task-id> <owner/repository>
 <base> <title> -- <body>` creates the exact pull request through the first-party
-GitHub HTTP adapter. `/tiber:review observe <task-id>` independently observes
+GitHub adapter. `/tiber:review observe <task-id>` independently observes
 reviews, resolved conversations, exact-SHA check runs, author merge permission,
-and merge state. The four operations use separate
-`TIBER_GITHUB_PR_TOKEN`, `TIBER_GITHUB_REVIEW_TOKEN`,
-`TIBER_GITHUB_CI_TOKEN`, and `TIBER_GITHUB_MERGE_TOKEN` capabilities. An
-ordinary PR gets squash auto-merge only after approval, resolved conversations,
+and merge state. The adapter uses the installed authenticated `gh` and the
+user's normal Git/GitHub credentials without exposing credential material to a
+model or requiring Tiber-specific token variables. The operations remain
+separate typed capabilities and receipts. An ordinary PR gets squash auto-merge
+only after approval, resolved conversations,
 all checks, and author permission. Missing permission leaves it open. A
 release-please branch or release title is always held for explicit human merge;
 Tiber never enables its auto-merge. Signed task events retain the exact PR,
