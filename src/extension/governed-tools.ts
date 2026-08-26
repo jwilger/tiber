@@ -17,9 +17,17 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { FilePermissionSettingsStore } from "../adapters/permissions/file-permission-settings-store.js";
+import { FilePermissionStore } from "../adapters/permissions/file-permission-store.js";
 import { FileRunJournal } from "../adapters/runs/file-run-journal.js";
+import { FileSettingsStore } from "../adapters/settings/file-settings-store.js";
 import { GitTaskRemote } from "../adapters/tasks/git-task-remote.js";
 import { GitOwnedWorktrees } from "../adapters/worktrees/git-owned-worktrees.js";
+import {
+  parsePermissionDecisionAt,
+  permissionScope,
+} from "../core/permissions/permission-values.js";
+import { none, some } from "../core/types/option.js";
 import type { TestMappingPath } from "../core/tasks/task-values.js";
 import type { OwnedWorktreePath } from "../core/worktrees/worktree-values.js";
 import { authorizeWorkflowMutation } from "../core/tools/red-mutation-policy.js";
@@ -32,6 +40,7 @@ import {
   authorizeMutation,
   authorizeReadPath,
 } from "../core/tools/tool-policy.js";
+import { authorizeRequestedEffect } from "./permission-authorization.js";
 import {
   parseCanonicalReadTarget,
   parseClaimedWorkspaceRoot,
@@ -236,9 +245,94 @@ export function registerGovernedTools(pi: ExtensionAPI): void {
     name: "bash",
     label: "bash (Tiber governed)",
     description:
-      "Arbitrary shell execution is denied; use a granted tiber_command",
+      "Run an exact shell command only after explicit human permission and eligible workflow authority",
     parameters: bashParameters,
-    execute: () => Promise.resolve(deniedMutation()),
+    async execute(_id, parameters, signal, _update, context) {
+      const authority = activeAuthority(context);
+      const settings = new FileSettingsStore(getAgentDir(), context.cwd).load();
+      if (!settings.ok)
+        return {
+          content: [{ type: "text", text: settings.failure.code }],
+          details: { allowed: false, code: settings.failure.code },
+          isError: true,
+        };
+      const permissionSettings = new FilePermissionSettingsStore(
+        getAgentDir(),
+        settings.value.projectId,
+      ).load();
+      const decidedAt = parsePermissionDecisionAt(new Date().toISOString());
+      if (!permissionSettings.ok || !decidedAt.ok)
+        return {
+          content: [{ type: "text", text: "TIBER_PERMISSION_STATE_INVALID" }],
+          details: {
+            allowed: false,
+            code: "TIBER_PERMISSION_STATE_INVALID",
+          },
+          isError: true,
+        };
+      const choices = {
+        "deny-once": "Deny this time",
+        "deny-always": "Always deny this action",
+        "allow-once": "Allow this time",
+        "allow-always": "Always allow this action",
+      } as const;
+      const authorization = await authorizeRequestedEffect(
+        {
+          autonomy: permissionSettings.value.autonomy,
+          role: authority === undefined ? "coordinator" : "implementation",
+          effect: "arbitrary-shell",
+          risk: "unfamiliar",
+          boundary: "repository",
+          workflow: authority === undefined ? "denied" : "authorized",
+          interactive: context.hasUI,
+          persistable: false,
+        },
+        permissionScope({
+          role: "implementation",
+          effect: "arbitrary-shell",
+          executable: "bash",
+          purpose: parameters.command,
+        }),
+        `Tiber requested this exact shell command:\n\n${JSON.stringify(parameters.command)}`,
+        new FilePermissionStore(getAgentDir(), settings.value.projectId),
+        {
+          async choose(description, available) {
+            const labels = available.map((choice) => choices[choice]);
+            const selected = await context.ui.select(description, labels);
+            const selectedIndex = labels.findIndex(
+              (label) => label === selected,
+            );
+            const selectedChoice = available[selectedIndex];
+            return selectedChoice === undefined ? none : some(selectedChoice);
+          },
+        },
+        decidedAt.value,
+      );
+      if (authorization.status === "denied")
+        return {
+          content: [{ type: "text", text: authorization.code }],
+          details: { allowed: false, code: authorization.code },
+          isError: true,
+        };
+      if (authority === undefined) return deniedMutation();
+      const result = await pi.exec("bash", ["-lc", parameters.command], {
+        cwd: authority.root,
+        ...(signal === undefined ? {} : { signal }),
+        timeout: 60_000,
+      });
+      const output = `${result.stdout}${result.stderr}`;
+      const bounded =
+        Buffer.byteLength(output) <= 50 * 1024
+          ? output
+          : `${Buffer.from(output)
+              .subarray(0, 50 * 1024)
+              .toString("utf8")}\n[Tiber output truncated]`;
+      return {
+        content: [{ type: "text", text: bounded }],
+        details: { allowed: true, exitCode: result.code },
+        isError: result.code !== 0,
+      };
+    },
   });
 
   pi.registerTool({

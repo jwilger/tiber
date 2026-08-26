@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   linkSync,
@@ -10,6 +10,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
+import {
+  parseCiAuthorityCatalog,
+  type CiAuthorityCatalog,
+} from "../ci/user-local-ci-authority.js";
+import type { PermissionSettings } from "../permissions/file-permission-settings-store.js";
 import {
   parseProjectId,
   type ProjectId,
@@ -38,11 +43,22 @@ import {
 } from "../../core/failures/tiber-failure.js";
 import { none, some, type Option } from "../../core/types/option.js";
 
+export interface SetupCompanionEffects {
+  readonly permissionSettings: Option<PermissionSettings>;
+  readonly ciCatalog: Option<CiAuthorityCatalog>;
+}
+
+export const EMPTY_SETUP_COMPANION_EFFECTS: SetupCompanionEffects = {
+  permissionSettings: none,
+  ciCatalog: none,
+};
+
 export interface PendingSetupApplication {
   readonly expectedCurrent: SetupPlan;
   readonly expectedCurrentDigest: SetupExpectedAuthorityDigest;
   readonly plan: SetupPlan;
   readonly planDigest: SetupPlanDigest;
+  readonly companionEffects: SetupCompanionEffects;
 }
 
 type SetupJournalFailure = TiberFailure<
@@ -75,6 +91,100 @@ function failure(
 
 function record(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatCompanionEffects(effects: SetupCompanionEffects) {
+  return {
+    permissionSettings:
+      effects.permissionSettings.kind === "some"
+        ? effects.permissionSettings.value
+        : "unchanged",
+    ciCatalog:
+      effects.ciCatalog.kind === "some" ? effects.ciCatalog.value : "unchanged",
+  };
+}
+
+function parsePermissionSettings(
+  input: unknown,
+): PermissionSettings | undefined {
+  if (
+    !record(input) ||
+    Object.keys(input).sort().join(",") !== "autonomy,schemaVersion" ||
+    input.schemaVersion !== 1 ||
+    (input.autonomy !== "ask-first" &&
+      input.autonomy !== "routine" &&
+      input.autonomy !== "repository")
+  )
+    return undefined;
+  return { schemaVersion: 1, autonomy: input.autonomy };
+}
+
+function parseCompanionEffects(
+  input: unknown,
+): SetupCompanionEffects | undefined {
+  if (
+    !record(input) ||
+    Object.keys(input).sort().join(",") !== "ciCatalog,permissionSettings"
+  )
+    return undefined;
+  const permissionInput = input.permissionSettings;
+  const parsedPermission =
+    permissionInput === "unchanged"
+      ? undefined
+      : parsePermissionSettings(permissionInput);
+  const permissionSettings =
+    permissionInput === "unchanged"
+      ? none
+      : parsedPermission === undefined
+        ? undefined
+        : some(parsedPermission);
+  const ciInput = input.ciCatalog;
+  const parsedCi =
+    ciInput === "unchanged" ? undefined : parseCiAuthorityCatalog(ciInput);
+  const ciCatalog =
+    ciInput === "unchanged"
+      ? none
+      : parsedCi?.ok === true
+        ? some(parsedCi.value)
+        : undefined;
+  return permissionSettings === undefined || ciCatalog === undefined
+    ? undefined
+    : { permissionSettings, ciCatalog };
+}
+
+function completePlanDigest(
+  plan: SetupPlan,
+  companionEffects: SetupCompanionEffects,
+): SetupPlanDigest {
+  const parsed = parseSetupPlanDigest(
+    `sha256:${createHash("sha256")
+      .update(
+        JSON.stringify({
+          plan: formatSetupPlan(plan),
+          companionEffects: formatCompanionEffects(companionEffects),
+        }),
+      )
+      .digest("hex")}`,
+  );
+  if (!parsed.ok) throw new Error("complete setup digest is invalid");
+  return parsed.value;
+}
+
+function sameSetupPlan(left: SetupPlan, right: SetupPlan): boolean {
+  return (
+    JSON.stringify(formatSetupPlan(left)) ===
+    JSON.stringify(formatSetupPlan(right))
+  );
+}
+
+function sameCompanionEffects(
+  left: SetupCompanionEffects,
+  right: SetupCompanionEffects,
+): boolean {
+  return (
+    JSON.stringify(formatCompanionEffects(left)) ===
+    JSON.stringify(formatCompanionEffects(right))
+  );
 }
 
 export class FileSetupJournal {
@@ -111,12 +221,28 @@ export class FileSetupJournal {
       );
     }
     try {
+      if (!record(input) || input.schemaVersion !== 1)
+        return failure(
+          "TIBER_SETUP_JOURNAL_INVALID",
+          "pending setup application has an invalid shape",
+        );
+      const keys = Object.keys(input).sort().join(",");
+      const legacy =
+        keys ===
+        "expectedCurrent,expectedCurrentDigest,plan,planDigest,projectId,repositoryPath,schemaVersion";
       if (
-        !record(input) ||
-        Object.keys(input).sort().join(",") !==
-          "expectedCurrent,expectedCurrentDigest,plan,planDigest,projectId,repositoryPath,schemaVersion" ||
-        input.schemaVersion !== 1
+        !legacy &&
+        keys !==
+          "companionEffects,expectedCurrent,expectedCurrentDigest,plan,planDigest,projectId,repositoryPath,schemaVersion"
       )
+        return failure(
+          "TIBER_SETUP_JOURNAL_INVALID",
+          "pending setup application has an invalid shape",
+        );
+      const companionEffects = legacy
+        ? EMPTY_SETUP_COMPANION_EFFECTS
+        : parseCompanionEffects(input.companionEffects);
+      if (companionEffects === undefined)
         return failure(
           "TIBER_SETUP_JOURNAL_INVALID",
           "pending setup application has an invalid shape",
@@ -138,7 +264,10 @@ export class FileSetupJournal {
         !planDigest.ok ||
         digestSetupExpectedAuthority(expectedCurrent.value) !==
           expectedCurrentDigest.value ||
-        digestSetupPlan(plan.value) !== planDigest.value
+        (legacy
+          ? digestSetupPlan(plan.value)
+          : completePlanDigest(plan.value, companionEffects)) !==
+          planDigest.value
       )
         return failure(
           "TIBER_SETUP_JOURNAL_INVALID",
@@ -159,6 +288,7 @@ export class FileSetupJournal {
           expectedCurrentDigest: expectedCurrentDigest.value,
           plan: plan.value,
           planDigest: planDigest.value,
+          companionEffects,
         }),
       };
     } catch {
@@ -172,18 +302,23 @@ export class FileSetupJournal {
   public begin(
     expectedCurrent: SetupPlan,
     plan: SetupPlan,
+    companionEffects: SetupCompanionEffects = EMPTY_SETUP_COMPANION_EFFECTS,
   ): SetupJournalResult<SetupPlanDigest> {
     const expectedCurrentDigest = digestSetupExpectedAuthority(expectedCurrent);
-    const planDigest = digestSetupPlan(plan);
+    const planDigest = completePlanDigest(plan, companionEffects);
     const pending = this.loadPending();
     if (!pending.ok) return pending;
     if (pending.value.kind === "some")
-      return pending.value.value.planDigest === planDigest &&
-        sameSetupAuthorityState(
-          pending.value.value.expectedCurrent,
-          expectedCurrent,
+      return sameSetupAuthorityState(
+        pending.value.value.expectedCurrent,
+        expectedCurrent,
+      ) &&
+        sameSetupPlan(pending.value.value.plan, plan) &&
+        sameCompanionEffects(
+          pending.value.value.companionEffects,
+          companionEffects,
         )
-        ? { ok: true, value: planDigest }
+        ? { ok: true, value: pending.value.value.planDigest }
         : failure(
             "TIBER_SETUP_JOURNAL_CONFLICT",
             "a different confirmed setup application requires recovery",
@@ -196,17 +331,22 @@ export class FileSetupJournal {
       expectedCurrentDigest,
       expectedCurrent: formatSetupPlan(expectedCurrent),
       plan: formatSetupPlan(plan),
+      companionEffects: formatCompanionEffects(companionEffects),
     });
     if (!written.ok) {
       const raced = this.loadPending();
       return raced.ok &&
         raced.value.kind === "some" &&
-        raced.value.value.planDigest === planDigest &&
         sameSetupAuthorityState(
           raced.value.value.expectedCurrent,
           expectedCurrent,
+        ) &&
+        sameSetupPlan(raced.value.value.plan, plan) &&
+        sameCompanionEffects(
+          raced.value.value.companionEffects,
+          companionEffects,
         )
-        ? { ok: true, value: planDigest }
+        ? { ok: true, value: raced.value.value.planDigest }
         : written;
     }
     const observed = this.loadPending();
@@ -216,6 +356,10 @@ export class FileSetupJournal {
       sameSetupAuthorityState(
         observed.value.value.expectedCurrent,
         expectedCurrent,
+      ) &&
+      sameCompanionEffects(
+        observed.value.value.companionEffects,
+        companionEffects,
       )
       ? { ok: true, value: planDigest }
       : failure(
@@ -248,6 +392,9 @@ export class FileSetupJournal {
         expectedCurrentDigest: pending.value.value.expectedCurrentDigest,
         expectedCurrent: formatSetupPlan(pending.value.value.expectedCurrent),
         plan: formatSetupPlan(pending.value.value.plan),
+        companionEffects: formatCompanionEffects(
+          pending.value.value.companionEffects,
+        ),
         status: "applied",
       },
     );

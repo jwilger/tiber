@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { FileCommandAuthority } from "../../src/adapters/commands/file-command-authority.js";
+import { FilePermissionSettingsStore } from "../../src/adapters/permissions/file-permission-settings-store.js";
 import { FileAuthorityStore } from "../../src/adapters/settings/file-authority-store.js";
 import { FileSettingsStore } from "../../src/adapters/settings/file-settings-store.js";
 import { FileSetupJournal } from "../../src/adapters/settings/file-setup-journal.js";
@@ -23,6 +24,7 @@ import {
   reconcilePendingSetup,
 } from "../../src/extension/setup-tool.js";
 import { parseSetupPlan } from "../../src/core/configuration/setup.js";
+import { none, some } from "../../src/core/types/option.js";
 import {
   parseSetupAgentDirectoryPath,
   parseSetupRepositoryPath,
@@ -279,7 +281,15 @@ describe("guided setup application", () => {
       repositoryPath.value,
       settings.value.projectId,
     );
-    expect(journal.begin(initial.value, proposed.value).ok).toBe(true);
+    expect(
+      journal.begin(initial.value, proposed.value, {
+        permissionSettings: some({
+          schemaVersion: 1,
+          autonomy: "repository",
+        }),
+        ciCatalog: none,
+      }).ok,
+    ).toBe(true);
     expect(settingsStore.saveGlobal(proposed.value.globalSettings).ok).toBe(
       true,
     );
@@ -287,6 +297,15 @@ describe("guided setup application", () => {
     expect(reconcilePendingSetup(agentDirectory, repository)).toEqual({
       ok: true,
       value: "recovered",
+    });
+    expect(
+      new FilePermissionSettingsStore(
+        agentDirectory,
+        settings.value.projectId,
+      ).load(),
+    ).toEqual({
+      ok: true,
+      value: { schemaVersion: 1, autonomy: "repository" },
     });
     expect(inspectSetup(agentDirectory, repository, {})).toMatchObject({
       ok: true,

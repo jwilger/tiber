@@ -20,6 +20,12 @@ export type CiExecutableDigest = string & {
 export type CiAdapterArgument = string & {
   readonly __brand: "CiAdapterArgument";
 };
+export type CiGithubRepository = string & {
+  readonly __brand: "CiGithubRepository";
+};
+export type CiGithubCheckName = string & {
+  readonly __brand: "CiGithubCheckName";
+};
 
 export type CiValueResult<T> = TiberResult<
   T,
@@ -85,6 +91,27 @@ export function parseCiExecutableDigest(
   return typeof input === "string" && /^[0-9a-f]{64}$/.test(input)
     ? { ok: true, value: input as CiExecutableDigest }
     : invalid("CI executable digest");
+}
+
+export function parseCiGithubRepository(
+  input: unknown,
+): CiValueResult<CiGithubRepository> {
+  return typeof input === "string" &&
+    /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u.test(input)
+    ? { ok: true, value: input as CiGithubRepository }
+    : invalid("GitHub CI repository");
+}
+
+export function parseCiGithubCheckName(
+  input: unknown,
+): CiValueResult<CiGithubCheckName> {
+  return typeof input === "string" &&
+    input.trim() === input &&
+    input.length >= 1 &&
+    input.length <= 256 &&
+    !input.includes("\0")
+    ? { ok: true, value: input as CiGithubCheckName }
+    : invalid("GitHub CI check name");
 }
 
 export function parseCiAdapterArgument(

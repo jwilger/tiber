@@ -117,7 +117,7 @@ describe("the packed stock-Pi package", () => {
       encoding: "utf8",
     });
     expect(archiveEntries).toContain("package/dist/extension/index.js");
-    expect(archiveEntries).toContain("package/prompts/tiber-setup-agent.md");
+    expect(archiveEntries).not.toContain("tiber-setup-agent.md");
     expect(archiveEntries).not.toContain("Cargo.toml");
     expect(archiveEntries).not.toContain("package/crates/");
     expect(archiveEntries).not.toContain("package/src/");

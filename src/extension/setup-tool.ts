@@ -7,8 +7,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { delimiter, isAbsolute, join, relative } from "node:path";
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
@@ -20,11 +19,18 @@ import {
 import { Type, type Static } from "typebox";
 
 import { FileCiAuthorityStore } from "../adapters/ci/file-ci-authority-store.js";
+import { discoverGithubActionsCatalog } from "../adapters/ci/github-actions-setup.js";
+import { GhGitHubHttpClient } from "../adapters/github/gh-github-http-client.js";
+import { FilePermissionSettingsStore } from "../adapters/permissions/file-permission-settings-store.js";
 import { FileCommandAuthority } from "../adapters/commands/file-command-authority.js";
 import { verifyFileContainment } from "../adapters/containment/file-containment-verifier.js";
 import { FileAuthorityStore } from "../adapters/settings/file-authority-store.js";
 import { FileSettingsStore } from "../adapters/settings/file-settings-store.js";
-import { FileSetupJournal } from "../adapters/settings/file-setup-journal.js";
+import {
+  EMPTY_SETUP_COMPANION_EFFECTS,
+  FileSetupJournal,
+  type SetupCompanionEffects,
+} from "../adapters/settings/file-setup-journal.js";
 import { FileWorkflowConfiguration } from "../adapters/workflows/file-workflow-configuration.js";
 import {
   COMMAND_CATALOG_LIMITS,
@@ -33,6 +39,7 @@ import {
   type CommandCatalogDigest,
   type CommandName,
 } from "../core/commands/command-values.js";
+import { compileCommandCatalog } from "../core/commands/structured-command.js";
 import type { ContainmentStatus } from "../core/containment/containment.js";
 import {
   applyAssuranceCeiling,
@@ -72,6 +79,7 @@ import {
   type TiberFailure,
   type TiberResult,
 } from "../core/failures/tiber-failure.js";
+import { none, some } from "../core/types/option.js";
 import {
   BUILT_IN_WORKFLOW,
   compileWorkflow,
@@ -84,6 +92,10 @@ import type {
 } from "../core/workflow/workflow-values.js";
 
 type SetupEnvironment = Readonly<Record<string, string | undefined>>;
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 type SetupHostFailure = TiberFailure<
   | "TIBER_SETUP_APPLY_FAILED"
@@ -163,31 +175,6 @@ function observedSetupPaths(
   }
 }
 
-function setupAgentPrompt(): SetupHostResult<string> {
-  try {
-    const text = readFileSync(
-      fileURLToPath(
-        new URL("../../prompts/tiber-setup-agent.md", import.meta.url),
-      ),
-      "utf8",
-    );
-    const frontmatterEnd = text.indexOf("\n---\n", 4);
-    return text.startsWith("---\n") && frontmatterEnd >= 0
-      ? { ok: true, value: text.slice(frontmatterEnd + 5).trim() }
-      : hostFailure(
-          "TIBER_SETUP_INSPECTION_FAILED",
-          "packaged setup guidance is invalid",
-          "not-retryable",
-        );
-  } catch {
-    return hostFailure(
-      "TIBER_SETUP_INSPECTION_FAILED",
-      "packaged setup guidance is unavailable",
-      "not-retryable",
-    );
-  }
-}
-
 function gitConfig(
   repository: SetupRepositoryPath,
   key: string,
@@ -226,30 +213,6 @@ function discoverExecutable(
   return { status: "missing" };
 }
 
-function configuredEnvironmentNames(
-  environment: SetupEnvironment,
-  names: readonly string[],
-): {
-  readonly status: "disabled" | "partial" | "environment-present";
-  readonly configured: readonly string[];
-  readonly missing: readonly string[];
-} {
-  const configured = names.filter(
-    (name) => (environment[name]?.length ?? 0) > 0,
-  );
-  const missing = names.filter((name) => !configured.includes(name));
-  return {
-    status:
-      configured.length === 0
-        ? "disabled"
-        : missing.length === 0
-          ? "environment-present"
-          : "partial",
-    configured,
-    missing,
-  };
-}
-
 type SetupSettingCatalogEntry =
   | {
       readonly key: "assuranceLevel";
@@ -275,6 +238,11 @@ type SetupSettingCatalogEntry =
     };
 
 interface SetupConfigurationCatalog {
+  readonly autonomy: {
+    readonly choices: readonly ["ask-first", "routine", "repository"];
+    readonly recommendation: "routine";
+    readonly effect: string;
+  };
   readonly settings: readonly SetupSettingCatalogEntry[];
   readonly authority: {
     readonly minimumAssuranceLevel: {
@@ -357,6 +325,9 @@ type SetupWorkflowInspection =
 export interface SetupInspection {
   readonly schemaVersion: 1;
   readonly configurationCatalog: SetupConfigurationCatalog;
+  readonly experience: {
+    readonly autonomy: "ask-first" | "routine" | "repository";
+  };
   readonly settings: {
     readonly builtIn: typeof BUILT_IN_SETTINGS;
     readonly global: SettingsOverrides;
@@ -379,6 +350,7 @@ export interface SetupInspection {
       readonly git: SetupExecutableInspection;
       readonly npm: SetupExecutableInspection;
       readonly npx: SetupExecutableInspection;
+      readonly gh: SetupExecutableInspection;
     };
     readonly origin: { readonly status: "missing" | "configured" };
     readonly signing: {
@@ -409,7 +381,11 @@ export interface SetupInspection {
         >
       >;
     };
-    readonly githubReview: ReturnType<typeof configuredEnvironmentNames>;
+    readonly githubReview: {
+      readonly status:
+        "ready" | "not-github" | "gh-missing" | "gh-not-authenticated";
+      readonly client: "gh";
+    };
     readonly ci: { readonly status: "configured" | "invalid" | "missing" };
   };
 }
@@ -504,14 +480,88 @@ function ciStatus(
   repository: SetupRepositoryPath,
   agentDirectory: SetupAgentDirectoryPath,
 ): "configured" | "invalid" | "missing" {
-  if (!existsSync(join(agentDirectory, "tiber", "ci-authorities.v1.json")))
-    return "missing";
   try {
-    return new FileCiAuthorityStore(repository, agentDirectory).loadCatalog().ok
-      ? "configured"
-      : "invalid";
+    const store = new FileCiAuthorityStore(repository, agentDirectory);
+    if (!store.catalogExists()) return "missing";
+    return store.loadCatalog().ok ? "configured" : "invalid";
   } catch {
     return "invalid";
+  }
+}
+
+function detectedCommandCatalog(
+  repository: SetupRepositoryPath,
+  environment: SetupEnvironment,
+): SetupPlan["commandCatalog"] {
+  if (existsSync(join(repository, ".tiber", "commands.json")))
+    return { kind: "keep" };
+  const manifestPath = join(repository, "package.json");
+  const npm = discoverExecutable("npm", environment);
+  if (!existsSync(manifestPath) || npm.status === "missing")
+    return { kind: "keep" };
+  try {
+    const canonicalManifest = realpathSync(manifestPath);
+    const manifestRelative = relative(repository, canonicalManifest);
+    if (manifestRelative.startsWith("..") || isAbsolute(manifestRelative))
+      return { kind: "keep" };
+    const input: unknown = JSON.parse(readFileSync(canonicalManifest, "utf8"));
+    if (!isRecord(input) || !isRecord(input.scripts)) return { kind: "keep" };
+    const scripts = input.scripts;
+    const recognized = [
+      { script: "test", name: "test", purpose: "test" },
+      { script: "typecheck", name: "typecheck", purpose: "verification" },
+      { script: "lint", name: "lint", purpose: "verification" },
+      {
+        script: "format:check",
+        name: "format-check",
+        purpose: "verification",
+      },
+      { script: "build", name: "build", purpose: "verification" },
+    ] as const;
+    const commands = recognized.flatMap((candidate) =>
+      typeof scripts[candidate.script] === "string"
+        ? [
+            {
+              name: candidate.name,
+              executable: npm.path,
+              purpose: candidate.purpose,
+              argv: ["run", candidate.script],
+              cwd: "worktree",
+              environment: {},
+              timeoutMs: 900_000,
+              maxOutputBytes: 1_048_576,
+            },
+          ]
+        : [],
+    );
+    if (commands.length === 0) return { kind: "keep" };
+    const compiled = compileCommandCatalog({ schemaVersion: 1, commands });
+    return compiled.ok
+      ? { kind: "replace", catalog: compiled.value }
+      : { kind: "keep" };
+  } catch {
+    return { kind: "keep" };
+  }
+}
+
+function githubIntegrationStatus(
+  origin: string | undefined,
+  environment: SetupEnvironment,
+): SetupInspection["integrations"]["githubReview"] {
+  if (origin === undefined || !/(?:github\.com)[/:]/u.test(origin))
+    return { status: "not-github", client: "gh" };
+  const gh = discoverExecutable("gh", environment);
+  if (gh.status === "missing") return { status: "gh-missing", client: "gh" };
+  try {
+    execFileSync(gh.path, ["auth", "status"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: environment.PATH ?? "" },
+      stdio: ["ignore", "ignore", "ignore"],
+      timeout: 10_000,
+    });
+    return { status: "ready", client: "gh" };
+  } catch {
+    return { status: "gh-not-authenticated", client: "gh" };
   }
 }
 
@@ -550,6 +600,17 @@ export function inspectSetup(
         "user-local authority could not be inspected",
         authority.failure.retryability,
         authority.failure,
+      );
+    const permissionSettings = new FilePermissionSettingsStore(
+      agentDirectory,
+      settings.value.projectId,
+    ).load();
+    if (!permissionSettings.ok)
+      return causedFailure(
+        "TIBER_SETUP_INSPECTION_FAILED",
+        "autonomy settings could not be inspected",
+        permissionSettings.failure.retryability,
+        permissionSettings.failure,
       );
 
     const pendingSetup = new FileSetupJournal(
@@ -593,18 +654,17 @@ export function inspectSetup(
     const missingSigningKeys = signingKeys.filter(
       (key) => gitConfig(repository, key) === undefined,
     );
-    const githubEnvironmentNames = [
-      "TIBER_GITHUB_PR_TOKEN",
-      "TIBER_GITHUB_REVIEW_TOKEN",
-      "TIBER_GITHUB_CI_TOKEN",
-      "TIBER_GITHUB_MERGE_TOKEN",
-    ];
-
     return {
       ok: true,
       value: {
         schemaVersion: 1,
         configurationCatalog: {
+          autonomy: {
+            choices: ["ask-first", "routine", "repository"],
+            recommendation: "routine",
+            effect:
+              "controls when eligible actions ask for permission; workflow and role guardrails always remain enforced",
+          },
           settings: [
             {
               key: "assuranceLevel",
@@ -654,7 +714,7 @@ export function inspectSetup(
               ...COMMAND_CATALOG_LIMITS,
             },
             effect:
-              "a closed shell-free command catalog is compiled, written to .tiber/commands.json, and locally granted only after exact human digest confirmation",
+              "shell-free project checks are detected as command suggestions; eligible execution follows workflow, role, autonomy, and first-use permission policy",
           },
           projectWorkflow: {
             choices: ["keep", "built-in", "replace"],
@@ -671,13 +731,14 @@ export function inspectSetup(
               "strong assurance requires externally signed containment evidence",
             ci: "delivery completion requires a separately provisioned private digest-pinned CI authority catalog",
             githubReview:
-              "review delivery uses four separately provisioned GitHub token capabilities",
+              "GitHub delivery uses the installed authenticated gh client without exposing its credentials to models",
             context7:
               "Context7 network access is optional and requires explicit environment authority",
             hindsight:
               "Hindsight is optional and each memory bank has separate recall and retain authority",
           },
         },
+        experience: permissionSettings.value,
         settings: {
           builtIn: BUILT_IN_SETTINGS,
           global: settings.value.globalValues,
@@ -707,6 +768,7 @@ export function inspectSetup(
             git: discoverExecutable("git", environment),
             npm: discoverExecutable("npm", environment),
             npx: discoverExecutable("npx", environment),
+            gh: discoverExecutable("gh", environment),
           },
           origin: {
             status: origin === undefined ? "missing" : "configured",
@@ -774,10 +836,7 @@ export function inspectSetup(
               ),
             },
           },
-          githubReview: configuredEnvironmentNames(
-            environment,
-            githubEnvironmentNames,
-          ),
+          githubReview: githubIntegrationStatus(origin, environment),
           ci: { status: ciStatus(repository, agentDirectory) },
         },
       },
@@ -907,6 +966,7 @@ function applyObservedSetupPlan(
   expectedCurrent: SetupPlan,
   plan: SetupPlan,
   mode: "confirmed-current" | "recovery",
+  companionEffects: SetupCompanionEffects,
 ): SetupHostResult<SetupApplicationReceipt> {
   const settingsStore = new FileSettingsStore(agentDirectory, repository);
   const observedCurrent = observeCurrentPlan(agentDirectory, repository);
@@ -938,7 +998,7 @@ function applyObservedSetupPlan(
     repository,
     settings.value.projectId,
   );
-  const intent = journal.begin(expectedCurrent, plan);
+  const intent = journal.begin(expectedCurrent, plan, companionEffects);
   if (!intent.ok) return mapApplyFailure(intent.failure);
 
   const savedGlobal = settingsStore.saveGlobal(plan.globalSettings);
@@ -980,11 +1040,54 @@ function applyObservedSetupPlan(
     projectWorkflow = "replaced";
   }
 
+  if (companionEffects.permissionSettings.kind === "some") {
+    const saved = new FilePermissionSettingsStore(
+      agentDirectory,
+      settings.value.projectId,
+    ).save(companionEffects.permissionSettings.value);
+    if (!saved.ok) return mapApplyFailure(saved.failure);
+  }
+  if (companionEffects.ciCatalog.kind === "some") {
+    const saved = new FileCiAuthorityStore(
+      repository,
+      agentDirectory,
+    ).saveCatalog(companionEffects.ciCatalog.value);
+    if (!saved.ok) return mapApplyFailure(saved.failure);
+  }
+
   const observed = observeCurrentPlan(agentDirectory, repository);
   if (!observed.ok) return observed;
+  const permissionMatches =
+    companionEffects.permissionSettings.kind === "none" ||
+    (() => {
+      const loaded = new FilePermissionSettingsStore(
+        agentDirectory,
+        settings.value.projectId,
+      ).load();
+      return (
+        loaded.ok &&
+        loaded.value.autonomy ===
+          companionEffects.permissionSettings.value.autonomy
+      );
+    })();
+  const ciMatches =
+    companionEffects.ciCatalog.kind === "none" ||
+    (() => {
+      const loaded = new FileCiAuthorityStore(
+        repository,
+        agentDirectory,
+      ).loadCatalog();
+      return (
+        loaded.ok &&
+        JSON.stringify(loaded.value) ===
+          JSON.stringify(companionEffects.ciCatalog.value)
+      );
+    })();
   if (
     !sameSetupAuthorityState(plan, observed.value) ||
-    !declarationsMatchPlan(repository, plan)
+    !declarationsMatchPlan(repository, plan) ||
+    !permissionMatches ||
+    !ciMatches
   )
     return hostFailure(
       "TIBER_SETUP_APPLY_FAILED",
@@ -1002,6 +1105,7 @@ export function applySetupPlan(
   repositoryInput: unknown,
   expectedCurrent: SetupPlan,
   plan: SetupPlan,
+  companionEffects: SetupCompanionEffects = EMPTY_SETUP_COMPANION_EFFECTS,
 ): SetupHostResult<SetupApplicationReceipt> {
   const paths = observedSetupPaths(
     agentDirectoryInput,
@@ -1016,6 +1120,7 @@ export function applySetupPlan(
       expectedCurrent,
       plan,
       "confirmed-current",
+      companionEffects,
     );
   } catch {
     return hostFailure(
@@ -1053,6 +1158,7 @@ export function reconcilePendingSetup(
       pending.value.value.expectedCurrent,
       pending.value.value.plan,
       "recovery",
+      pending.value.value.companionEffects,
     );
     return reconciled.ok ? { ok: true, value: "recovered" } : reconciled;
   } catch {
@@ -1248,12 +1354,210 @@ async function applyRequestedSetup(
   );
 }
 
+const AUTONOMY_OPTIONS = [
+  {
+    label:
+      "Handle routine work, ask before risky or unfamiliar actions (recommended)",
+    value: "routine",
+  },
+  { label: "Ask before new actions", value: "ask-first" },
+  {
+    label: "Work independently inside this repository",
+    value: "repository",
+  },
+] as const;
+
+const ISOLATION_OPTIONS = [
+  {
+    label: "Use this repository with Tiber guardrails (recommended)",
+    value: "host-trusted",
+  },
+  {
+    label: "Require an externally isolated workspace",
+    value: "workspace-isolated",
+  },
+  {
+    label: "Require externally isolated workspace and network",
+    value: "workspace-and-network-isolated",
+  },
+  { label: "Require a fully hermetic environment", value: "hermetic" },
+] as const;
+
+async function runStandardSetup(
+  context: ExtensionContext,
+  agentDirectory: SetupAgentDirectoryPath,
+  repository: SetupRepositoryPath,
+  host: SetupToolHost,
+  signal: AbortSignal,
+): Promise<void> {
+  host.beginConversation(repository);
+  const current = observeCurrentPlan(agentDirectory, repository);
+  if (!current.ok) {
+    host.endConversation(repository);
+    context.ui.notify(renderSetupFailure(current.failure), "error");
+    return;
+  }
+  const autonomyLabel = await context.ui.select(
+    "How independently should Tiber work?",
+    AUTONOMY_OPTIONS.map(({ label }) => label),
+    { signal },
+  );
+  if (setupCancelled(signal) || autonomyLabel === undefined) {
+    host.endConversation(repository);
+    context.ui.notify("TIBER_SETUP_CANCELLED", "info");
+    return;
+  }
+  const isolationLabel = await context.ui.select(
+    "How should Tiber be isolated?",
+    ISOLATION_OPTIONS.map(({ label }) => label),
+    { signal },
+  );
+  if (setupCancelled(signal) || isolationLabel === undefined) {
+    host.endConversation(repository);
+    context.ui.notify("TIBER_SETUP_CANCELLED", "info");
+    return;
+  }
+  const autonomyOption = AUTONOMY_OPTIONS.find(
+    ({ label }) => label === autonomyLabel,
+  );
+  const isolationOption = ISOLATION_OPTIONS.find(
+    ({ label }) => label === isolationLabel,
+  );
+  if (autonomyOption === undefined || isolationOption === undefined) {
+    host.endConversation(repository);
+    context.ui.notify("TIBER_SETUP_SELECTION_INVALID", "error");
+    return;
+  }
+  const autonomy = autonomyOption.value;
+  const assuranceLevel = isolationOption.value;
+  const proposed: SetupPlan = {
+    ...current.value,
+    projectSettings: {
+      ...current.value.projectSettings,
+      assuranceLevel: some(assuranceLevel),
+    },
+    commandCatalog: detectedCommandCatalog(repository, process.env),
+    projectWorkflow: { kind: "keep" },
+  };
+  const origin = gitConfig(repository, "remote.origin.url");
+  const githubCatalog =
+    origin === undefined
+      ? { ok: true as const, value: none }
+      : await discoverGithubActionsCatalog(origin, new GhGitHubHttpClient());
+  const githubChecks =
+    githubCatalog.ok && githubCatalog.value.kind === "some"
+      ? githubCatalog.value.value.authorities.flatMap((authority) =>
+          "kind" in authority ? authority.requiredChecks : [],
+        )
+      : [];
+  const approved = await context.ui.confirm(
+    "Use this Tiber setup?",
+    [
+      `Autonomy: ${autonomyLabel}`,
+      `Isolation: ${isolationLabel}`,
+      proposed.commandCatalog.kind === "replace"
+        ? `Project checks: detected ${proposed.commandCatalog.catalog.commands.map(({ name }) => name).join(", ")}`
+        : "Project checks: preserve the current configuration",
+      githubChecks.length > 0
+        ? `CI: use detected GitHub Actions checks (${githubChecks.join(", ")})`
+        : "CI: no authenticated GitHub Actions checks were detected; this can be completed later",
+      "Tiber's workflow, role, review, CI, and release guardrails always remain enforced.",
+      "Unfamiliar eligible actions can be denied or allowed once or permanently when first requested.",
+    ].join("\n"),
+    { signal },
+  );
+  if (setupCancelled(signal) || !approved) {
+    host.endConversation(repository);
+    context.ui.notify("TIBER_SETUP_CANCELLED", "info");
+    return;
+  }
+  const companionEffects: SetupCompanionEffects = {
+    permissionSettings: some({ schemaVersion: 1, autonomy }),
+    ciCatalog:
+      githubCatalog.ok && githubCatalog.value.kind === "some"
+        ? some(githubCatalog.value.value)
+        : none,
+  };
+  const applied = await withFileMutationQueue(
+    join(agentDirectory, "tiber", "setup-application"),
+    () =>
+      setupCancelled(signal)
+        ? Promise.resolve(undefined)
+        : Promise.resolve(
+            applySetupPlan(
+              agentDirectory,
+              repository,
+              current.value,
+              proposed,
+              companionEffects,
+            ),
+          ),
+  );
+  if (applied === undefined) {
+    host.endConversation(repository);
+    context.ui.notify("TIBER_SETUP_CANCELLED", "info");
+    return;
+  }
+  if (!applied.ok) {
+    host.endConversation(repository);
+    context.ui.notify(renderSetupFailure(applied.failure), "error");
+    return;
+  }
+  const observed = inspectSetup(agentDirectory, repository);
+  const containment = host.endConversation(repository);
+  context.ui.setStatus(
+    "tiber",
+    containment.state === "verified"
+      ? `Tiber: ${containment.level}`
+      : "Tiber: containment lockdown",
+  );
+  if (!observed.ok) {
+    context.ui.notify(renderSetupFailure(observed.failure), "error");
+    return;
+  }
+  const unresolved = [
+    ...(containment.state === "lockdown"
+      ? [`Isolation evidence is missing: ${containment.detail}`]
+      : []),
+    ...(observed.value.integrations.ci.status === "missing"
+      ? ["No CI checks are configured for delivery"]
+      : observed.value.integrations.ci.status === "invalid"
+        ? ["The existing CI check configuration is invalid"]
+        : []),
+    ...(observed.value.integrations.githubReview.status === "gh-missing"
+      ? ["GitHub CLI (gh) is not installed"]
+      : observed.value.integrations.githubReview.status ===
+          "gh-not-authenticated"
+        ? ["GitHub CLI (gh) is not authenticated"]
+        : []),
+    ...(observed.value.prerequisites.origin.status === "missing"
+      ? ["This repository has no origin remote for shared work"]
+      : []),
+    ...(observed.value.prerequisites.signing.status === "missing"
+      ? ["Git signing is not fully configured"]
+      : []),
+  ];
+  context.ui.notify(
+    [
+      `Tiber is ready: ${autonomyLabel}; ${isolationLabel}`,
+      ...(unresolved.length === 0
+        ? []
+        : [
+            "Still needed before delivery:",
+            ...unresolved.map((item) => `- ${item}`),
+          ]),
+    ].join("\n"),
+    unresolved.length === 0 ? "info" : "warning",
+  );
+}
+
 export function registerSetupTool(pi: ExtensionAPI, host: SetupToolHost): void {
   let applyInProgress = false;
   let applyAbortController: AbortController | undefined;
+  let standardAbortController: AbortController | undefined;
   pi.registerCommand("tiber-setup", {
-    description: "Configure or reconfigure Tiber in one guided conversation",
-    handler: (argumentsText, context) => {
+    description: "Choose Tiber autonomy and isolation in a guided setup wizard",
+    handler: async (argumentsText, context) => {
       const paths = observedSetupPaths(
         getAgentDir(),
         context.cwd,
@@ -1267,6 +1571,7 @@ export function registerSetupTool(pi: ExtensionAPI, host: SetupToolHost): void {
       if (argumentsText.trim() === "cancel") {
         if (host.isConversationActive(repository)) {
           applyAbortController?.abort();
+          standardAbortController?.abort();
           const containment = host.endConversation(repository);
           context.ui.setStatus(
             "tiber",
@@ -1280,7 +1585,7 @@ export function registerSetupTool(pi: ExtensionAPI, host: SetupToolHost): void {
         }
         return Promise.resolve();
       }
-      if (applyInProgress) {
+      if (applyInProgress || standardAbortController !== undefined) {
         context.ui.notify(
           "TIBER_SETUP_IN_PROGRESS: wait for or cancel the active setup application",
           "error",
@@ -1294,24 +1599,20 @@ export function registerSetupTool(pi: ExtensionAPI, host: SetupToolHost): void {
         );
         return Promise.resolve();
       }
-      const prompt = setupAgentPrompt();
-      if (!prompt.ok) {
-        context.ui.notify(renderSetupFailure(prompt.failure), "error");
-        return Promise.resolve();
-      }
-      host.beginConversation(repository);
+      const controller = new AbortController();
+      standardAbortController = controller;
       try {
-        pi.setActiveTools(["read", "tiber_setup"]);
-        context.ui.notify("Starting guided Tiber setup", "info");
-        pi.sendUserMessage(prompt.value);
-      } catch {
-        host.endConversation(repository);
-        context.ui.notify(
-          "TIBER_SETUP_INSPECTION_FAILED: guided setup could not start",
-          "error",
+        await runStandardSetup(
+          context,
+          paths.value.agentDirectory,
+          repository,
+          host,
+          controller.signal,
         );
+      } finally {
+        if (standardAbortController === controller)
+          standardAbortController = undefined;
       }
-      return Promise.resolve();
     },
   });
 
@@ -1319,11 +1620,11 @@ export function registerSetupTool(pi: ExtensionAPI, host: SetupToolHost): void {
     name: "tiber_setup",
     label: "Tiber guided setup",
     description:
-      "Inspect the complete closed Tiber configuration catalog, apply one complete user-approved setup plan, or end the active setup conversation. Inspection exposes choices, effects, current layered values, declarations, and external blockers without secret values. Apply requires project trust and independent interactive host confirmation; command grants and assurance loosening require exact human phrases.",
+      "Inspect advanced Tiber setup state or apply a complete independently confirmed setup proposal during an active repository-bound setup explanation. The ordinary setup path is the deterministic autonomy and isolation wizard.",
     promptSnippet:
-      "Inspect and apply complete conversational Tiber setup without manual file editing",
+      "Inspect advanced Tiber setup state during an active setup explanation",
     promptGuidelines: [
-      "Use tiber_setup only during an explicit guided Tiber setup conversation. Inspect before proposing changes, ask about every catalog area, never request secret values, call apply only after the user approves a complete preview, and call cancel if the user stops setup.",
+      "Use tiber_setup only during an explicitly active setup explanation; the deterministic host wizard owns ordinary choices and approval.",
     ],
     parameters: setupToolSchema,
     async execute(
@@ -1352,6 +1653,7 @@ export function registerSetupTool(pi: ExtensionAPI, host: SetupToolHost): void {
       }
       if (parameters.operation === "cancel") {
         applyAbortController?.abort();
+        standardAbortController?.abort();
         host.endConversation(repository);
         return setupResponse("TIBER_SETUP_CANCELLED", "cancelled");
       }

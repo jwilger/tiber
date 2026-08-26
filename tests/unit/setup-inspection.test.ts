@@ -144,7 +144,7 @@ describe("guided setup inspection", () => {
         integrations: {
           context7: { network: "disabled", endpoint: "default" },
           hindsight: { endpoint: "disabled", sharedBank: "missing" },
-          githubReview: { status: "disabled" },
+          githubReview: { status: "not-github", client: "gh" },
           ci: { status: "missing" },
         },
       },
