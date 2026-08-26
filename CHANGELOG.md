@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/jwilger/tiber/compare/v1.1.0...v1.1.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **setup:** recover from inspection failure ([#45](https://github.com/jwilger/tiber/issues/45)) ([5212a93](https://github.com/jwilger/tiber/commit/5212a937d140a2025efee438a2d181c244737672))
+
 ## [1.1.0](https://github.com/jwilger/tiber/compare/v1.0.1...v1.1.0) (2026-08-26)
 
 
