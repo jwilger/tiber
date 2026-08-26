@@ -21,9 +21,9 @@ async function stopProcess(child: ReturnType<typeof spawn>): Promise<void> {
   await once(child, "exit");
 }
 
-function waitForResponse(
+function waitForOutput(
   child: ReturnType<typeof spawn>,
-  id: string,
+  marker: string,
 ): Promise<string> {
   return new Promise((resolvePromise, rejectPromise) => {
     let output = "";
@@ -40,7 +40,7 @@ function waitForResponse(
     }, 10_000);
     stdout.on("data", (chunk: string) => {
       output += chunk;
-      if (output.includes(`"id":"${id}","type":"response"`)) {
+      if (output.includes(marker)) {
         clearTimeout(timeout);
         resolvePromise(output);
       }
@@ -51,8 +51,15 @@ function waitForResponse(
   });
 }
 
+function waitForResponse(
+  child: ReturnType<typeof spawn>,
+  id: string,
+): Promise<string> {
+  return waitForOutput(child, `"id":"${id}","type":"response"`);
+}
+
 describe("stock Pi provider veto", () => {
-  it("aborts before provider dispatch when strong containment is unattested", async () => {
+  it("blocks ordinary inference but admits the explicit bounded setup conversation", async () => {
     const root = resolve(import.meta.dirname, "../..");
     const temporaryDirectory = mkdtempSync(join(tmpdir(), "tiber-veto-"));
     temporaryDirectories.push(temporaryDirectory);
@@ -114,6 +121,19 @@ describe("stock Pi provider veto", () => {
     const output = await waitForResponse(promptProcess, "prompt");
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
     await stopProcess(promptProcess);
+
+    expect(output).toContain("TIBER_CONTAINMENT_ATTESTATION_MISSING");
+    expect(providerRequests).toBe(0);
+
+    const setupProcess = launch();
+    const setupStarted = waitForOutput(setupProcess, '"type":"agent_start"');
+    setupProcess.stdin.write(
+      `${JSON.stringify({ id: "setup", type: "prompt", message: "/tiber-setup" })}\n`,
+    );
+    await waitForResponse(setupProcess, "setup");
+    const setupOutput = await setupStarted;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+    await stopProcess(setupProcess);
     await new Promise<void>((resolvePromise, rejectPromise) => {
       server.close((error) => {
         if (error) rejectPromise(error);
@@ -121,7 +141,7 @@ describe("stock Pi provider veto", () => {
       });
     });
 
-    expect(output).toContain("TIBER_CONTAINMENT_ATTESTATION_MISSING");
+    expect(setupOutput).toContain('"type":"agent_start"');
     expect(providerRequests).toBe(0);
   }, 30_000);
 });

@@ -37,6 +37,28 @@ worktrees, artifacts, or user-local authority records; inspect and remove those
 separately only after their governing tasks and processes are closed. Never
 delete `refs/heads/tiber/tasks/v1` as an uninstall shortcut.
 
+## Guided setup
+
+After Tiber is loaded, run one command in the repository:
+
+```text
+/tiber-setup
+```
+
+The setup assistant inspects the repository and current layered configuration,
+then discusses one choice at a time. It explains and recommends every shipping
+setting, authority floor, secret reference, project command declaration, and
+optional integration. After a complete preview and explicit approval, its typed
+setup host validates and persists the configuration and can write and locally
+grant the exact `.tiber/commands.json` digest. No manual JSON editing or
+sequence of Tiber commands is required.
+
+Secret values, strong-containment attestations, service administration, and
+other externally provisioned authority never enter model context. Setup reports
+those as explicit blockers or optional disabled capabilities rather than
+fabricating them. Rerun `/tiber-setup` at any time to inspect or modify the
+setup.
+
 ## Development
 
 Use the pinned local shell when Nix is available:
@@ -61,10 +83,12 @@ Load it from this checkout:
 pi -e ./dist/extension/index.js
 ```
 
-Then run `/tiber:doctor`, `/tiber:settings`, `/tiber:containment`,
-`/tiber:tasks`, or `/tiber:task create <title>`.
+Run `/tiber-setup` for the ordinary configuration path. `/tiber:doctor`,
+`/tiber:settings`, `/tiber:containment`, `/tiber:tasks`, and `/tiber:task`
+remain optional diagnostic and recovery surfaces.
 
-Headless settings inspection and editing are also available:
+Headless settings inspection and editing are also available for automation and
+explicit recovery:
 
 ```text
 /tiber:settings show

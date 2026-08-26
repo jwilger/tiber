@@ -17,6 +17,7 @@ import {
 import {
   compileCommandCatalog,
   type CommandCatalogResult,
+  type CompiledCommandCatalog,
 } from "../../core/commands/structured-command.js";
 import {
   operationalFailure,
@@ -82,6 +83,44 @@ export class FileCommandAuthority {
           "retry-after-input",
         ),
       };
+    }
+  }
+
+  public saveCatalog(
+    catalog: CompiledCommandCatalog,
+  ): CommandAuthorityResult<void> {
+    const temporary = `${this.catalogPath}.${randomUUID()}.tmp`;
+    try {
+      mkdirSync(dirname(this.catalogPath), {
+        recursive: true,
+        mode: 0o700,
+      });
+      writeFileSync(
+        temporary,
+        `${JSON.stringify(
+          {
+            schemaVersion: catalog.schemaVersion,
+            commands: catalog.commands,
+          },
+          null,
+          2,
+        )}\n`,
+        { encoding: "utf8", mode: 0o600, flag: "wx" },
+      );
+      renameSync(temporary, this.catalogPath);
+      const observed = this.loadCatalog();
+      return observed.ok && observed.value.digest === catalog.digest
+        ? { ok: true, value: undefined }
+        : authorityFailure(
+            "TIBER_COMMAND_GRANT_INVALID",
+            "durable command catalog observation did not match its intent",
+          );
+    } catch {
+      rmSync(temporary, { force: true });
+      return authorityFailure(
+        "TIBER_COMMAND_GRANT_IO",
+        "command catalog could not be written",
+      );
     }
   }
 

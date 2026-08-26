@@ -47,28 +47,86 @@ import { readPackageVersion } from "./package-version.js";
 import { handleRedCommand } from "./red-command.js";
 import { handleReviewCommand } from "./review-command.js";
 import { handleSettingsCommand } from "./settings-command.js";
+import { registerSetupTool } from "./setup-tool.js";
 import { registerTaskCommands } from "./task-commands.js";
 import { handleWorkCommand } from "./work-command.js";
 import { registerAutomaticWorkflowOrchestration } from "./workflow-orchestration.js";
 import { registerWorkflowRequestTool } from "./workflow-request-tool.js";
 
+const ACTIVE_TIBER_TOOLS = [
+  "read",
+  "bash",
+  "edit",
+  "write",
+  "tiber_command",
+  "tiber_artifact_range",
+  "tiber_artifact_search",
+  "tiber_exception_request",
+  "tiber_setup",
+  "tiber_workflow_request",
+] as const;
+
+function evaluateContainment(pi: ExtensionAPI, cwd: string): ContainmentStatus {
+  const agentDirectory = getAgentDir();
+  const settings = new FileSettingsStore(agentDirectory, cwd).load();
+  const authority = new FileAuthorityStore(agentDirectory).load();
+  if (!settings.ok || !authority.ok) {
+    return {
+      state: "lockdown",
+      level: "host-trusted",
+      code: "TIBER_CONTAINMENT_CONFIGURATION_INVALID",
+      detail: "Settings could not be parsed for containment evaluation",
+    };
+  }
+  const requested = resolveSettings(
+    settings.value.globalValues,
+    settings.value.projectValues,
+  ).assuranceLevel.value;
+  const effective = applyAssuranceCeiling(
+    requested,
+    authority.value.ceilings.minimumAssuranceLevel,
+  ).effective;
+  const evaluated = verifyFileContainment(effective, cwd, agentDirectory);
+  const inventory = verifyToolInventory(pi.getActiveTools());
+  return effective !== "host-trusted" && !inventory.allowed
+    ? {
+        state: "lockdown",
+        level: effective,
+        code: inventory.code,
+        detail: inventory.detail,
+      }
+    : evaluated;
+}
+
 export default function registerTiber(pi: ExtensionAPI): void {
   const packageVersion = readPackageVersion();
-  registerGovernedTools(pi);
-  registerCommandTools(pi);
-  registerContext7Tools(pi);
-  registerTaskCommands(pi);
-  registerWorkflowRequestTool(pi);
-  registerExceptionRequestTool(pi);
-  registerAutomaticWorkflowOrchestration(pi);
-  registerHeadroomCompaction(pi);
-  registerHindsightMemory(pi);
+  let setupConversationActive = false;
   let containment: ContainmentStatus = {
     state: "lockdown",
     level: "host-trusted",
     code: "TIBER_CONTAINMENT_NOT_INITIALIZED",
     detail: "Containment has not been evaluated",
   };
+  registerGovernedTools(pi);
+  registerCommandTools(pi);
+  registerContext7Tools(pi);
+  registerTaskCommands(pi);
+  registerSetupTool(pi, {
+    beginConversation() {
+      setupConversationActive = true;
+    },
+    setupApplied(repository) {
+      pi.setActiveTools([...ACTIVE_TIBER_TOOLS]);
+      containment = evaluateContainment(pi, repository);
+      setupConversationActive = false;
+      return containment;
+    },
+  });
+  registerWorkflowRequestTool(pi);
+  registerExceptionRequestTool(pi);
+  registerAutomaticWorkflowOrchestration(pi);
+  registerHeadroomCompaction(pi);
+  registerHindsightMemory(pi);
 
   pi.registerCommand("tiber:doctor", {
     description: "Show Tiber installation and safety status",
@@ -166,17 +224,8 @@ export default function registerTiber(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", (_event, context) => {
-    pi.setActiveTools([
-      "read",
-      "bash",
-      "edit",
-      "write",
-      "tiber_command",
-      "tiber_artifact_range",
-      "tiber_artifact_search",
-      "tiber_exception_request",
-      "tiber_workflow_request",
-    ]);
+    setupConversationActive = false;
+    pi.setActiveTools([...ACTIVE_TIBER_TOOLS]);
     const agentDirectory = getAgentDir();
     const processes = new FileProcessGroupRegistry(agentDirectory).reconcile();
     if (!processes.ok) {
@@ -185,39 +234,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
         "error",
       );
     }
-    const settings = new FileSettingsStore(agentDirectory, context.cwd).load();
-    const authority = new FileAuthorityStore(agentDirectory).load();
-    if (!settings.ok || !authority.ok) {
-      containment = {
-        state: "lockdown",
-        level: "host-trusted",
-        code: "TIBER_CONTAINMENT_CONFIGURATION_INVALID",
-        detail: "Settings could not be parsed for containment evaluation",
-      };
-    } else {
-      const requested = resolveSettings(
-        settings.value.globalValues,
-        settings.value.projectValues,
-      ).assuranceLevel.value;
-      const effective = applyAssuranceCeiling(
-        requested,
-        authority.value.ceilings.minimumAssuranceLevel,
-      ).effective;
-      containment = verifyFileContainment(
-        effective,
-        context.cwd,
-        agentDirectory,
-      );
-      const inventory = verifyToolInventory(pi.getActiveTools());
-      if (effective !== "host-trusted" && !inventory.allowed) {
-        containment = {
-          state: "lockdown",
-          level: effective,
-          code: inventory.code,
-          detail: inventory.detail,
-        };
-      }
-    }
+    containment = evaluateContainment(pi, context.cwd);
     context.ui.setStatus(
       "tiber",
       containment.state === "verified"
@@ -262,7 +279,7 @@ export default function registerTiber(pi: ExtensionAPI): void {
         };
       }
     }
-    if (containment.state === "lockdown") {
+    if (containment.state === "lockdown" && !setupConversationActive) {
       context.abort();
       context.ui.notify(formatContainment(containment), "error");
     }
@@ -270,6 +287,12 @@ export default function registerTiber(pi: ExtensionAPI): void {
 
   pi.on("tool_call", (event) => {
     if (containment.state === "lockdown") {
+      if (
+        setupConversationActive &&
+        (event.toolName === "read" || event.toolName === "tiber_setup")
+      ) {
+        return undefined;
+      }
       return {
         block: true,
         reason: `${containment.code}: effects are disabled during containment lockdown`,

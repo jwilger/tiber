@@ -43,7 +43,7 @@
       "./skills"
     ],
     "prompts": [
-      "./prompts"
+      "./prompts/tiber-status.md"
     ]
   },
   "scripts": {
