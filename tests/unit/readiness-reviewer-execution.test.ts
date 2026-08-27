@@ -162,13 +162,20 @@ describe("readiness reviewer execution bounds", () => {
     });
   });
 
-  it("rejects an apparently valid response after its time budget is exceeded", async () => {
+  it("allows a detailed review longer than one minute before enforcing its five-minute bound", async () => {
     vi.useFakeTimers();
     sdk.setBehavior("wait-for-abort");
+    let settled = false;
 
     const result = reviewSpecification("/repo", specification, digest);
+    void result.then(() => {
+      settled = true;
+    });
     await vi.advanceTimersByTimeAsync(60_000);
 
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(240_000);
     await expect(result).resolves.toMatchObject({
       ok: false,
       failure: { code: "TIBER_REVIEW_TIMED_OUT" },

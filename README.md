@@ -127,7 +127,7 @@ Git signing identity and SSH allowed-signers configuration are taken from the
 repository's local Git configuration. A task can receive a canonical structured
 specification with `/tiber:task specify <id> <base64url-json>`. Running
 `/tiber:task ready <id>` creates a fresh, tool-free in-process reviewer session
-with a 60-second and 4096-output-token budget; only an exact-schema, finding-free
+with a five-minute and 4096-output-token budget; only an exact-schema, finding-free
 review of the pinned specification digest can publish Ready.
 
 `/tiber:work <ready-task-id>` compiles the built-in or narrower project
