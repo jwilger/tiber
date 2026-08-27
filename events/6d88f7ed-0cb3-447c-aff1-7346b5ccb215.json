@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "eventId": "6d88f7ed-0cb3-447c-aff1-7346b5ccb215",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T04:51:34.963Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:fbb55b081e8f91bf20494cafd76e4a16558131fef732a9a9854e254c01a06cdc",
+  "specification": {
+    "outcome": "A normal conversational request can create an ordinary unclaimed Backlog task without a campaign or starting work.",
+    "scenarios": [
+      {
+        "name": "create an ordinary task",
+        "given": [
+          "The signed task board is writable",
+          "The request supplies valid task metadata"
+        ],
+        "when": [
+          "Pi submits the create-task workflow request"
+        ],
+        "then": [
+          "One ordinary task is published in Backlog",
+          "The task is unspecified and unclaimed",
+          "No campaign, readiness, claim, worktree, or run effect occurs"
+        ]
+      },
+      {
+        "name": "reject unavailable publication",
+        "given": [
+          "The signed task board is read-only"
+        ],
+        "when": [
+          "Pi submits the create-task workflow request"
+        ],
+        "then": [
+          "The existing task-board failure is returned",
+          "No task or campaign effect occurs"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "The workflow request accepts a title and description through existing task value parsers.",
+      "The host generates task event authority values and publishes through the existing signed task remote.",
+      "Success reports the created task identity and projected Backlog, unspecified, and unclaimed state."
+    ],
+    "exclusions": [
+      "Editing tasks",
+      "Automatically reviewing, claiming, or starting the created task"
+    ],
+    "dependencies": [
+      "Existing task value parsers, TaskCreatedEvent projection, and signed GitTaskRemote publication"
+    ],
+    "testMappings": [
+      "tests/acceptance/workflow-task-create.test.ts"
+    ],
+    "architectureImplications": "Extend the closed workflow request dispatcher while preserving the functional-core and signed-publication boundaries."
+  }
+}
