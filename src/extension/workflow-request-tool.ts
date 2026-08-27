@@ -155,7 +155,7 @@ async function ensureReady(
   if (review.value.findings.length !== 0)
     return some(
       [
-        "TIBER_SPECIFICATION_NOT_READY: revise the Backlog canonical specification to address every finding, then retry begin-task:",
+        "TIBER_SPECIFICATION_NOT_READY: resolve the blocking specification findings, then retry begin-task:",
         ...review.value.findings.map((finding) => `- ${finding}`),
       ].join("\n"),
     );

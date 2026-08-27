@@ -169,7 +169,7 @@ export function registerTaskCommands(
         if (review.value.findings.length !== 0) {
           context.ui.notify(
             [
-              "TIBER_SPECIFICATION_NOT_READY: independent readiness review returned actionable findings:",
+              "TIBER_SPECIFICATION_NOT_READY: independent readiness review returned blocking specification findings:",
               ...review.value.findings.map((finding) => `- ${finding}`),
             ].join("\n"),
             "error",

@@ -103,6 +103,13 @@ describe("isolated readiness reviewer output", () => {
     JSON.stringify({ findingCount: 1, findings: ["line\u2028separator"] }),
     JSON.stringify({ findingCount: 1, findings: ["spoof\u202etext"] }),
     JSON.stringify({ findingCount: 1, findings: ["x".repeat(501)] }),
+    JSON.stringify({
+      findingCount: 6,
+      findings: Array.from(
+        { length: 6 },
+        (_, index) => `Blocking finding ${String(index + 1)}`,
+      ),
+    }),
   ])("rejects malformed completion %j", (output) => {
     expect(parseReadinessReviewOutput(output, digest)).toMatchObject({
       ok: false,
