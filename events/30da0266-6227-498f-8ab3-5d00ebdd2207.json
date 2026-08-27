@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "eventId": "30da0266-6227-498f-8ab3-5d00ebdd2207",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T01:25:31.885Z",
+  "taskId": "230512d3-04e7-472a-af56-4d01c5cc286c",
+  "specificationDigest": "sha256:9cb40ed7000c47a5232733f4247a1f07afb76a46e3ac430e4c8c4f039534e068",
+  "specification": {
+    "outcome": "Pi remains visibly responsive while a long tiber_workflow_request evaluates: activity appears within a measured bound, animation continues, and exactly one terminal result replaces progress.",
+    "scenarios": [
+      {
+        "name": "start and sustain responsive progress",
+        "given": [
+          "executeEntry is captured as the first statement of tool execute",
+          "dispatch will await work for at least two seconds"
+        ],
+        "when": [
+          "the tool executes"
+        ],
+        "then": [
+          "initial running onUpdate occurs after only schema-approved parameter receipt and before dispatch, at executeEntry plus at most 100 milliseconds",
+          "changed observations are coalesced to at most one emission in each inclusive 1000 millisecond interval after the initial update",
+          "when nothing changes one non-percentage heartbeat is emitted at exactly each 2000 millisecond boundary so no running gap exceeds 2000 milliseconds",
+          "an independently scheduled event-loop sentinel executes before work completes"
+        ]
+      },
+      {
+        "name": "select one terminal disposition deterministically",
+        "given": [
+          "progress is running and terminal causes may become observable at the same arbitration checkpoint"
+        ],
+        "when": [
+          "the host arbitrates terminal state"
+        ],
+        "then": [
+          "precedence is caller abort, timeout, onUpdate failure, dispatch failure, typed denial, then success",
+          "the winner transitions running to terminal once and suppresses queued progress and lower-precedence causes",
+          "onUpdate carries running observations only and the return value carries the terminal result"
+        ]
+      },
+      {
+        "name": "cancel only cancellable bounded work",
+        "given": [
+          "every long operation declares AbortSignal support or a maximum one-second completion bound after cancellation observation"
+        ],
+        "when": [
+          "caller abort or timeout is observed"
+        ],
+        "then": [
+          "the linked signal reaches dispatch and adapters before any later consequential effect begins",
+          "already-started work settles within one second and its late resolution or rejection is consumed only for cleanup",
+          "work lacking that contract is rejected before start as TIBER_WORKFLOW_CANCELLATION_UNSUPPORTED rather than detached",
+          "caller abort returns cancelled and timeout returns timed-out"
+        ]
+      },
+      {
+        "name": "clean up callback and completion races",
+        "given": [
+          "dispatch may throw, onUpdate may throw, abort may race completion, timer setup may fail, or a queued callback may arrive after terminal selection"
+        ],
+        "when": [
+          "the terminal state is selected"
+        ],
+        "then": [
+          "timers, linked-signal listeners, subscriptions, and queued progress are removed",
+          "onUpdate failure aborts work without recursive progress",
+          "late completion or rejection is observed for cleanup but cannot alter the terminal result"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "executeEntry is monotonic time captured before parsing or setup inside execute; the initial update bound includes all synchronous execute work before dispatch and exceeding 100 milliseconds returns TIBER_WORKFLOW_REQUEST_EXECUTION_FAILED without dispatch.",
+      "After initial progress, at most one changed update is emitted per inclusive [n*1000,(n+1)*1000) interval; unchanged work emits only at exact 2000 millisecond boundaries and every update resets neither cadence nor spinner state.",
+      "A setImmediate sentinel proves event-loop yielding during a deterministic two-second operation.",
+      "Terminal mapping is: successful host result -> evaluated with its safe text; typed Tiber denial -> denied with CODE and safe message; caller abort -> cancelled/TIBER_WORKFLOW_REQUEST_CANCELLED; timeout -> timed-out/TIBER_WORKFLOW_REQUEST_TIMED_OUT; infrastructure, callback, or setup error -> failed/TIBER_WORKFLOW_REQUEST_EXECUTION_FAILED.",
+      "At one arbitration checkpoint precedence is cancelled, timed-out, failed-onUpdate, failed-dispatch, denied, evaluated. Exactly one return is produced and onUpdate emits no terminal result.",
+      "Cancellation-support validation occurs before long work. After signal observation adapters refuse new consequential effects; bounded in-flight settlement is awaited for at most one second and consumed without changing disposition.",
+      "Every terminal path leaves zero timers, listeners, subscriptions, or queued callbacks and preserves all existing authorization decisions."
+    ],
+    "exclusions": [
+      "Changing workflow or review decisions",
+      "Granting model authority",
+      "Redesigning Pi's renderer",
+      "Reporting percentages",
+      "Detaching unbounded work after cancellation"
+    ],
+    "dependencies": [
+      "Pi extension execute/onUpdate and AbortSignal contracts",
+      "src/extension/workflow-request-tool.ts asynchronous dispatch",
+      "src/adapters/models/pi-readiness-reviewer.ts cancellation and heartbeat",
+      "cancellable or one-second-bounded workflow adapters"
+    ],
+    "testMappings": [
+      "tests/acceptance/workflow-request-responsive-progress.test.ts",
+      "tests/unit/workflow-request-progress-timing.test.ts",
+      "tests/unit/workflow-request-progress-cadence.test.ts",
+      "tests/unit/workflow-request-progress-terminal-precedence.test.ts",
+      "tests/unit/workflow-request-progress-terminal-text.test.ts",
+      "tests/unit/workflow-request-progress-timer-setup-failure.test.ts",
+      "tests/unit/workflow-request-progress-linked-signal-cleanup.test.ts",
+      "tests/unit/workflow-request-progress-late-callback.test.ts",
+      "tests/unit/workflow-request-progress-nonabortable.test.ts",
+      "tests/unit/workflow-request-progress-late-completion.test.ts",
+      "tests/unit/workflow-request-authorization-regression.test.ts"
+    ],
+    "architectureImplications": "Implement a closed progress state machine and terminal arbiter in the imperative shell. Progress is bounded UI observation only. Long operations must be cancellable or bounded, first terminal cause follows fixed precedence, and cleanup consumes late outcomes without granting authority."
+  }
+}
