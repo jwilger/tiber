@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "eventId": "141e6697-41c9-4ea5-9cfb-45b2ee6ad913",
+  "kind": "task-campaign-goal-created",
+  "occurredAt": "2026-08-27T01:02:56.845Z",
+  "campaignId": "7259a0b8-2d7e-438e-8108-7a440fbc8832",
+  "task": {
+    "id": "7e788534-54e0-4b1d-9e2e-f2a2bfc3bf3e",
+    "title": "Expose canonical task specifications to coordinators",
+    "description": "Ad-hoc campaign goal: Expose canonical task specifications to coordinators\nProvenance: campaign-goal/7259a0b8-2d7e-438e-8108-7a440fbc8832"
+  }
+}
