@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "eventId": "646d316b-726b-4d89-89be-177cd66efab4",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T03:46:01.830Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:8eecc6c5d23ca002c9c595220102a3f84545291c047078179af405a041dcae5b",
+  "specification": {
+    "outcome": "When a user asks in normal conversation to create an ordinary ticket, Tiber publishes an unclaimed Backlog task without requiring or changing a campaign.",
+    "scenarios": [
+      {
+        "name": "create ordinary ticket",
+        "given": [
+          "writable verified board and valid create metadata"
+        ],
+        "when": [
+          "host parses metadata,generates/parses authority,freezes event,and publishes"
+        ],
+        "then": [
+          "exact TaskCreatedEvent is observed idempotently and complete projected defaults validated",
+          "success returns task identity/state",
+          "no campaign/readiness/work adapter runs"
+        ]
+      },
+      {
+        "name": "preserve campaign independence with absent or active checkpoint",
+        "given": [
+          "campaign checkpoint is absent or unrelated active"
+        ],
+        "when": [
+          "same create request executes"
+        ],
+        "then": [
+          "campaign store has zero interactions and bytes unchanged",
+          "ordinary event has no campaign field",
+          "projection campaign provenance none"
+        ]
+      },
+      {
+        "name": "deny malformed input,metadata,or generator failure",
+        "given": [
+          "request schema invalid; title/description invalid; IdentifierSource/Clock returns invalid value; or generator throws"
+        ],
+        "when": [
+          "host evaluates in request,title,description,task UUID,event UUID,time order"
+        ],
+        "then": [
+          "schema returns WORKFLOW_REQUEST_INVALID; parsed value failure TASK_VALUE_INVALID; thrown generator WORKFLOW_EXECUTION_FAILED",
+          "remaining generators and every effect adapter suppressed",
+          "closed denial result returned"
+        ]
+      },
+      {
+        "name": "retry and reconcile publication by phase",
+        "given": [
+          "one deeply frozen event has been constructed"
+        ],
+        "when": [
+          "clone/fetch/checkout/file write/sign/push encounters failure or push succeeds with lost response"
+        ],
+        "then": [
+          "eligible transient phases retry full attempt maximum four total",
+          "each attempt uses identical deep event values",
+          "fresh history containing exact event ID and bytes reconciles success; nonidentical collision degrades read-only; terminal result follows phase table"
+        ]
+      },
+      {
+        "name": "reject invalid history,fold,observation,or projection",
+        "given": [
+          "valid event but signed history invalid,proposed fold invalid,post-push board degraded,generated task absent,or any expected projected field mismatches"
+        ],
+        "when": [
+          "host verifies result"
+        ],
+        "then": [
+          "TIBER_TASK_BOARD_INVALID denial returned and no success",
+          "post-push degradation causes no rollback or blind republish",
+          "unrelated tasks/known unrelated fields are ignored but created task exact fields/defaults required"
+        ]
+      },
+      {
+        "name": "route deterministic ticket and campaign fixtures",
+        "given": [
+          "scripted model receives fixed workflow guidance/tool schema and one exact fixture prompt"
+        ],
+        "when": [
+          "model responds"
+        ],
+        "then": [
+          "ticket fixtures call create-task exact payload; explicit campaign fixture calls campaign-start exact payload; no-title and mixed fixture return exact clarification without tool call",
+          "a ticket whose subject mentions campaigns remains create-task"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "Create request exact {kind:'create-task',title,description}; no extras. Title validated first: string UTF-16 length 1..200, value.trim()===value, so empty/whitespace/untrimmed reject with no normalization. Description validated second: string length 0..10000, empty/whitespace allowed and preserved.",
+      "Authority generation order task UUID,event UUID,time. Invalid parsed output returns TIBER_TASK_VALUE_INVALID. IdentifierSource/Clock exception returns TIBER_WORKFLOW_EXECUTION_FAILED transient with retry-operation. Later generators/effects suppressed. occurredAt must equal new Date(value).toISOString(), ending Z with millisecond precision.",
+      "Exact event {schemaVersion:1,eventId,kind:'task-created',occurredAt,task:{id,title,description}}. Host recursively freezes event and nested task before adapter. Retry may recreate transport objects but values and JSON remain identical; tests assert Object.isFrozen at both levels and deep equality every attempt.",
+      "Projected created task requires exact ID/title/description plus state Backlog,blockStatus unblocked,all specification/specDigest/claim/finalReview/completionRelease/delivery/ci/openedReview/reviewReceipt/campaignProvenance Options none,increments empty. Unrelated board tasks ignored. Unknown extra task fields cannot arise from typed projection. A pre-existing generated task ID makes proposed fold invalid and returns board denial.",
+      "Create dispatch has zero campaign/readiness/work/run-journal/worktree calls; boundary spies cover absent/active campaign,all denials,success.",
+      "Publication behavior is extended for idempotence. Each attempt freshly clones,fetches task ref,checks out,verifies full history,folds event,writes event file,signs,pushes. Clone/fetch/checkout runtime errors, file-write runtime errors, signing runtime errors, push rejection retry up to four total attempts. Invalid verified history or invalid proposed fold returns immediately. Missing configured signer is detected before attempts and returns publication unauthorized. At retry, if verified history already has eventId: exact canonical event bytes return reconciled success without new commit; nonexact bytes return degraded read-only. Four transient failures return board invalid. Post-push read degradation returns board invalid and no same-invocation republish.",
+      "Failure phase table: missing signer -> TIBER_TASK_PUBLICATION_UNAUTHORIZED retry-after-state-change/configured-signing-and-publication-authority; invalid signed history/fold/collision/projection -> TIBER_TASK_BOARD_INVALID retry-after-state-change/corrected-task-history; clone/fetch/checkout/file/sign/push exhaustion -> TIBER_TASK_BOARD_INVALID transient/retry-operation; post-push observation degradation -> TIBER_TASK_BOARD_INVALID transient/exact-remote-observation. No success content accompanies denial.",
+      "Success exact content 'Task created: <taskId>\\nBacklog | unspecified | unclaimed', details {disposition:'created',taskId,state:'Backlog',specification:'unspecified',claim:'unclaimed'}. Denial exact content '<CODE>: task creation denied', details {disposition:'denied',code,taskId:{kind:'none'}|{kind:'some',value}}; taskId some only after valid generated ID.",
+      "Routing fixture 1 prompt 'Add a ticket: Fix the startup lag' -> {kind:'create-task',title:'Fix the startup lag',description:''}. Fixture 2 'Create a ticket titled Fix lag with description Render activity immediately' -> exact supplied payload. Fixture 3 'Start a campaign with a two-task total limit, one task per initiative, one-hour duration, one-dollar cost, 10000-token limit, and concurrency one' -> campaign-start bounds {taskLimit:2,initiativeTaskLimit:1,durationLimitMs:3600000,costLimitMicros:1000000,tokenLimit:10000,concurrencyLimit:1}. Fixture 4 'Create a ticket' -> 'I need a ticket title before I can create it.' no call. Fixture 5 'Start a campaign and add a ticket' -> 'Which should I do first: start the campaign or create the ticket?' no call. Fixture 6 'Add a ticket to fix campaign scheduling' -> create-task title 'Fix campaign scheduling',description ''.",
+      "Routing operation rule: explicit start/run campaign verb plus no ticket-creation verb -> campaign; explicit add/create ticket verb plus no campaign-start verb -> ticket even if campaign is subject noun; both verbs -> clarification. Deterministic scripted model acceptance tests assert outputs; schema/parser tests assert create shape separately.",
+      "Registered schema,parser,guidance,dispatcher,result rendering add create-task; campaign schema/dispatcher unchanged."
+    ],
+    "exclusions": [
+      "Editing tasks",
+      "Atomic create+specify",
+      "Automatic review/claim/start",
+      "Campaign changes",
+      "Publication changes beyond exact-event idempotent reconciliation and phase classification"
+    ],
+    "dependencies": [
+      "workflow request tool schema/injectable IdentifierSource/Clock/dispatcher/result",
+      "workflow guidance",
+      "request parser",
+      "task values/TaskCreatedEvent projection",
+      "GitTaskRemote signed publication with exact-event reconciliation"
+    ],
+    "testMappings": [
+      "tests/unit/workflow-task-create-schema.test.ts",
+      "tests/unit/workflow-task-create-metadata-order.test.ts",
+      "tests/unit/workflow-task-create-invalid-identifiers.test.ts",
+      "tests/unit/workflow-task-create-generator-throws.test.ts",
+      "tests/unit/workflow-task-create-time.test.ts",
+      "tests/unit/workflow-task-create-frozen-event.test.ts",
+      "tests/unit/workflow-task-create-default-projection.test.ts",
+      "tests/unit/workflow-task-create-campaign-isolation.test.ts",
+      "tests/unit/workflow-task-create-clone-failure.test.ts",
+      "tests/unit/workflow-task-create-fetch-failure.test.ts",
+      "tests/unit/workflow-task-create-checkout-failure.test.ts",
+      "tests/unit/workflow-task-create-history-degraded.test.ts",
+      "tests/unit/workflow-task-create-fold-degraded.test.ts",
+      "tests/unit/workflow-task-create-file-failure.test.ts",
+      "tests/unit/workflow-task-create-missing-signer.test.ts",
+      "tests/unit/workflow-task-create-signing-failure.test.ts",
+      "tests/unit/workflow-task-create-push-failure.test.ts",
+      "tests/unit/workflow-task-create-retry-exhaustion.test.ts",
+      "tests/unit/workflow-task-create-exact-reconciliation.test.ts",
+      "tests/unit/workflow-task-create-reconciliation-conflict.test.ts",
+      "tests/unit/workflow-task-create-postpush-degraded.test.ts",
+      "tests/unit/workflow-task-create-generated-task-missing.test.ts",
+      "tests/unit/workflow-task-create-result.test.ts",
+      "tests/unit/workflow-task-create-routing-fixtures.test.ts",
+      "tests/acceptance/workflow-task-create.test.ts"
+    ],
+    "architectureImplications": "Add closed create-task through signed TaskCreatedEvent, parsing/generation before effects, frozen authority values, exact-event publication reconciliation, complete projection validation, and no campaign/readiness/work transition."
+  }
+}
