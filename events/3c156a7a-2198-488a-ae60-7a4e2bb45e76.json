@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "eventId": "3c156a7a-2198-488a-ae60-7a4e2bb45e76",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T01:22:56.672Z",
+  "taskId": "230512d3-04e7-472a-af56-4d01c5cc286c",
+  "specificationDigest": "sha256:cb9cc0407abac946cac8b0bb4008ba7a6d53776ed4bf7febf56f77046799a915",
+  "specification": {
+    "outcome": "Pi remains visibly responsive while a long-running tiber_workflow_request is evaluating, so the user immediately sees activity and the spinner or progress indicator continues updating until completion.",
+    "scenarios": [
+      {
+        "name": "show immediate responsive progress",
+        "given": [
+          "a Tiber workflow request starts work that does not complete immediately"
+        ],
+        "when": [
+          "the request is submitted"
+        ],
+        "then": [
+          "the user receives an initial progress update before long-running work",
+          "Pi's event loop remains available for UI animation and input rendering",
+          "bounded progress updates remain visible until the request completes"
+        ]
+      },
+      {
+        "name": "avoid progress-update starvation",
+        "given": [
+          "an independent review or repository operation runs for many seconds"
+        ],
+        "when": [
+          "Tiber reports continuing progress"
+        ],
+        "then": [
+          "updates are rate-limited so they do not flood or continually reset Pi's renderer",
+          "the spinner advances between updates",
+          "the final success or typed failure replaces the in-progress state exactly once"
+        ]
+      },
+      {
+        "name": "cancel without leaving frozen UI state",
+        "given": [
+          "a long workflow request is active"
+        ],
+        "when": [
+          "the user cancels it or the request reaches its timeout"
+        ],
+        "then": [
+          "the underlying work is aborted and timers or subscriptions are disposed",
+          "a terminal cancelled or timed-out result is rendered",
+          "no progress callback continues after completion"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "No synchronous wait or tight progress loop blocks Pi's renderer during workflow requests.",
+      "Progress starts promptly, is rate-limited, and has one terminal update.",
+      "Cancellation, timeout, success, and failure all clean up progress resources.",
+      "The change does not weaken readiness, workflow, role, or effect authorization."
+    ],
+    "exclusions": [
+      "Changing workflow policy or review conclusions",
+      "Increasing model authority",
+      "Redesigning Pi's global renderer",
+      "Masking genuinely stalled work with fabricated completion"
+    ],
+    "dependencies": [
+      "Pi extension tool onUpdate contract",
+      "src/extension/workflow-request-tool.ts asynchronous dispatch",
+      "src/adapters/models/pi-readiness-reviewer.ts progress heartbeat and timeout"
+    ],
+    "testMappings": [
+      "tests/acceptance/workflow-request-responsive-progress.test.ts",
+      "tests/unit/workflow-request-progress.test.ts",
+      "tests/unit/readiness-review-progress.test.ts"
+    ],
+    "architectureImplications": "Keep long work asynchronous and cancellation-aware in the imperative shell. Treat progress as bounded UI observation only; it grants no authority and must be disposed on every terminal path."
+  }
+}
