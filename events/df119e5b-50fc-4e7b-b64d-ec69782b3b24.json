@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "eventId": "df119e5b-50fc-4e7b-b64d-ec69782b3b24",
+  "kind": "task-campaign-goal-created",
+  "occurredAt": "2026-08-27T01:02:46.177Z",
+  "campaignId": "7259a0b8-2d7e-438e-8108-7a440fbc8832",
+  "task": {
+    "id": "22e4f775-7faf-49c7-b04a-8cd1c3c8d2ab",
+    "title": "Add audited terminal dispositions for stale tasks",
+    "description": "Ad-hoc campaign goal: Add audited terminal dispositions for stale tasks\nProvenance: campaign-goal/7259a0b8-2d7e-438e-8108-7a440fbc8832"
+  }
+}
