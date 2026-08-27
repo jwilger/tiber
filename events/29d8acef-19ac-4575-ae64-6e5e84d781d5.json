@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "eventId": "29d8acef-19ac-4575-ae64-6e5e84d781d5",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T01:21:17.192Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:79a8391c29d5b40f5857e4a5c6be84d8fe7940642e28c1b44cd568e1f3547977",
+  "specification": {
+    "outcome": "Normal conversation can create an ordinary Backlog task or replace an unclaimed Backlog task specification without requiring a campaign or starting work.",
+    "scenarios": [
+      {
+        "name": "atomically create an ordinary task",
+        "given": [
+          "create-task has parsed title, description, and optional complete TaskSpecification",
+          "the verified board is writable"
+        ],
+        "when": [
+          "the host journals and publishes the request"
+        ],
+        "then": [
+          "one signed task-created-from-request event projects metadata and specification Option atomically",
+          "the task is unclaimed Backlog with no campaign provenance",
+          "the receipt returns task ID, event ID, board head, specification digest Option, and published disposition"
+        ]
+      },
+      {
+        "name": "amend only a backlog specification",
+        "given": [
+          "specify-task has an exact TaskId UUID and parsed replacement specification",
+          "the target is unclaimed Backlog"
+        ],
+        "when": [
+          "the host publishes task-specified against its observed head and current digest Option"
+        ],
+        "then": [
+          "only specification and digest change",
+          "identity, metadata, lifecycle, claim, ordering, priority, and campaign provenance are preserved",
+          "no readiness, claim, run, campaign, or worktree effect occurs"
+        ]
+      },
+      {
+        "name": "reject invalid lifecycle before effects",
+        "given": [
+          "the amendment target is claimed, Ready, In Progress, or Done, or changes to one of those conditions during publication"
+        ],
+        "when": [
+          "the host evaluates or revalidates the request"
+        ],
+        "then": [
+          "TIBER_TASK_LIFECYCLE_INVALID is returned before signing or publication",
+          "no task field changes"
+        ]
+      },
+      {
+        "name": "retry only unrelated concurrent advancement",
+        "given": [
+          "a journaled operation binds stable operation, task, and event IDs plus request digest, board head, and expected specification Option"
+        ],
+        "when": [
+          "the remote head advances"
+        ],
+        "then": [
+          "the host retries with unchanged IDs only when generated identities remain absent and target preconditions are unchanged",
+          "same-task identity, lifecycle, or specification changes return TIBER_TASK_PUBLICATION_CONFLICT and require new user evaluation",
+          "stale authority never overwrites newer authority"
+        ]
+      },
+      {
+        "name": "reconcile identifiers and lost receipts",
+        "given": [
+          "before intent the host tries at most three task/event UUID pairs, regenerating both when either collides",
+          "after intent publication may succeed without a recorded receipt"
+        ],
+        "when": [
+          "the operation resumes"
+        ],
+        "then": [
+          "three colliding pairs return TIBER_TASK_ID_COLLISION",
+          "an exact operation ID, request digest, IDs, and canonical event reconcile once with reconciled disposition",
+          "any mismatch returns TIBER_TASK_PUBLICATION_CONFLICT and no duplicate event is published"
+        ]
+      },
+      {
+        "name": "apply typed denial precedence",
+        "given": [
+          "a create-task or specify-task request has multiple invalid facts"
+        ],
+        "when": [
+          "the host evaluates facts until the first denial"
+        ],
+        "then": [
+          "create precedence is TIBER_WORKFLOW_REQUEST_INVALID for malformed or partial shape, TIBER_SPECIFICATION_INVALID for complete-shape semantic failure, TIBER_TASK_BOARD_READ_ONLY, TIBER_TASK_ID_COLLISION, TIBER_TASK_PUBLICATION_UNAUTHORIZED, TIBER_TASK_PUBLICATION_CONFLICT",
+          "amend precedence is TIBER_WORKFLOW_REQUEST_INVALID, TIBER_TASK_ID_INVALID, TIBER_SPECIFICATION_INVALID, TIBER_TASK_BOARD_READ_ONLY, TIBER_TASK_NOT_FOUND, TIBER_TASK_LIFECYCLE_INVALID, TIBER_TASK_PUBLICATION_UNAUTHORIZED, TIBER_TASK_PUBLICATION_CONFLICT",
+          "no denied request has partial effects"
+        ]
+      },
+      {
+        "name": "route independently of campaigns",
+        "given": [
+          "the user asks to create a ticket or edit a Backlog specification"
+        ],
+        "when": [
+          "Pi infers the request"
+        ],
+        "then": [
+          "it requests create-task or specify-task rather than campaign-goal or begin-task",
+          "campaign state is neither required nor changed",
+          "an unchanged replacement digest returns TIBER_TASK_SPECIFICATION_UNCHANGED without publishing"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "task-created-from-request contains operation ID, request digest, metadata, and matching specification/digest Options and is projected atomically under ordinary signed ancestry verification.",
+      "Canonical create digest input is {kind,title,description,specification Option}; amend input is {kind,taskId,specification}. Digests are sha256 of JSON.stringify of parsed canonical values; conversation wording and generated IDs are excluded.",
+      "A host-generated operation ID distinguishes a repeated user request from recovery. The intent journals operation ID, digest, stable IDs, head, and expected specification Option before effects.",
+      "Omitted create specification means Option none; partial shape is TIBER_WORKFLOW_REQUEST_INVALID; complete but semantically invalid is TIBER_SPECIFICATION_INVALID.",
+      "Success receipts contain code, published|unchanged|reconciled disposition, taskId, full boardHead, eventId Option, and specificationDigest Option. Denials contain stable code and safe operation/task context.",
+      "Ordinary create and amend never promote, prioritize, review, claim, start, or alter campaign state."
+    ],
+    "exclusions": [
+      "Changing title or description after creation",
+      "Changing specifications outside unclaimed Backlog",
+      "Automatically starting or prioritizing tasks",
+      "Changing campaign scheduling",
+      "Weakening signature or ancestry checks"
+    ],
+    "dependencies": [
+      "src/core/workflow/workflow-request.ts request parser",
+      "src/core/tasks/task-values.ts semantic values",
+      "src/core/tasks/readiness.ts specification parser and digest",
+      "src/core/tasks/task-board.ts event projection and lifecycle",
+      "src/adapters/tasks/git-task-remote.ts signing and fast-forward publication",
+      "src/extension/workflow-request-tool.ts dispatch and operation journal"
+    ],
+    "testMappings": [
+      "tests/acceptance/workflow-task-create-atomic.test.ts",
+      "tests/acceptance/workflow-task-amend-preservation.test.ts",
+      "tests/acceptance/workflow-task-natural-language.test.ts",
+      "tests/unit/workflow-task-invalid-specification.test.ts",
+      "tests/unit/workflow-task-read-only.test.ts",
+      "tests/unit/workflow-task-lifecycle.test.ts",
+      "tests/unit/workflow-task-denial-precedence.test.ts",
+      "tests/unit/workflow-task-signing.test.ts",
+      "tests/unit/workflow-task-races.test.ts",
+      "tests/unit/workflow-task-lost-receipt.test.ts",
+      "tests/unit/workflow-task-id-collision.test.ts",
+      "tests/unit/workflow-task-unchanged.test.ts"
+    ],
+    "architectureImplications": "Add closed create-task and specify-task requests, one atomic task-created-from-request event, and durable operation intents/receipts. The host owns canonicalization, bounded IDs, lifecycle and expected-state checks, signing, retry classification, and reconciliation; inference grants no authority and cannot start work."
+  }
+}
