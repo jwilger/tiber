@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "eventId": "a6834945-c29e-4993-936e-6ec444c99f42",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T01:13:14.137Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:24cdd2583107b2a2e75325b209c9baff9c31734d64ad04985c4b65617b5815ef",
+  "specification": {
+    "outcome": "A user can create an ordinary Backlog task or amend an existing Backlog task specification through normal conversation without starting or depending on a campaign and without beginning task work.",
+    "scenarios": [
+      {
+        "name": "create an ordinary backlog task",
+        "given": [
+          "the signed task board is writable",
+          "no campaign checkpoint is required"
+        ],
+        "when": [
+          "the user asks Pi in normal conversation to create a ticket with a title and description"
+        ],
+        "then": [
+          "the deterministic host publishes a signed ordinary task creation event",
+          "the task remains unclaimed in Backlog without campaign provenance"
+        ]
+      },
+      {
+        "name": "create a specified backlog task",
+        "given": [
+          "the signed task board is writable",
+          "the user provides a complete canonical specification"
+        ],
+        "when": [
+          "Pi requests ordinary task creation"
+        ],
+        "then": [
+          "the deterministic host publishes the task and its exact canonical specification",
+          "the task remains Backlog and no readiness review or claim begins"
+        ]
+      },
+      {
+        "name": "amend a backlog specification without starting work",
+        "given": [
+          "an existing task is unclaimed in Backlog"
+        ],
+        "when": [
+          "the user asks Pi to replace its canonical specification"
+        ],
+        "then": [
+          "the deterministic host publishes the amended specification",
+          "the task remains unclaimed in Backlog without readiness review or worktree creation"
+        ]
+      },
+      {
+        "name": "reject lifecycle and authority violations",
+        "given": [
+          "the board is read-only or the target task is absent, claimed, Ready, In Progress, or Done"
+        ],
+        "when": [
+          "ordinary task creation or specification amendment is requested"
+        ],
+        "then": [
+          "the host returns a stable typed denial",
+          "no task, readiness, claim, campaign, or worktree event is published"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "The model-facing workflow request schema has closed ordinary task creation and Backlog specification-amendment operations.",
+      "Ordinary task creation never requires or creates a campaign checkpoint.",
+      "Create and amend operations do not implicitly promote, prioritize, review, claim, or start a task.",
+      "Task identifiers, event coordinates, specifications, signatures, and fast-forward publication remain host-derived and validated.",
+      "Normal-language guidance directs ticket creation and editing through the deterministic operations rather than campaign goals or slash-command choreography."
+    ],
+    "exclusions": [
+      "Changing specifications after Backlog",
+      "Automatically starting newly created or amended tasks",
+      "Changing campaign scheduling semantics",
+      "Adding title or description amendment after task creation",
+      "Weakening signed task publication or lifecycle checks"
+    ],
+    "dependencies": [],
+    "testMappings": [
+      "tests/unit/workflow-request.test.ts",
+      "tests/unit/workflow-orchestration.test.ts",
+      "tests/acceptance/workflow-task-management.test.ts"
+    ],
+    "architectureImplications": "Extend the closed workflow request algebra and deterministic host dispatcher with ordinary create-task and specify-task decisions. Keep task event construction, identifiers, signing, publication, and lifecycle authority in the host; model inference supplies semantic intent but grants no authority."
+  }
+}
