@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "eventId": "2cf4226c-7526-41ae-81ff-66be5dedd5d4",
+  "kind": "task-campaign-goal-created",
+  "occurredAt": "2026-08-27T01:10:19.663Z",
+  "campaignId": "7259a0b8-2d7e-438e-8108-7a440fbc8832",
+  "task": {
+    "id": "3e3715c2-eb1f-4833-89ea-b2c5d42053d8",
+    "title": "Make campaigns continue mechanically until their objective is met",
+    "description": "Ad-hoc campaign goal: Make campaigns continue mechanically until their objective is met\nProvenance: campaign-goal/7259a0b8-2d7e-438e-8108-7a440fbc8832"
+  }
+}
