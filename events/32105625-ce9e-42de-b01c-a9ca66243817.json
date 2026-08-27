@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "eventId": "32105625-ce9e-42de-b01c-a9ca66243817",
+  "kind": "task-ready",
+  "occurredAt": "2026-08-27T04:51:53.894Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:fbb55b081e8f91bf20494cafd76e4a16558131fef732a9a9854e254c01a06cdc",
+  "review": {
+    "contextFreshness": "fresh",
+    "reviewerRole": "specification-reviewer",
+    "findingCount": 0,
+    "reviewedSpecificationDigest": "sha256:fbb55b081e8f91bf20494cafd76e4a16558131fef732a9a9854e254c01a06cdc"
+  }
+}
