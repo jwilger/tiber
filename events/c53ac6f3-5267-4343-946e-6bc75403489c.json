@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "eventId": "c53ac6f3-5267-4343-946e-6bc75403489c",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T01:18:08.294Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:3141d52519d2152a49a28607febcd752a39915b9f475bf61d89113a3776f6130",
+  "specification": {
+    "outcome": "A user can create an ordinary Backlog task or replace an existing Backlog task's canonical specification through normal conversation, without a campaign and without implicitly beginning work.",
+    "scenarios": [
+      {
+        "name": "create an ordinary backlog task atomically",
+        "given": [
+          "create-task contains title and description accepted by existing semantic parsers and an optional value accepted by parseTaskSpecification",
+          "the verified signed board is writable"
+        ],
+        "when": [
+          "the host evaluates the normal-language request"
+        ],
+        "then": [
+          "it journals a host-generated operation ID, canonical request digest, task ID, event ID, and observed board head before effects",
+          "one signed task-created-from-request event atomically projects metadata plus an Option specification and digest",
+          "success reports task ID, event ID, resulting board head, specification digest Option, and published disposition while leaving the task unclaimed in Backlog without campaign provenance"
+        ]
+      },
+      {
+        "name": "amend only an existing backlog specification",
+        "given": [
+          "specify-task contains an exact TaskId UUID and a replacement accepted by parseTaskSpecification",
+          "the target exists unclaimed in Backlog",
+          "the host binds the verified board head and current Option specification digest"
+        ],
+        "when": [
+          "the host publishes the replacement"
+        ],
+        "then": [
+          "one task-specified event replaces only specification and digest",
+          "identity, title, description, Backlog state, unclaimed state, ordering, priority, and campaign provenance are preserved",
+          "no readiness, claim, run, campaign, or worktree effect occurs"
+        ]
+      },
+      {
+        "name": "return an idempotent no-op for an unchanged specification",
+        "given": [
+          "the replacement canonical digest equals the current specification digest"
+        ],
+        "when": [
+          "specify-task is evaluated"
+        ],
+        "then": [
+          "no event or Git commit is published",
+          "TIBER_TASK_SPECIFICATION_UNCHANGED reports task ID, current board head, unchanged disposition, none event ID, and current digest"
+        ]
+      },
+      {
+        "name": "reject invalid create requests in deterministic order",
+        "given": [
+          "one or more create-task preconditions are invalid"
+        ],
+        "when": [
+          "the host evaluates available facts and stops at the first failure"
+        ],
+        "then": [
+          "precedence is TIBER_WORKFLOW_REQUEST_INVALID for malformed shape or a partial specification object, TIBER_SPECIFICATION_INVALID for a complete-shape semantically invalid specification, TIBER_TASK_BOARD_READ_ONLY, TIBER_TASK_ID_COLLISION, TIBER_TASK_PUBLICATION_UNAUTHORIZED, then TIBER_TASK_PUBLICATION_CONFLICT",
+          "no partial task, specification, campaign, readiness, claim, run, or worktree state is observable"
+        ]
+      },
+      {
+        "name": "reject invalid amendment lifecycle before effects",
+        "given": [
+          "the exact target is claimed, is Ready, In Progress, or Done, or changes from unclaimed Backlog to either condition before publication"
+        ],
+        "when": [
+          "specify-task is evaluated or publication is revalidated after head advancement"
+        ],
+        "then": [
+          "TIBER_TASK_LIFECYCLE_INVALID is returned before signing or publication",
+          "the specification and every preserved task field remain unchanged"
+        ]
+      },
+      {
+        "name": "reject other invalid amendments in deterministic order",
+        "given": [
+          "one or more non-lifecycle specify-task preconditions are invalid"
+        ],
+        "when": [
+          "the host evaluates available facts and stops at the first failure"
+        ],
+        "then": [
+          "precedence is TIBER_WORKFLOW_REQUEST_INVALID, TIBER_TASK_ID_INVALID for non-UUID or ambiguous resolution, TIBER_SPECIFICATION_INVALID, TIBER_TASK_BOARD_READ_ONLY, TIBER_TASK_NOT_FOUND, TIBER_TASK_LIFECYCLE_INVALID, TIBER_TASK_PUBLICATION_UNAUTHORIZED, then TIBER_TASK_PUBLICATION_CONFLICT",
+          "no effect occurs and signer failure cannot be mistaken for a retryable race"
+        ]
+      },
+      {
+        "name": "handle identifier collision deterministically",
+        "given": [
+          "the host has not yet journaled a create intent"
+        ],
+        "when": [
+          "a generated task ID or event ID already exists in verified authority"
+        ],
+        "then": [
+          "it regenerates the task ID and event ID together for at most three total candidate pairs",
+          "the first collision-free pair is journaled and remains stable through every later retry",
+          "three colliding pairs return TIBER_TASK_ID_COLLISION without publication"
+        ]
+      },
+      {
+        "name": "handle concurrent heads without duplicating authority",
+        "given": [
+          "the host journaled stable operation, task, and event IDs plus request digest and observed head"
+        ],
+        "when": [
+          "publication observes a newer head"
+        ],
+        "then": [
+          "an unrelated advance retries with the same IDs only if the task ID, event ID, and operation ID remain absent and every bound target precondition is unchanged",
+          "an existing exact operation ID, request digest, IDs, and canonical content is reconciled as prior success",
+          "any event-ID, task-ID, operation-ID, request-digest, specification, or lifecycle mismatch returns TIBER_TASK_PUBLICATION_CONFLICT and never retries into duplicate authority"
+        ]
+      },
+      {
+        "name": "reconcile a lost publication receipt",
+        "given": [
+          "publication succeeded but the local receipt was lost"
+        ],
+        "when": [
+          "the journaled operation resumes after restart"
+        ],
+        "then": [
+          "exact event operation ID, request digest, task ID, event ID, and canonical content yield the original success fields with reconciled disposition",
+          "matching authority is not republished",
+          "any mismatch returns TIBER_TASK_PUBLICATION_CONFLICT"
+        ]
+      },
+      {
+        "name": "route ordinary language independently of campaigns",
+        "given": [
+          "the user asks to create a ticket or replace a Backlog specification",
+          "no campaign exists or an unrelated campaign is active"
+        ],
+        "when": [
+          "Pi infers the operation"
+        ],
+        "then": [
+          "the closed request is create-task or specify-task rather than campaign-goal or begin-task",
+          "campaign state is neither required nor changed and no readiness review or claim begins"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "task-created-from-request is one closed signed event containing operation ID, canonical request digest, metadata, and Option specification plus matching Option digest; foldTaskEvents installs the complete task atomically or rejects it.",
+      "create-task omitted specification means Option none. A partial object is malformed request shape; a complete-shape value failing semantic parsing is TIBER_SPECIFICATION_INVALID and never degrades to unspecified.",
+      "Canonical semantic request payloads are create {kind,title,description,specification Option} and specify {kind,exact resolved taskId,specification}. requestDigest is sha256: plus lowercase SHA-256 of JSON.stringify of that host-canonical payload; conversational wording and generated IDs are excluded.",
+      "A separately generated operationId distinguishes a deliberate repeated user request from recovery. Intent and authority events bind operationId, requestDigest, generated IDs, and canonical content.",
+      "Specification digest remains digestTaskSpecification: sha256 of JSON.stringify of the parsed canonical specification. Absence is Option {kind:none}, never a sentinel hash.",
+      "Generated task/event IDs are paired, bounded to three pre-intent candidates, and stable after journaling.",
+      "Safe retry is limited to unrelated head advancement with absent generated identities and unchanged target preconditions. Claimed/state/specification changes require renewed user evaluation.",
+      "Success receipts contain code, published|unchanged|reconciled disposition, taskId, full resulting boardHead, specificationDigest Option, and eventId Option. Denials contain stable code and safe operation/task context.",
+      "Ordinary operations never promote, prioritize, review, claim, start, create campaign provenance, or alter campaign checkpoints."
+    ],
+    "exclusions": [
+      "Changing title or description after creation",
+      "Changing specifications after Backlog",
+      "Automatically starting, reviewing, ranking, or claiming tasks",
+      "Changing campaign scheduling or goal semantics",
+      "Weakening signature, ancestry, or lifecycle verification"
+    ],
+    "dependencies": [
+      "src/core/workflow/workflow-request.ts closed request parser",
+      "src/core/tasks/task-values.ts semantic metadata, event, operation, and identity parsers",
+      "src/core/tasks/readiness.ts canonical specification parser and digest",
+      "src/core/tasks/task-board.ts signed event schema, duplicate-authority checks, lifecycle invariants, ordering, priority, and projection",
+      "src/adapters/tasks/git-task-remote.ts signer, verified-head observation, operation reconciliation, and fast-forward publisher",
+      "src/extension/workflow-request-tool.ts deterministic dispatcher and durable operation journal",
+      "Backlog-only specification and exclusive-claim policy"
+    ],
+    "testMappings": [
+      "tests/acceptance/workflow-task-create-atomic.test.ts",
+      "tests/acceptance/workflow-task-amend-preservation.test.ts",
+      "tests/acceptance/workflow-task-natural-language.test.ts",
+      "tests/unit/workflow-task-malformed-partial-specification.test.ts",
+      "tests/unit/workflow-task-semantic-specification-denial.test.ts",
+      "tests/unit/workflow-task-read-only-board.test.ts",
+      "tests/unit/workflow-task-create-denial-precedence.test.ts",
+      "tests/unit/workflow-task-amend-denial-precedence.test.ts",
+      "tests/unit/workflow-task-claimed-denial.test.ts",
+      "tests/unit/workflow-task-non-backlog-denial.test.ts",
+      "tests/unit/workflow-task-lifecycle-race.test.ts",
+      "tests/unit/workflow-task-signing-failure.test.ts",
+      "tests/unit/workflow-task-unauthorized-amendment.test.ts",
+      "tests/unit/workflow-task-push-failure.test.ts",
+      "tests/unit/workflow-task-same-task-race.test.ts",
+      "tests/unit/workflow-task-unrelated-head-race.test.ts",
+      "tests/unit/workflow-task-lost-receipt.test.ts",
+      "tests/unit/workflow-task-reconciliation-mismatch.test.ts",
+      "tests/unit/workflow-task-identifier-collision.test.ts",
+      "tests/unit/workflow-task-unchanged-specification.test.ts",
+      "tests/unit/workflow-task-atomic-projection.test.ts",
+      "tests/unit/workflow-task-preserve-order-priority-provenance.test.ts",
+      "tests/unit/workflow-request.test.ts",
+      "tests/unit/workflow-orchestration.test.ts"
+    ],
+    "architectureImplications": "Extend the closed workflow request algebra and host dispatcher with create-task and specify-task. Add one atomic task-created-from-request event and durable operation intent/receipt journal. The host owns parse-once canonicalization, bounded identifier generation, expected-head and expected-digest preconditions, signing, fast-forward publication, conflict classification, and idempotent reconciliation. Inference supplies semantic intent but cannot authorize, retry across changed target state, or trigger readiness/work effects."
+  }
+}
