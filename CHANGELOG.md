@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/jwilger/tiber/compare/v1.2.1...v1.2.2) (2026-08-27)
+
+
+### Bug Fixes
+
+* **review:** make readiness checks risk-proportionate ([#53](https://github.com/jwilger/tiber/issues/53)) ([5c5aa95](https://github.com/jwilger/tiber/commit/5c5aa953f9953e8830e15e837eea396e15cdaa17))
+
 ## [1.2.1](https://github.com/jwilger/tiber/compare/v1.2.0...v1.2.1) (2026-08-27)
 
 
