@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "eventId": "0d6c5fb0-de91-4e6e-b737-3f3fe475a937",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T03:37:13.008Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:3ee97e26a85febf3444bbccada83fdb55aad71b6fd207614d580dc31b976e6bf",
+  "specification": {
+    "outcome": "When a user asks in normal conversation to create an ordinary ticket, Tiber publishes an unclaimed Backlog task without requiring or changing a campaign.",
+    "scenarios": [
+      {
+        "name": "create a ticket without a campaign",
+        "given": [
+          "the signed task board is writable",
+          "the create-task request contains an exact title and description accepted by the existing task value parsers"
+        ],
+        "when": [
+          "the host evaluates create-task"
+        ],
+        "then": [
+          "the host generates a version-4 task UUID, event UUID, and canonical UTC occurrence time",
+          "it publishes the existing schema-version-1 task-created event through GitTaskRemote",
+          "the result is an unclaimed unspecified Backlog task with the requested metadata and no campaign provenance"
+        ]
+      },
+      {
+        "name": "preserve campaign independence",
+        "given": [
+          "no campaign checkpoint exists or an unrelated campaign is active"
+        ],
+        "when": [
+          "create-task is evaluated"
+        ],
+        "then": [
+          "the same ordinary task-created event is published",
+          "no campaign checkpoint is read, created, or changed",
+          "the task is not classified as a campaign goal"
+        ]
+      },
+      {
+        "name": "deny invalid or unavailable task publication",
+        "given": [
+          "the request is malformed, task values are invalid, or signed task authority is read-only"
+        ],
+        "when": [
+          "create-task is evaluated"
+        ],
+        "then": [
+          "the host returns TIBER_WORKFLOW_REQUEST_INVALID, TIBER_TASK_VALUE_INVALID, or TIBER_TASK_BOARD_INVALID respectively",
+          "no task, readiness, claim, worktree, or campaign event is published"
+        ]
+      },
+      {
+        "name": "route natural-language creation directly",
+        "given": [
+          "the user asks Pi to add or create a ticket"
+        ],
+        "when": [
+          "Pi chooses a workflow request"
+        ],
+        "then": [
+          "it uses create-task rather than campaign-goal or begin-task",
+          "the tool result reports the generated task ID and final projected state"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "The closed workflow request shape is exactly {kind:'create-task',title:string,description:string}; unknown, missing, null, and wrong-typed fields are rejected.",
+      "Title and description use the existing parseTaskTitle and parseTaskDescription behavior without new normalization or limits.",
+      "Event construction remains host-owned; model input cannot select identifiers, occurrence time, campaign provenance, readiness, ordering, claim, or publication effects.",
+      "GitTaskRemote retains its existing signed linear fast-forward publication, concurrent retry, verification, and degraded-read-only behavior; this slice adds no alternate publication or compatibility path.",
+      "A successful result includes the exact generated task ID and shows Backlog, unspecified, and unclaimed state.",
+      "Ordinary task creation neither requires nor mutates FileCampaignStore state."
+    ],
+    "exclusions": [
+      "Editing existing tasks or specifications",
+      "Creating and specifying in one request",
+      "Automatically reviewing, ranking, claiming, or starting the new task",
+      "Changing GitTaskRemote publication or recovery semantics",
+      "Changing campaign scheduling or campaign-goal behavior"
+    ],
+    "dependencies": [
+      "src/core/workflow/workflow-request.ts closed request parsing",
+      "src/core/tasks/task-values.ts existing task metadata and UUID values",
+      "src/core/tasks/task-board.ts existing task-created event and projection",
+      "src/adapters/tasks/git-task-remote.ts existing signed publication",
+      "src/extension/workflow-request-tool.ts deterministic dispatch and result capture"
+    ],
+    "testMappings": [
+      "tests/unit/workflow-request.test.ts",
+      "tests/unit/workflow-orchestration.test.ts",
+      "tests/acceptance/workflow-task-create.test.ts"
+    ],
+    "architectureImplications": "Add one closed create-task request interpreted by the existing signed task publication shell. Inference supplies title and description only; the host generates authority values and does not invoke campaign, readiness, or work transitions."
+  }
+}
