@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "eventId": "365daf62-6f71-4a03-b34e-3c6368fc1531",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T03:48:39.943Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:78cceb84d8401bc419b42727045cce50d3a34338c74bc540099534a283aa5738",
+  "specification": {
+    "outcome": "When a user asks in normal conversation to create an ordinary ticket, Tiber publishes an unclaimed Backlog task without requiring or changing a campaign.",
+    "scenarios": [
+      {
+        "name": "create ordinary ticket independently",
+        "given": [
+          "exact schema-valid create request,semantic metadata valid,writable verified board"
+        ],
+        "when": [
+          "host parses,generates/parses,freezes,publishes,reconciles,and validates exact projection"
+        ],
+        "then": [
+          "one canonical TaskCreatedEvent establishes task",
+          "success returns exact identity/defaults",
+          "campaign/readiness/work/run/worktree adapters have zero calls"
+        ]
+      },
+      {
+        "name": "reject before effects in deterministic order",
+        "given": [
+          "request shape,title,description,generated task ID,event ID,or occurrence time is invalid or generator throws"
+        ],
+        "when": [
+          "host evaluates"
+        ],
+        "then": [
+          "schema failure WORKFLOW_REQUEST_INVALID; semantic/generated parse failure TASK_VALUE_INVALID; generator throw WORKFLOW_EXECUTION_FAILED",
+          "validation short-circuits in declared order",
+          "no later generator/effect occurs"
+        ]
+      },
+      {
+        "name": "reconcile publication phases",
+        "given": [
+          "one deep-frozen event and canonical bytes"
+        ],
+        "when": [
+          "publication fails transiently or push response is lost"
+        ],
+        "then": [
+          "eligible phases retry full attempt max four with same bytes",
+          "fresh history exact event bytes reconciles success and nonexact bytes degrade read-only",
+          "closed denial includes phase retry metadata"
+        ]
+      },
+      {
+        "name": "route scripted ticket and campaign fixtures",
+        "given": [
+          "fixed guidance/schema and exact fixture prompt"
+        ],
+        "when": [
+          "scripted model responds"
+        ],
+        "then": [
+          "ticket emits create payload; explicit campaign emits campaign-start; missing-title/mixed emits clarification without call",
+          "parser independently enforces create schema"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "Request object exact own keys kind,title,description. Missing/null/wrong type/unknown key -> TIBER_WORKFLOW_REQUEST_INVALID before host dispatch. Once schema-valid, semantic order title then description: title string length 1..200 JavaScript UTF-16 code units and trim-equal; description string length 0..10000 UTF-16 units with whitespace preserved. Semantic failure -> TIBER_TASK_VALUE_INVALID and later validation/generation stops.",
+      "Generation order task UUID,event UUID,time. Outputs pass existing purpose parsers; failed parse -> TASK_VALUE_INVALID. IdentifierSource/Clock throw -> TIBER_WORKFLOW_EXECUTION_FAILED transient/retry-operation. occurredAt exactly new Date(value).toISOString ending Z with milliseconds.",
+      "Event own-key insertion order schemaVersion,eventId,kind,occurredAt,task; nested task order id,title,description. Canonical event bytes are UTF-8 of JSON.stringify(event,null,2) plus one newline, written at events/<eventId>.json. Exact reconciliation compares these bytes; Git commit/signature bytes are not part of event-byte equality.",
+      "Host recursively freezes event and nested task before GitTaskRemote. Attempts may deserialize/recreate objects but canonical bytes/deep values remain identical and no event field changes.",
+      "Exact projected Task own enumerable keys are id,title,description,state,blockStatus,specification,specificationDigest,claim,preservedIncrements,finalReviewProgress,completionRelease,delivery,ci,openedReview,reviewReceipt,campaignProvenance; extra or missing own keys deny. Values: exact generated metadata; state 'Backlog'; blockStatus 'unblocked'; specification,specificationDigest,claim,finalReviewProgress,completionRelease,delivery,ci,openedReview,reviewReceipt,campaignProvenance each exactly {kind:'none'}; preservedIncrements exactly empty array.",
+      "Unrelated board tasks are ignored. Preexisting/colliding generated task ID makes proposed fold invalid. Success only after exact created task own-key/value validation.",
+      "Create dispatcher invokes zero FileCampaignStore,readiness reviewer,handleWorkCommand,FileRunJournal,GitOwnedWorktrees calls for success/denial/absent or active campaign.",
+      "GitTaskRemote attempt freshly clones,fetches/checks out/verifies history,folds event,writes canonical file,signs,and fast-forward pushes. Clone/fetch/checkout/file/sign/push runtime failures retry maximum four total. Invalid history/fold immediate degraded. Missing configured signer immediate unauthorized. Retry sees exact event bytes -> reconciled success; same event ID different bytes -> degraded read-only. Post-push observation degradation returns failure without blind republish.",
+      "Success content 'Task created: <taskId>\\nBacklog | unspecified | unclaimed'; details {disposition:'created',taskId,state:'Backlog',specification:'unspecified',claim:'unclaimed'}. Denial content '<CODE>: task creation denied'; details exact keys disposition:'denied',code,taskId Option,retryability,requiredRecoveryEvidence. TASK_PUBLICATION_UNAUTHORIZED uses retry-after-state-change/configured-signing-and-publication-authority; invalid history/fold/projection BOARD_INVALID uses retry-after-state-change/corrected-task-history; transient phase exhaustion BOARD_INVALID uses transient/retry-operation; post-push degradation uses transient/exact-remote-observation; value invalid retry-after-input/corrected-value; execution failed transient/retry-operation.",
+      "Routing fixtures: 'Add a ticket: Fix the startup lag' -> create title Fix the startup lag description ''; 'Create a ticket titled Fix lag with description Render activity immediately' -> supplied create; explicit bounded campaign prompt -> campaign-start with exact stated bounds; 'Create a ticket' -> exact missing-title clarification no call; 'Start a campaign and add a ticket' -> exact ordering clarification no call; 'Add a ticket to fix campaign scheduling' -> create title Fix campaign scheduling description ''. Rule: explicit start/run campaign without ticket verb campaign; add/create ticket without campaign-start verb ticket; both clarify.",
+      "TypeBox schema,core parser,guidance,dispatcher,result rendering add create-task while campaign dispatcher unchanged."
+    ],
+    "exclusions": [
+      "Editing tasks",
+      "Atomic create+specify",
+      "Automatic review/claim/start",
+      "Campaign behavior changes",
+      "Publication changes beyond exact-event idempotent reconciliation/phase classification"
+    ],
+    "dependencies": [
+      "workflow request tool schema/injected IdentifierSource/Clock/dispatcher",
+      "workflow guidance/parser",
+      "task value parsers/TaskCreatedEvent projection",
+      "GitTaskRemote signed publication"
+    ],
+    "testMappings": [
+      "tests/unit/workflow-task-create-schema.test.ts",
+      "tests/unit/workflow-task-create-title-boundaries.test.ts",
+      "tests/unit/workflow-task-create-description-boundaries.test.ts",
+      "tests/unit/workflow-task-create-validation-order.test.ts",
+      "tests/unit/workflow-task-create-invalid-authority.test.ts",
+      "tests/unit/workflow-task-create-generator-throws.test.ts",
+      "tests/unit/workflow-task-create-occurred-at.test.ts",
+      "tests/unit/workflow-task-create-event-serialization.test.ts",
+      "tests/unit/workflow-task-create-frozen-event.test.ts",
+      "tests/unit/workflow-task-create-default-values.test.ts",
+      "tests/unit/workflow-task-create-projection-fields.test.ts",
+      "tests/unit/workflow-task-create-adapter-isolation.test.ts",
+      "tests/unit/workflow-task-create-publication-phases.test.ts",
+      "tests/unit/workflow-task-create-push-lost-response.test.ts",
+      "tests/unit/workflow-task-create-reconciliation-conflict.test.ts",
+      "tests/unit/workflow-task-create-denial-details.test.ts",
+      "tests/unit/workflow-task-create-routing-fixtures.test.ts",
+      "tests/acceptance/workflow-task-create.test.ts"
+    ],
+    "architectureImplications": "Add closed create-task through existing signed task event publication, with ordered semantic validation, host authority generation, frozen canonical event bytes, exact-event reconciliation, complete projection validation, and no campaign/readiness/work transition."
+  }
+}
