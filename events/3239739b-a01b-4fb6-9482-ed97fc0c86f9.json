@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "eventId": "3239739b-a01b-4fb6-9482-ed97fc0c86f9",
+  "kind": "task-campaign-goal-created",
+  "occurredAt": "2026-08-27T01:10:02.481Z",
+  "campaignId": "7259a0b8-2d7e-438e-8108-7a440fbc8832",
+  "task": {
+    "id": "26f6420c-cee1-4f9e-9e77-5c3687db789c",
+    "title": "Show immediate feedback while submitted messages are processed",
+    "description": "Ad-hoc campaign goal: Show immediate feedback while submitted messages are processed\nProvenance: campaign-goal/7259a0b8-2d7e-438e-8108-7a440fbc8832"
+  }
+}
