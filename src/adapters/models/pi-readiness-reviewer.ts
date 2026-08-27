@@ -46,6 +46,8 @@ function hasUnsafeFormatting(value: string): boolean {
   return /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
 }
 
+const READINESS_REVIEW_TIME_BUDGET_MS = 5 * 60_000;
+
 const READINESS_REVIEWER_SYSTEM_PROMPT = [
   "ROLE: Tiber specification readiness reviewer v1.",
   "Review independently with fresh context. Do not authorize effects.",
@@ -233,7 +235,7 @@ async function conductSpecificationReview(
   ].join("\n");
   const timeout = setTimeout(() => {
     abort("timed-out");
-  }, 60_000);
+  }, READINESS_REVIEW_TIME_BUDGET_MS);
   const heartbeat = setInterval(() => {
     if (
       !reportProgress(
