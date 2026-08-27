@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "eventId": "ad36d6b7-ad70-4ed1-bd4d-8e517b4673a5",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T01:28:53.719Z",
+  "taskId": "230512d3-04e7-472a-af56-4d01c5cc286c",
+  "specificationDigest": "sha256:a1b5e57a7b2cfc4c85c42dac6bb9fdf377cb3408d89c5715804636b4498e6918",
+  "specification": {
+    "outcome": "During a long readiness operation invoked by tiber_workflow_request, Pi renders prompt activity within 100 ms, keeps animating, and replaces progress with one deterministic terminal result.",
+    "scenarios": [
+      {
+        "name": "yield and report bounded progress",
+        "given": [
+          "executeEntry is monotonic time captured as the first execute statement",
+          "a test-controlled readiness promise remains pending for two seconds"
+        ],
+        "when": [
+          "the tool executes"
+        ],
+        "then": [
+          "running onUpdate is called before dispatch and no later than executeEntry plus 100 ms",
+          "a setImmediate sentinel scheduled after execute returns its promise runs before the readiness promise is resolved",
+          "later changed progress and unchanged heartbeats obey the anchored cadence"
+        ]
+      },
+      {
+        "name": "apply one progress cadence",
+        "given": [
+          "t0 is the successful initial-update time and normalized observation text is safe bounded text"
+        ],
+        "when": [
+          "progress changes or remains unchanged"
+        ],
+        "then": [
+          "each half-open interval [t0+n*1000,t0+(n+1)*1000) permits at most one changed update, with a 50 ms scheduler tolerance and skipped rather than replayed missed intervals",
+          "an unchanged heartbeat is due at t0+2000*k plus up to 50 ms",
+          "a changed update due at the same boundary replaces the heartbeat and no running-update gap exceeds 2050 ms"
+        ]
+      },
+      {
+        "name": "select and render one terminal result",
+        "given": [
+          "dispatch returns a typed success or denial or observes failure, abort, or deadline"
+        ],
+        "when": [
+          "the microtask arbitration checkpoint immediately before return observes available causes"
+        ],
+        "then": [
+          "precedence is caller abort, operation deadline, onUpdate failure, dispatch failure, typed denial, success",
+          "abort or deadline observed after dispatch settles but before commit wins; signals after commit are ignored",
+          "running updates stop and the host renderer replaces them from the execute return value"
+        ]
+      },
+      {
+        "name": "cancel readiness and guard consequential effects",
+        "given": [
+          "the 60000 ms operation deadline starts at executeEntry and includes setup and dispatch",
+          "readiness uses the Pi session AbortSignal contract and must acknowledge abort within 1000 ms"
+        ],
+        "when": [
+          "caller abort or deadline occurs"
+        ],
+        "then": [
+          "the linked signal aborts the reviewer session and cleanup is awaited through executeEntry plus 61000 ms",
+          "failure to acknowledge invokes session disposal and returns failed rather than leaving an owned session active",
+          "signal checks immediately before signed specification, Ready, claim, and worktree effects deny any effect after cancellation observation"
+        ]
+      },
+      {
+        "name": "clean up races and malformed callbacks",
+        "given": [
+          "initial or later onUpdate may throw, timer setup may throw, callbacks may already be queued, or readiness may resolve or reject late"
+        ],
+        "when": [
+          "terminal generation is incremented"
+        ],
+        "then": [
+          "removable timers, listeners, subscriptions, and session resources are disposed",
+          "already queued callbacks compare their captured generation and become no-ops",
+          "initial onUpdate failure emits no running state, performs no dispatch, and returns failed"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "Pi schema rejection occurs before execute and emits no Tiber progress. Semantic denial inside dispatch receives initial progress then a denied return. Initial update occurs before any synchronous dispatch setup; if monotonic measurement nonetheless exceeds 100 ms, dispatch is skipped and failed is returned.",
+      "Running update payload is {content:[{type:'text',text:<safe text>}],details:{disposition:'reviewing',sequence:<positive integer>,kind:'progress'|'heartbeat'}}. A change means normalized text differs from the last emitted text. Text rejects controls and is capped at 4096 characters.",
+      "Spinner animation remains Pi-owned and independent; Tiber preserves one tool-call identity and does not represent percentage completion. Heartbeats communicate only that the same operation is pending.",
+      "Dispatch returns a typed union. Success maps to details.disposition evaluated and sanitized host text; TiberFailure maps to denied and 'CODE: safe message'; caller abort maps to cancelled/TIBER_WORKFLOW_REQUEST_CANCELLED; the 60000 ms deadline maps to timed-out/TIBER_WORKFLOW_REQUEST_TIMED_OUT; callback, setup, malformed payload, or infrastructure defects map to failed/TIBER_WORKFLOW_REQUEST_EXECUTION_FAILED.",
+      "At the pre-return microtask checkpoint simultaneous cause precedence is cancelled, timed-out, failed-onUpdate, failed-dispatch, denied, evaluated. Exactly one terminal ToolResult is returned; onUpdate never carries terminal state.",
+      "The cancellable long-operation capability for this task is specifically Pi readiness session prompt plus session.abort/session.dispose. Synchronous signed publication and worktree effects are not started after signal observation and are covered for general responsiveness by the separate submitted-message ticket.",
+      "All removable resources are disposed and queued callbacks are generation-guarded. Existing workflow and authority decisions remain unchanged."
+    ],
+    "exclusions": [
+      "Changing readiness findings or workflow authority",
+      "Redesigning Pi renderer or spinner",
+      "Making all repository adapters asynchronous",
+      "Reporting percentages",
+      "Detaching an owned reviewer session"
+    ],
+    "dependencies": [
+      "Pi extension ToolResult, onUpdate, and AbortSignal contract",
+      "Pi readiness AgentSession prompt, abort, and dispose contract",
+      "src/extension/workflow-request-tool.ts typed asynchronous dispatch",
+      "src/adapters/models/pi-readiness-reviewer.ts session heartbeat and timeout",
+      "pre-effect signal checks for specification, Ready, claim, and worktree effects"
+    ],
+    "testMappings": [
+      "tests/acceptance/workflow-request-responsive-progress.test.ts",
+      "tests/unit/workflow-request-progress-cadence.test.ts",
+      "tests/unit/workflow-request-progress-sentinel.test.ts",
+      "tests/unit/workflow-request-terminal-precedence.test.ts",
+      "tests/unit/workflow-request-terminal-schema.test.ts",
+      "tests/unit/workflow-request-caller-cancel.test.ts",
+      "tests/unit/workflow-request-timeout.test.ts",
+      "tests/unit/workflow-request-startup-overrun.test.ts",
+      "tests/unit/workflow-request-invalid-input.test.ts",
+      "tests/unit/workflow-request-initial-update-failure.test.ts",
+      "tests/unit/workflow-request-timer-setup-failure.test.ts",
+      "tests/unit/workflow-request-linked-signal-cleanup.test.ts",
+      "tests/unit/workflow-request-late-callback.test.ts",
+      "tests/unit/workflow-request-late-readiness-completion.test.ts",
+      "tests/unit/workflow-request-effect-cancel-guard.test.ts",
+      "tests/unit/workflow-request-heartbeat-boundary.test.ts",
+      "tests/unit/workflow-request-authorization-regression.test.ts"
+    ],
+    "architectureImplications": "Add a closed progress/cancellation state machine around asynchronous readiness dispatch. Progress is bounded UI observation, terminal arbitration is deterministic, Pi session work is abortable and owned, and cancellation is rechecked before consequential workflow effects."
+  }
+}
