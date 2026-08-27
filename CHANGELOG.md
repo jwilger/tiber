@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/jwilger/tiber/compare/v1.2.0...v1.2.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **review:** extend readiness time budget ([#51](https://github.com/jwilger/tiber/issues/51)) ([5e4d420](https://github.com/jwilger/tiber/commit/5e4d4206683cba799532e3d35b0ce95b5d7f1994))
+
 ## [1.2.0](https://github.com/jwilger/tiber/compare/v1.1.1...v1.2.0) (2026-08-26)
 
 
