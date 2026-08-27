@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "eventId": "6582351f-4c2e-463d-a5be-209e3f8930c7",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T03:42:20.653Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:2995f554b49a6cfb2194e68d6bec2e6da6acefcbbc64ed048a2c28da4001cfe4",
+  "specification": {
+    "outcome": "When a user asks in normal conversation to create an ordinary ticket, Tiber publishes an unclaimed Backlog task without requiring or changing a campaign.",
+    "scenarios": [
+      {
+        "name": "create with no campaign checkpoint",
+        "given": [
+          "FileCampaignStore has no checkpoint",
+          "writable signed board",
+          "create-task title/description pass existing parsers"
+        ],
+        "when": [
+          "host evaluates create-task"
+        ],
+        "then": [
+          "metadata parses before host generates one task UUID,event UUID,canonical UTC time",
+          "host constructs/freeze-once existing task-created event and GitTaskRemote publishes unchanged values",
+          "projected task is Backlog/unclaimed/unspecified/campaignProvenance none and no campaign adapter method runs"
+        ]
+      },
+      {
+        "name": "create while unrelated campaign active",
+        "given": [
+          "FileCampaignStore contains active campaign",
+          "writable signed board",
+          "title 'Fix lag' and description 'Render activity immediately' pass parsers"
+        ],
+        "when": [
+          "host evaluates create-task"
+        ],
+        "then": [
+          "ordinary task-created event publishes with only id,title,description task fields",
+          "campaign checkpoint bytes unchanged and no campaign adapter method runs",
+          "projected campaignProvenance is {kind:'none'}"
+        ]
+      },
+      {
+        "name": "reject malformed request without side effects",
+        "given": [
+          "kind is unknown; or an extra key exists; or kind,title,or description is missing,null,or wrong type"
+        ],
+        "when": [
+          "workflow parser evaluates input"
+        ],
+        "then": [
+          "TIBER_WORKFLOW_REQUEST_INVALID returns",
+          "no metadata parser shell,UUID,clock,task remote,readiness,claim,run journal,worktree,or campaign operation occurs"
+        ]
+      },
+      {
+        "name": "reject invalid metadata before authority generation",
+        "given": [
+          "a schema-valid create-task request has title or description rejected by existing parser"
+        ],
+        "when": [
+          "host evaluates it"
+        ],
+        "then": [
+          "TIBER_TASK_VALUE_INVALID returns before UUID/clock generation",
+          "no task remote,readiness,claim,run journal,worktree,or campaign operation occurs"
+        ]
+      },
+      {
+        "name": "reject publication failures by phase",
+        "given": [
+          "metadata valid and host-generated event fixed"
+        ],
+        "when": [
+          "board pre-read or remote history verification fails, signer is unavailable, signing/push retries exhaust four attempts, or post-push observation/projection is degraded,missing,or inconsistent"
+        ],
+        "then": [
+          "TIBER_TASK_BOARD_INVALID returns with no success result",
+          "pre-read/configured-signer/history/fold failures return without retry; signing execution and push rejection retry within existing maximum four attempts; degraded post-push observation returns without claiming success",
+          "no campaign operation occurs"
+        ]
+      },
+      {
+        "name": "route ordinary ticket language",
+        "given": [
+          "user says 'Add a ticket: Fix the startup lag' or 'Create a ticket titled Fix lag with description Render activity immediately'"
+        ],
+        "when": [
+          "Pi routes"
+        ],
+        "then": [
+          "payload is respectively create-task with description '' or create-task with supplied description",
+          "campaign-goal and begin-task are not used"
+        ]
+      },
+      {
+        "name": "ask for missing title without a tool call",
+        "given": [
+          "user says only 'Create a ticket' and no title can be inferred"
+        ],
+        "when": [
+          "Pi routes"
+        ],
+        "then": [
+          "Pi makes no workflow tool call and responds 'I need a ticket title before I can create it.'",
+          "no request or effect occurs"
+        ]
+      },
+      {
+        "name": "preserve explicit and mixed campaign routing",
+        "given": [
+          "user says 'Start a campaign to finish every backlog ticket', 'Add a ticket to fix campaign scheduling', or ambiguously 'Start a campaign and add a ticket'"
+        ],
+        "when": [
+          "Pi routes"
+        ],
+        "then": [
+          "first uses campaign-start and not create-task; second uses create-task because campaign is subject matter,not requested operation; third makes no tool call and asks which operation to perform first",
+          "existing explicit campaign semantics retain precedence"
+        ]
+      },
+      {
+        "name": "return success only from exact projection",
+        "given": [
+          "task-created event published and board projection writable"
+        ],
+        "when": [
+          "host looks up generated task ID"
+        ],
+        "then": [
+          "success requires exact title,description,state Backlog,specification none,claim none,campaign provenance none",
+          "content is 'Task created: <taskId>\\nBacklog | unspecified | unclaimed' and details is {disposition:'created',taskId,state:'Backlog',specification:'unspecified',claim:'unclaimed'}",
+          "missing or inconsistent projection returns TIBER_TASK_BOARD_INVALID"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "Workflow request exact shape {kind:'create-task',title:string,description:string}; every key required, no extras. Unknown kind, extra key, and missing/null/wrong type for each required field are covered independently.",
+      "Metadata parsing is the first host dispatch step and reuses parseTaskTitle/parseTaskDescription unchanged. Empty description valid. No authority values/effect adapters before both parse.",
+      "Exact TaskCreatedEvent is {schemaVersion:1,eventId,kind:'task-created',occurredAt,task:{id,title,description}}. It contains no campaign field or Option. foldTaskEvents derives campaignProvenance:{kind:'none'} and all other defaults.",
+      "Host parses randomUUID outputs through existing task/event UUID parsers and Date output through occurrence parser, constructs the nested event once outside GitTaskRemote, deep-freezes it, and passes unchanged deep values through every remote retry; reference identity is not part of contract.",
+      "Projected task exact defaults: state Backlog,blockStatus unblocked,specification/specificationDigest/claim/finalReviewProgress/completionRelease/delivery/ci/openedReview/reviewReceipt/campaignProvenance each {kind:'none'},preservedIncrements [], and requested metadata/ID.",
+      "Create branch has no runtime calls to FileCampaignStore, handleCampaignCommand, readiness reviewer, handleWorkCommand, FileRunJournal, or GitOwnedWorktrees. Tests inject spies at those module boundaries and assert zero calls for no-checkpoint,active-campaign,denials,and success.",
+      "Failure phases retain GitTaskRemote behavior: degraded pre-read/configured signer absence/invalid verified history/invalid fold return immediately; runtime signing or push failures are caught and retried up to four total attempts using same event; degraded observation after a push returns immediately. Any final degraded board, absent task, or mismatched projection maps TIBER_TASK_BOARD_INVALID and never success.",
+      "Routing precedence: explicit single campaign-start intent wins; explicit single ticket-create intent wins even when title discusses campaigns; mixed requests for both operations require clarification and no call; omitted description becomes ''; omitted title requires exact guidance and no call.",
+      "Success result exact text/details follows scenario and occurs only after independent writable projection matches generated ID and defaults.",
+      "Registered TypeBox schema, core parser, workflow guidance, dispatcher, and result capture add create-task while campaign request schemas and behavior remain unchanged."
+    ],
+    "exclusions": [
+      "Editing metadata/specification",
+      "Atomic create-and-specify",
+      "Automatic review/rank/claim/start",
+      "GitTaskRemote publication/recovery changes",
+      "Campaign behavior changes"
+    ],
+    "dependencies": [
+      "src/extension/workflow-request-tool.ts TypeBox schema, randomUUID/Date parsing, dispatcher/result",
+      "src/extension/workflow-orchestration.ts routing guidance",
+      "src/core/workflow/workflow-request.ts exact parser",
+      "src/core/tasks/task-values.ts metadata/authority value parsers",
+      "src/core/tasks/task-board.ts TaskCreatedEvent/default projection",
+      "src/adapters/tasks/git-task-remote.ts existing signed four-attempt publication"
+    ],
+    "testMappings": [
+      "tests/unit/workflow-task-create-schema-kind.test.ts",
+      "tests/unit/workflow-task-create-schema-keys.test.ts",
+      "tests/unit/workflow-task-create-schema-values.test.ts",
+      "tests/unit/workflow-task-create-invalid-metadata.test.ts",
+      "tests/unit/workflow-task-create-authority-generation.test.ts",
+      "tests/unit/workflow-task-create-event-shape.test.ts",
+      "tests/unit/workflow-task-create-default-projection.test.ts",
+      "tests/unit/workflow-task-create-no-campaign.test.ts",
+      "tests/unit/workflow-task-create-active-campaign.test.ts",
+      "tests/unit/workflow-task-create-static-isolation.test.ts",
+      "tests/unit/workflow-task-create-preread-failure.test.ts",
+      "tests/unit/workflow-task-create-signing-failure.test.ts",
+      "tests/unit/workflow-task-create-push-retry.test.ts",
+      "tests/unit/workflow-task-create-observation-failure.test.ts",
+      "tests/unit/workflow-task-create-projection-mismatch.test.ts",
+      "tests/unit/workflow-task-create-race-identity.test.ts",
+      "tests/unit/workflow-task-create-result.test.ts",
+      "tests/unit/workflow-task-create-routing.test.ts",
+      "tests/unit/workflow-task-create-no-title-guidance.test.ts",
+      "tests/unit/workflow-task-campaign-routing-regression.test.ts",
+      "tests/acceptance/workflow-task-create.test.ts"
+    ],
+    "architectureImplications": "Add one closed create-task request through existing signed TaskCreatedEvent publication. Inference supplies metadata only; host parses before generating identifiers/time and invokes no campaign/readiness/work transition."
+  }
+}
