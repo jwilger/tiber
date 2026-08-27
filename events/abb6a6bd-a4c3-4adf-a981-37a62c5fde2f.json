@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "eventId": "abb6a6bd-a4c3-4adf-a981-37a62c5fde2f",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T03:39:20.339Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:b90316b3af3c372c48e5ebcc0ebbc01bd81d0e3e46131caa78d91353bca0e32c",
+  "specification": {
+    "outcome": "When a user asks in normal conversation to create an ordinary ticket, Tiber publishes an unclaimed Backlog task without requiring or changing a campaign.",
+    "scenarios": [
+      {
+        "name": "create a ticket without a campaign checkpoint",
+        "given": [
+          "FileCampaignStore has no checkpoint",
+          "the signed task board is writable",
+          "create-task title and description pass existing parsers"
+        ],
+        "when": [
+          "host evaluates create-task"
+        ],
+        "then": [
+          "host generates one task UUID, event UUID, and canonical UTC time and publishes existing task-created event",
+          "task is Backlog with specificationDigest, specification, claim, and campaignProvenance all {kind:'none'}",
+          "FileCampaignStore is never constructed, read, or written"
+        ]
+      },
+      {
+        "name": "create a ticket while an unrelated campaign is active",
+        "given": [
+          "FileCampaignStore contains an active campaign",
+          "the signed task board is writable"
+        ],
+        "when": [
+          "host evaluates create-task"
+        ],
+        "then": [
+          "ordinary task-created event is published without campaign ID",
+          "active campaign bytes are unchanged and FileCampaignStore is never constructed, read, or written by this operation",
+          "task campaignProvenance is {kind:'none'}"
+        ]
+      },
+      {
+        "name": "reject malformed create request",
+        "given": [
+          "create-task has a missing, unknown, null, or wrong-typed kind, title, or description field"
+        ],
+        "when": [
+          "workflow request parser evaluates it"
+        ],
+        "then": [
+          "TIBER_WORKFLOW_REQUEST_INVALID is returned",
+          "no identifier, clock, task remote, campaign, readiness, claim, or worktree operation occurs"
+        ]
+      },
+      {
+        "name": "reject invalid task metadata",
+        "given": [
+          "closed create-task has title or description rejected by parseTaskTitle or parseTaskDescription"
+        ],
+        "when": [
+          "host evaluates it"
+        ],
+        "then": [
+          "TIBER_TASK_VALUE_INVALID is returned",
+          "no event or campaign operation occurs"
+        ]
+      },
+      {
+        "name": "reject read-only or failed publication",
+        "given": [
+          "signed task authority is degraded read-only or GitTaskRemote cannot sign, verify, push, observe, or reconcile after four attempts"
+        ],
+        "when": [
+          "host evaluates or publishes create-task"
+        ],
+        "then": [
+          "the existing TIBER_TASK_BOARD_INVALID failure is returned",
+          "no successful task result is returned and no campaign operation occurs"
+        ]
+      },
+      {
+        "name": "route ordinary ticket language directly",
+        "given": [
+          "the user says 'Add a ticket: Fix the startup lag' or 'Create a ticket titled Fix lag with description Render activity immediately'"
+        ],
+        "when": [
+          "Pi forms the next tool call"
+        ],
+        "then": [
+          "payload is respectively {kind:'create-task',title:'Fix the startup lag',description:''} or {kind:'create-task',title:'Fix lag',description:'Render activity immediately'}",
+          "a request with no inferable title is not sent and receives TIBER_WORKFLOW_REQUEST_INVALID guidance",
+          "it does not use campaign-goal or begin-task"
+        ]
+      },
+      {
+        "name": "preserve campaign language routing",
+        "given": [
+          "the user says 'Start a campaign to finish every backlog ticket'"
+        ],
+        "when": [
+          "Pi forms the next tool call"
+        ],
+        "then": [
+          "existing campaign-start routing is retained",
+          "create-task is not requested"
+        ]
+      },
+      {
+        "name": "return the created task identity and state",
+        "given": [
+          "the exact task-created event is published and independently projected"
+        ],
+        "when": [
+          "tool execution completes"
+        ],
+        "then": [
+          "content text is 'Task created: <taskId>\\nBacklog | unspecified | unclaimed'",
+          "details is {disposition:'created',taskId:<taskId>,state:'Backlog',specification:'unspecified',claim:'unclaimed'}"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "Workflow schema exact shape is {kind:'create-task',title:string,description:string}; every key required and unknown keys rejected.",
+      "Metadata uses existing parseTaskTitle and parseTaskDescription unchanged. If natural language omits description, inference supplies empty string; if no title can be inferred, no create effect is requested.",
+      "Host constructs schemaVersion:1 task-created with one lowercase randomUUID v4 eventId, one lowercase randomUUID v4 task.id, new Date().toISOString occurredAt, parsed title/description, and no model-selected authority fields.",
+      "GitTaskRemote receives the same immutable event object for all of its existing maximum four publication attempts, so task ID, event ID, time, and metadata never change across races.",
+      "Projected successful Task has state 'Backlog', blockStatus 'unblocked', specification/specificationDigest/claim/finalReviewProgress/completionRelease/delivery/ci/openedReview/reviewReceipt/campaignProvenance each {kind:'none'}, preservedIncrements [], and no campaign identity.",
+      "Create dispatch does not import, construct, read, or write FileCampaignStore and invokes no readiness reviewer, work command, run journal, or worktree adapter.",
+      "All publication failures preserve existing GitTaskRemote degraded-read-only TIBER_TASK_BOARD_INVALID result and cannot be formatted as success.",
+      "The registered TypeBox workflow tool schema, parser, automatic guidance, deterministic dispatcher, and result capture all include create-task while existing campaign routing is unchanged."
+    ],
+    "exclusions": [
+      "Editing task metadata/specification",
+      "Atomic create-and-specify",
+      "Automatic review/rank/claim/start",
+      "GitTaskRemote publication changes",
+      "Campaign behavior changes"
+    ],
+    "dependencies": [
+      "src/extension/workflow-request-tool.ts TypeBox registration, randomUUID/Date authority generation, dispatch, and result capture",
+      "src/extension/workflow-orchestration.ts normal-language guidance",
+      "src/core/workflow/workflow-request.ts exact request parser",
+      "src/core/tasks/task-values.ts metadata/UUID/time parsers",
+      "src/core/tasks/task-board.ts task-created event and Option projection",
+      "src/adapters/tasks/git-task-remote.ts existing signed four-attempt publication"
+    ],
+    "testMappings": [
+      "tests/unit/workflow-task-create-schema.test.ts",
+      "tests/unit/workflow-task-create-values.test.ts",
+      "tests/unit/workflow-task-create-no-campaign.test.ts",
+      "tests/unit/workflow-task-create-active-campaign.test.ts",
+      "tests/unit/workflow-task-create-readonly.test.ts",
+      "tests/unit/workflow-task-create-publication-failure.test.ts",
+      "tests/unit/workflow-task-create-race-identity.test.ts",
+      "tests/unit/workflow-task-create-result.test.ts",
+      "tests/unit/workflow-task-create-routing.test.ts",
+      "tests/unit/workflow-task-campaign-routing-regression.test.ts",
+      "tests/acceptance/workflow-task-create.test.ts"
+    ],
+    "architectureImplications": "Add one closed create-task request interpreted through existing signed TaskCreatedEvent publication. Inference supplies metadata only; host generates identifiers/time and never invokes campaign, readiness, or work transitions."
+  }
+}
