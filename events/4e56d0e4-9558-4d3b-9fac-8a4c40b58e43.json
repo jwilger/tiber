@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "eventId": "4e56d0e4-9558-4d3b-9fac-8a4c40b58e43",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T01:24:27.413Z",
+  "taskId": "230512d3-04e7-472a-af56-4d01c5cc286c",
+  "specificationDigest": "sha256:fe4be177d3ecd981f4762d73930eb9328f0862df49cc5e958829ecf4a76a4115",
+  "specification": {
+    "outcome": "Pi remains visibly responsive while a long tiber_workflow_request evaluates: activity appears promptly, animation continues, and exactly one terminal result replaces progress.",
+    "scenarios": [
+      {
+        "name": "start and sustain responsive progress",
+        "given": [
+          "request parsing and synchronous setup have completed",
+          "dispatch will await work for at least two seconds"
+        ],
+        "when": [
+          "the tool starts dispatch"
+        ],
+        "then": [
+          "onUpdate receives a running update before dispatch is invoked and within 100 milliseconds of execute entry",
+          "later heartbeats occur no more than once per 1000 milliseconds and no less than once per 2000 milliseconds while still running",
+          "an independently scheduled event-loop sentinel executes before the awaited work completes"
+        ]
+      },
+      {
+        "name": "complete through one closed progress state machine",
+        "given": [
+          "progress state is idle, running, or terminal"
+        ],
+        "when": [
+          "success, typed denial, cancellation, timeout, or execution failure occurs"
+        ],
+        "then": [
+          "only idle-to-running-to-terminal and idle-to-terminal transitions are legal",
+          "onUpdate carries running observations only and never percentages or inferred new work",
+          "the tool return value alone carries exactly one terminal disposition evaluated, denied, cancelled, timed-out, or failed and all queued progress is suppressed afterward"
+        ]
+      },
+      {
+        "name": "propagate cancellation and timeout",
+        "given": [
+          "the caller AbortSignal aborts or the operation time budget expires"
+        ],
+        "when": [
+          "long-running reviewer or repository work supports cancellation"
+        ],
+        "then": [
+          "the same signal or a linked timeout signal is passed through dispatch to the operation and its cleanup is awaited",
+          "non-abortable work is marked cancelling, receives no further progress, and cannot publish a new consequential effect after cancellation observation",
+          "the terminal return is cancelled for caller abort or timed-out for budget expiry"
+        ]
+      },
+      {
+        "name": "clean up every race and callback failure",
+        "given": [
+          "dispatch may throw synchronously, onUpdate may throw, abort may race completion, or timer setup may fail"
+        ],
+        "when": [
+          "the first terminal cause is selected"
+        ],
+        "then": [
+          "it wins atomically and later causes cannot change the disposition",
+          "timers, subscriptions, queued callbacks, and abort listeners are removed",
+          "onUpdate failure aborts work and returns failed without recursive progress reporting"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "Initial running progress occurs after bounded synchronous parsing/setup but before invoking or awaiting long dispatch, with a 100 millisecond maximum in deterministic-clock tests.",
+      "After the initial update, progress is coalesced to one latest non-percentage observation per 1000 milliseconds; a 2000 millisecond watchdog proves continuing work without update flooding.",
+      "A setImmediate or equivalent sentinel proves the event loop yields during a two-second fake operation.",
+      "Terminal returns have details.disposition evaluated|denied|cancelled|timed-out|failed and safe text; onUpdate never emits terminal authority.",
+      "Success, denial, cancellation, timeout, synchronous throw, callback throw, and abort/completion race each leave zero active timers, listeners, subscriptions, or queued updates.",
+      "Existing workflow, readiness, role, and effect denial tests remain unchanged and pass."
+    ],
+    "exclusions": [
+      "Changing workflow or review decisions",
+      "Granting model authority",
+      "Redesigning Pi's renderer",
+      "Reporting percentages or fabricated completion",
+      "Detaching consequential work after cancellation"
+    ],
+    "dependencies": [
+      "Pi extension execute/onUpdate and AbortSignal contracts",
+      "src/extension/workflow-request-tool.ts asynchronous dispatch",
+      "src/adapters/models/pi-readiness-reviewer.ts linked cancellation, heartbeat, and timeout cleanup"
+    ],
+    "testMappings": [
+      "tests/acceptance/workflow-request-responsive-progress.test.ts",
+      "tests/unit/workflow-request-progress-timing.test.ts",
+      "tests/unit/workflow-request-progress-state.test.ts",
+      "tests/unit/workflow-request-progress-terminal-paths.test.ts",
+      "tests/unit/workflow-request-progress-cleanup.test.ts",
+      "tests/unit/workflow-request-authorization-regression.test.ts",
+      "tests/unit/readiness-review-progress-cancellation.test.ts"
+    ],
+    "architectureImplications": "Implement a closed progress state machine in the imperative shell. Progress is bounded UI observation, never authority. Long operations receive linked cancellation and yield the event loop; first terminal cause wins and owns cleanup."
+  }
+}
