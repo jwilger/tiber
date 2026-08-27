@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "eventId": "bfe31f0b-53d8-48b0-a27f-9c9f41feb2e0",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T01:14:29.605Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:425863d7d2ee5840c26f3c160e027890e14eab135b94900843f0c3ba858dac28",
+  "specification": {
+    "outcome": "A user can create an ordinary Backlog task or replace an existing Backlog task's canonical specification through normal conversation, without a campaign and without implicitly beginning work.",
+    "scenarios": [
+      {
+        "name": "create an ordinary unspecified backlog task",
+        "given": [
+          "the request contains a title and description that pass the existing task semantic parsers",
+          "the signed task board is writable"
+        ],
+        "when": [
+          "the user asks Pi in normal conversation to create a ticket without supplying a complete specification"
+        ],
+        "then": [
+          "the host generates the task and event identifiers and publishes one signed ordinary task-created event",
+          "the canonical task metadata is the host-normalized title and description",
+          "the task is unclaimed and unspecified in Backlog with no campaign provenance"
+        ]
+      },
+      {
+        "name": "atomically create a specified backlog task",
+        "given": [
+          "the request contains valid task metadata and a complete specification that passes parseTaskSpecification",
+          "the signed task board is writable"
+        ],
+        "when": [
+          "the user asks Pi to create the specified ticket"
+        ],
+        "then": [
+          "one fast-forward publication atomically contains creation and specification events or one equivalent closed compound event",
+          "the observable board never contains a partial task if signing or publication fails",
+          "the task remains unclaimed in Backlog without readiness review, ordering changes, or campaign provenance"
+        ]
+      },
+      {
+        "name": "amend only an existing backlog specification",
+        "given": [
+          "the target task exists unclaimed in Backlog",
+          "the host binds the observed verified board head and current specification digest, including none, before attempting publication"
+        ],
+        "when": [
+          "the user asks Pi to replace its canonical specification with a value that passes parseTaskSpecification"
+        ],
+        "then": [
+          "one signed fast-forward publication replaces only the canonical specification and digest",
+          "task identity, title, description, Backlog state, claim state, Ready ordering, priority, and campaign provenance are preserved",
+          "no readiness review, claim, run journal, or worktree is created"
+        ]
+      },
+      {
+        "name": "reject invalid create requests and publication authority failures",
+        "given": [
+          "an ordinary create-task request is malformed, the board is read-only, signing is unavailable, or publication cannot fast-forward"
+        ],
+        "when": [
+          "the host evaluates the request"
+        ],
+        "then": [
+          "it applies denial precedence TIBER_WORKFLOW_REQUEST_INVALID, TIBER_TASK_BOARD_READ_ONLY, TIBER_TASK_PUBLICATION_UNAUTHORIZED, then TIBER_TASK_PUBLICATION_CONFLICT",
+          "no partial task or specification event is observable",
+          "a stale-head conflict may be retried only after a fresh board observation while every bound input remains unchanged"
+        ]
+      },
+      {
+        "name": "reject invalid specification amendments",
+        "given": [
+          "a specify-task request is malformed, the board is read-only, the task is missing, the task is not unclaimed Backlog, or the replacement specification is invalid"
+        ],
+        "when": [
+          "the host evaluates the request"
+        ],
+        "then": [
+          "it applies denial precedence TIBER_WORKFLOW_REQUEST_INVALID, TIBER_TASK_BOARD_READ_ONLY, TIBER_TASK_NOT_FOUND, TIBER_TASK_LIFECYCLE_INVALID, then TIBER_SPECIFICATION_INVALID",
+          "no task event, readiness review, claim, run journal, campaign checkpoint, or worktree effect occurs"
+        ]
+      },
+      {
+        "name": "reject a concurrent stale amendment",
+        "given": [
+          "the host bound an expected board head and current specification digest",
+          "another writer publishes a newer specification for the same task before this publication"
+        ],
+        "when": [
+          "the host observes the fast-forward conflict and refreshes signed state"
+        ],
+        "then": [
+          "it returns TIBER_TASK_PUBLICATION_CONFLICT without applying the stale replacement",
+          "the newer specification remains authoritative and retry requires a newly evaluated user request"
+        ]
+      },
+      {
+        "name": "route ordinary language independently of campaigns",
+        "given": [
+          "the user asks to create a ticket or edit a Backlog specification",
+          "no campaign exists or an unrelated campaign is active"
+        ],
+        "when": [
+          "Pi infers the corresponding workflow request"
+        ],
+        "then": [
+          "the closed request is create-task or specify-task rather than campaign-goal or begin-task",
+          "campaign state is neither required nor changed"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "create-task is a closed request with title, description, and an optional complete TaskSpecification; absence of a specification intentionally creates an unspecified task and metadata never masquerades as a specification.",
+      "specify-task is a closed request with task identity and a complete replacement TaskSpecification; the host binds the currently observed board head and specification digest as publication preconditions.",
+      "Task text and specifications are parsed once into existing semantic values; publication uses host-canonical semantic JSON and its computed digest rather than requiring byte-identical model input.",
+      "Atomic specified creation cannot expose a task without its requested specification after any signing, push, race, or retry failure.",
+      "Ordinary create and specify operations never promote, prioritize, review, claim, start, or create campaign provenance.",
+      "Stable typed denials and precedence are tested at the public workflow-request boundary.",
+      "Signed publication remains fast-forward-only and a concurrent amendment can never silently overwrite a newer specification."
+    ],
+    "exclusions": [
+      "Changing title or description after creation",
+      "Changing specifications after Backlog",
+      "Automatically starting, reviewing, ranking, or claiming tasks",
+      "Changing campaign scheduling or goal semantics",
+      "Weakening signature, ancestry, or lifecycle verification"
+    ],
+    "dependencies": [],
+    "testMappings": [
+      "tests/acceptance/workflow-task-create.test.ts",
+      "tests/acceptance/workflow-task-amend.test.ts",
+      "tests/unit/workflow-task-denials.test.ts",
+      "tests/unit/workflow-task-concurrency.test.ts",
+      "tests/unit/workflow-request.test.ts",
+      "tests/unit/workflow-orchestration.test.ts"
+    ],
+    "architectureImplications": "Extend the closed workflow request algebra and deterministic host dispatcher with create-task and specify-task effects. The host owns identifier generation, parse-once canonicalization, expected-head and expected-specification preconditions, atomic event publication, signing, conflict observation, and receipts. Inference supplies semantic intent but cannot grant authority, retry across changed task state, or trigger readiness and work effects."
+  }
+}
