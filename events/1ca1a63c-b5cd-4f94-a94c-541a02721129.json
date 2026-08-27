@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "eventId": "1ca1a63c-b5cd-4f94-a94c-541a02721129",
+  "kind": "task-specified",
+  "occurredAt": "2026-08-27T03:17:11.708Z",
+  "taskId": "a65664d4-8e2e-4424-987d-9845b13d217c",
+  "specificationDigest": "sha256:f4e1195398d1a0551a201b0b86c6c2beb0df53ccb80312068bfab9c660dd5476",
+  "specification": {
+    "outcome": "Normal conversation can create an ordinary Backlog task or replace an unclaimed Backlog task specification without requiring a campaign or starting work.",
+    "scenarios": [
+      {
+        "name": "atomically create an ordinary task",
+        "given": [
+          "create-task is closed, valid, authorized, and the verified board is writable"
+        ],
+        "when": [
+          "the host locks, revalidates, journals exact event bytes, signs, publishes, and observes"
+        ],
+        "then": [
+          "one task-created-from-request event projects the complete initial task",
+          "the task has no campaign, readiness, or work effect",
+          "a published or reconciled receipt identifies the exact authority event and establishing head"
+        ]
+      },
+      {
+        "name": "amend only a backlog specification",
+        "given": [
+          "specify-task has an exact TaskId, parsed replacement, and target unclaimed Backlog"
+        ],
+        "when": [
+          "the host binds taskVersionDigest and publishes task-specified-from-request"
+        ],
+        "then": [
+          "only specification, specificationDigest, and derived taskVersionDigest change",
+          "all other task state is preserved",
+          "an unchanged replacement revalidates current authority and returns without IDs, journal, event, or commit"
+        ]
+      },
+      {
+        "name": "reject concurrent same-task ABA changes",
+        "given": [
+          "amendment binds ordered authority event IDs affecting the task"
+        ],
+        "when": [
+          "another writer changes and later restores visible specification and lifecycle values"
+        ],
+        "then": [
+          "taskVersionDigest differs",
+          "publication returns TIBER_TASK_PUBLICATION_CONFLICT",
+          "stale amendment never overwrites intervening authority"
+        ]
+      },
+      {
+        "name": "retry unrelated head advancement safely",
+        "given": [
+          "journal binds stable operation and event IDs, complete canonical event bytes, request digest, expected task version when applicable, and observed head"
+        ],
+        "when": [
+          "remote gains unrelated task events"
+        ],
+        "then": [
+          "host verifies the new head and revalidates all bound identities and state",
+          "unchanged event bytes are placed in a newly signed commit under the new parent",
+          "same-task or identifier changes conflict"
+        ]
+      },
+      {
+        "name": "recover every consequential boundary",
+        "given": [
+          "journal is intent-written, commit-prepared, push-attempted, observed-published, receipt-recorded, or terminal-denied"
+        ],
+        "when": [
+          "execution resumes"
+        ],
+        "then": [
+          "intent-written revalidates; commit-prepared observes parent/head; push-attempted observes remote; observed-published reconstructs receipt; terminal states never replay",
+          "reconciliation compares every canonical event field byte-for-byte",
+          "uncertain or mismatched authority conflicts and never duplicates an event"
+        ]
+      },
+      {
+        "name": "apply closed parsing and denial precedence",
+        "given": [
+          "a create-task or specify-task request has malformed, stale, or unauthorized facts"
+        ],
+        "when": [
+          "host evaluates facts until the first result"
+        ],
+        "then": [
+          "create precedence is TIBER_WORKFLOW_REQUEST_INVALID, TIBER_TASK_VALUE_INVALID, TIBER_TASK_BOARD_READ_ONLY, TIBER_TASK_PUBLICATION_UNAUTHORIZED, TIBER_TASK_ID_COLLISION, TIBER_TASK_PUBLICATION_CONFLICT",
+          "amend precedence is TIBER_WORKFLOW_REQUEST_INVALID, TIBER_TASK_ID_INVALID, TIBER_SPECIFICATION_INVALID, TIBER_TASK_BOARD_READ_ONLY, TIBER_TASK_NOT_FOUND, TIBER_TASK_LIFECYCLE_INVALID, TIBER_TASK_SPECIFICATION_UNCHANGED success, TIBER_TASK_PUBLICATION_UNAUTHORIZED, TIBER_TASK_ID_COLLISION, TIBER_TASK_PUBLICATION_CONFLICT",
+          "denied requests publish no task authority"
+        ]
+      },
+      {
+        "name": "route independently of campaigns",
+        "given": [
+          "user asks to create a ticket or edit an unclaimed Backlog specification"
+        ],
+        "when": [
+          "Pi infers the request"
+        ],
+        "then": [
+          "it requests create-task or specify-task rather than campaign-goal or begin-task",
+          "campaign state is neither required nor changed",
+          "no readiness review or claim begins"
+        ]
+      }
+    ],
+    "acceptanceCriteria": [
+      "create-task has exactly kind:create-task,title,description. Title is trimmed nonempty string length 1..200 UTF-16 code units; description is string length 0..10000. Null, undefined, wrong type, unknown key, and duplicate raw JSON key are invalid.",
+      "specify-task has exactly kind:specify-task,taskId,specification. Specification exact keys are outcome,scenarios,acceptanceCriteria,exclusions,dependencies,testMappings,architectureImplications; scenario exact keys are name,given,when,then. Outcome is trimmed 1..2000 UTF-16 units; scenario name 1..200; every given/when/then array has at least one trimmed 1..1000 string; scenarios has at least one entry; acceptanceCriteria and exclusions each have at least one trimmed 1..2000 string; dependencies may be empty and entries are trimmed 1..2000; testMappings has at least one relative forward-slash path length 1..500 satisfying existing traversal rules; architectureImplications is trimmed 1..4000. Arrays otherwise retain existing unbounded count semantics.",
+      "All accepted strings reject unpaired UTF-16 surrogates. Canonical bytes are WHATWG TextEncoder UTF-8 of host-constructed fixed-key-order JSON.stringify. Arrays preserve order; null and omitted fields never enter canonical values.",
+      "TaskId is lowercase canonical hyphenated UUID version 1..5 with RFC variant 8,9,a,b; whitespace, uppercase, braces, compact, nil, ambiguous references, and unsupported versions return TIBER_TASK_ID_INVALID. Host-generated operation, task, and event IDs are lowercase randomUUID version 4. occurredAt is UTC ISO-8601 exactly new Date(clock.now).toISOString. Event schemaVersion is 1.",
+      "task-created-from-request canonical field order is schemaVersion,eventId,kind,occurredAt,operationId,requestDigest,task; task order is id,title,description. Initial projection is Backlog, unblocked, specification/specificationDigest/claim/finalReviewProgress/completionRelease/delivery/ci/openedReview/reviewReceipt/campaignProvenance none, preservedIncrements empty, no Ready rank or priority. Creation ordering is verified signed history order: ancestor commit order then event array index; unique event IDs make ties impossible.",
+      "task-specified-from-request canonical field order is schemaVersion,eventId,kind,occurredAt,operationId,requestDigest,taskId,expectedTaskVersionDigest,specificationDigest,specification. Reconciliation compares canonical bytes in full, including schemaVersion, occurredAt, IDs, digests, and all nested fields.",
+      "Canonical create request order is kind,title,description; amend is kind,taskId,specification with fixed specification/scenario order. requestDigest is sha256 of canonical UTF-8. taskVersionDigest input is fixed JSON array of task-affecting event IDs in verified signed history order, encoded as above. Affecting kinds exhaustively include task-created, task-campaign-goal-created, task-created-from-request, task-specified, task-specified-from-request, task-ready, task-claimed, task-claim-taken-over, task-increment-preserved, task-final-review-recorded, task-delivery-recorded, task-ci-recorded, task-review-opened, task-review-recorded, task-claim-released, and task-completed.",
+      "Before intent, create generates operation/task/event UUID triples and amend operation/event pairs. IDs are checked against complete verified history and active journals; if any collides the whole tuple regenerates, maximum three tuples. Exhaustion returns TIBER_TASK_ID_COLLISION. After intent IDs never change; nonexact reuse conflicts.",
+      "First publication requires generated identities absent. Only uncertain recovery from matching local push-attempted or observed-published may reconcile an exact event. A fresh request or mismatched journal never treats an existing operation as success.",
+      "Unchanged amend performs no ID generation or journaling. After initial equality it obtains a fresh verified head, recomputes lifecycle, canonical specification, and taskVersionDigest, and succeeds only if all still match; otherwise lifecycle or publication conflict wins.",
+      "The journal stores canonical event bytes and uses repository-scoped exclusive cross-process locking. Each transition writes a same-directory temporary file, fsyncs it, renames atomically, and fsyncs the directory before the next effect. State machine is intent-written, commit-prepared, push-attempted, observed-published, receipt-recorded, terminal-denied.",
+      "Pre-intent checks are closed parse, board verification/writability, task existence/lifecycle, unchanged decision, signer/publisher authorization, lock acquisition, identity collision checks, canonical event construction, and locked revalidation. They create no journal on denial. After durable intent, signing, head races, push, and observation failures are retained as terminal-denied or unresolved push-attempted as appropriate. Prepared commits/signatures are retained local audit/recovery artifacts, never presented as published task authority.",
+      "Events are canonical JSON in a Git tree; containing Git commits are signed over tree,parent,author,committer,message. Unrelated head advance preserves event bytes/IDs but replaces parent, commit ID, and signature after revalidation.",
+      "Receipts use disposition published|reconciled|unchanged. Create receipt is {code:TIBER_TASK_CREATED,disposition:published|reconciled,taskId,eventId:some,boardHead,specificationDigest:none}. Amend receipt is {code:TIBER_TASK_SPECIFIED,disposition:published|reconciled,taskId,eventId:some,boardHead,specificationDigest:some}. Unchanged receipt uses code TIBER_TASK_SPECIFICATION_UNCHANGED, disposition unchanged, eventId none, current verified boardHead, and specificationDigest some.",
+      "Denial metadata: WORKFLOW_REQUEST_INVALID retry-after-input/corrected-workflow-request; TASK_VALUE_INVALID retry-after-input/corrected-value; TASK_ID_INVALID retry-after-input/exact-task-id; SPECIFICATION_INVALID retry-after-input/corrected-specification; TASK_BOARD_READ_ONLY retry-after-state-change/writable-signed-board; TASK_NOT_FOUND retry-after-input/existing-task; TASK_LIFECYCLE_INVALID retry-after-state-change/unclaimed-backlog-task; TASK_PUBLICATION_UNAUTHORIZED retry-after-state-change/configured-signing-and-publication-authority; TASK_ID_COLLISION transient/fresh-identifiers; TASK_PUBLICATION_CONFLICT retry-after-state-change/fresh-verified-board. Denials disclose only code, operation, exact taskId Option, retryability, and requiredRecoveryEvidence.",
+      "Ordinary create and amend never promote, prioritize, review, claim, start, or alter campaign state."
+    ],
+    "exclusions": [
+      "Changing title or description after creation",
+      "Creating and specifying atomically in one request",
+      "Changing specifications outside unclaimed Backlog",
+      "Automatically starting or prioritizing tasks",
+      "Changing campaign scheduling",
+      "Weakening signature or ancestry checks"
+    ],
+    "dependencies": [
+      "src/core/workflow/workflow-request.ts closed request parser",
+      "src/core/tasks/task-values.ts canonical values, surrogate checks, digests, and UUIDs",
+      "src/core/tasks/readiness.ts exact bounded specification parser and digest",
+      "src/core/tasks/task-board.ts new events, initial projection, signed order, task-version, and lifecycle",
+      "src/adapters/tasks/git-task-remote.ts verified history, signing, observation, and fast-forward publication",
+      "src/extension/workflow-request-tool.ts routing, lock, durable journal, recovery, and receipts"
+    ],
+    "testMappings": [
+      "tests/acceptance/workflow-task-create.test.ts",
+      "tests/acceptance/workflow-task-amend.test.ts",
+      "tests/acceptance/workflow-task-natural-language.test.ts",
+      "tests/unit/workflow-task-closed-shapes.test.ts",
+      "tests/unit/workflow-task-omitted-specification.test.ts",
+      "tests/unit/workflow-task-specification-bounds.test.ts",
+      "tests/unit/workflow-task-unicode-digest.test.ts",
+      "tests/unit/workflow-task-canonical-digest-vectors.test.ts",
+      "tests/unit/workflow-task-task-id-forms.test.ts",
+      "tests/unit/workflow-task-initial-projection-order.test.ts",
+      "tests/unit/workflow-task-preservation.test.ts",
+      "tests/unit/workflow-task-unchanged-revalidation.test.ts",
+      "tests/unit/workflow-task-receipt-schemas.test.ts",
+      "tests/unit/workflow-task-denial-schemas.test.ts",
+      "tests/unit/workflow-task-denial-precedence.test.ts",
+      "tests/unit/workflow-task-create-collision-exhaustion.test.ts",
+      "tests/unit/workflow-task-amend-collision-exhaustion.test.ts",
+      "tests/unit/workflow-task-amend-event-collision.test.ts",
+      "tests/unit/workflow-task-exact-operation-reconciliation.test.ts",
+      "tests/unit/workflow-task-operation-mismatch.test.ts",
+      "tests/unit/workflow-task-aba-race.test.ts",
+      "tests/unit/workflow-task-unrelated-head-race.test.ts",
+      "tests/unit/workflow-task-journal-intent-crash.test.ts",
+      "tests/unit/workflow-task-journal-prepared-crash.test.ts",
+      "tests/unit/workflow-task-journal-push-crash.test.ts",
+      "tests/unit/workflow-task-journal-observed-crash.test.ts",
+      "tests/unit/workflow-task-commit-prepared-head-change.test.ts",
+      "tests/unit/workflow-task-uncertain-push.test.ts",
+      "tests/unit/workflow-task-locking-fsync.test.ts",
+      "tests/unit/workflow-task-preintent-denials.test.ts",
+      "tests/unit/workflow-task-postintent-denials.test.ts",
+      "tests/unit/workflow-task-signer-publisher-precedence.test.ts",
+      "tests/unit/workflow-task-heartbeat-boundary.test.ts"
+    ],
+    "architectureImplications": "Add closed create-task and specify-task requests, task-created-from-request and task-specified-from-request events, purpose-specific request and task-version digests, strict Unicode canonicalization, and durable repository-scoped operation journal. Host owns parsing, bounded identifiers, locking, lifecycle/ABA checks, signing after revalidation, uncertain-outcome observation, and receipts; inference grants no authority and cannot start work."
+  }
+}
