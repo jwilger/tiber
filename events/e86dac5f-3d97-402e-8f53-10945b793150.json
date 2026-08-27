@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "eventId": "e86dac5f-3d97-402e-8f53-10945b793150",
+  "kind": "task-campaign-goal-created",
+  "occurredAt": "2026-08-27T01:15:43.834Z",
+  "campaignId": "7259a0b8-2d7e-438e-8108-7a440fbc8832",
+  "task": {
+    "id": "230512d3-04e7-472a-af56-4d01c5cc286c",
+    "title": "Keep Pi spinner responsive during long Tiber workflow requests",
+    "description": "Ad-hoc campaign goal: Keep Pi spinner responsive during long Tiber workflow requests\nProvenance: campaign-goal/7259a0b8-2d7e-438e-8108-7a440fbc8832"
+  }
+}
