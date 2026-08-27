@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "eventId": "36f99677-31aa-40d2-9200-ca05a1e76925",
+  "kind": "task-campaign-goal-created",
+  "occurredAt": "2026-08-27T01:06:14.158Z",
+  "campaignId": "7259a0b8-2d7e-438e-8108-7a440fbc8832",
+  "task": {
+    "id": "a65664d4-8e2e-4424-987d-9845b13d217c",
+    "title": "Decouple ordinary task creation from campaigns",
+    "description": "Ad-hoc campaign goal: Decouple ordinary task creation from campaigns\nProvenance: campaign-goal/7259a0b8-2d7e-438e-8108-7a440fbc8832"
+  }
+}
