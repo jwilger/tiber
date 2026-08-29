@@ -14,10 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: Quality
+  verify:
+    name: Verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -29,68 +29,4 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci
-      - run: npm run format:check
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run test:unit
-
-  acceptance:
-    name: Acceptance and package
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Check out source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version-file: .node-version
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: npm run test:acceptance
-      - run: npm run verify:package
-
-  mutation:
-    name: Mutation
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version-file: .node-version
-          cache: npm
-      - run: npm ci
-      - name: Restore mutation results
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: reports/stryker-incremental.json
-          key: stryker-${{ github.event_name }}-${{ github.sha }}
-          restore-keys: |
-            stryker-${{ github.event_name }}-
-            stryker-main-
-      - run: npm run test:mutation
-
-  gate:
-    name: CI gate
-    runs-on: ubuntu-24.04
-    if: always()
-    needs: [quality, acceptance, mutation]
-    steps:
-      - name: Require every verification job
-        env:
-          QUALITY: ${{ needs.quality.result }}
-          ACCEPTANCE: ${{ needs.acceptance.result }}
-          MUTATION: ${{ needs.mutation.result }}
-        run: |
-          printf 'quality=%s acceptance=%s mutation=%s\n' "$QUALITY" "$ACCEPTANCE" "$MUTATION"
-          test "$QUALITY" = success
-          test "$ACCEPTANCE" = success
-          test "$MUTATION" = success
+      - run: npm run verify
