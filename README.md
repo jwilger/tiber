@@ -34,6 +34,16 @@ For a non-interactive package-load check:
 pi -e . --list-models
 ```
 
+## Installing an immutable development snapshot
+
+```sh
+npm run dev:install
+```
+
+This command resolves committed `HEAD`, warns but continues when the working tree is dirty, pushes `HEAD` to the current branch on the canonical GitHub origin, and verifies the remote branch resolves to the same SHA. It then asks Pi to install that exact Git SHA into Pi's normal managed package directory, installs the package-owned Rust runtime there, and verifies executable/protocol compatibility. Uncommitted changes are deliberately excluded. Restart Pi after it succeeds.
+
+The command refuses detached `HEAD`, an unexpected `origin`, push rejection, remote SHA mismatch, a missing Pi-managed clone, or an incompatible Rust runtime.
+
 ## Pi operations
 
 - `/tiber-doctor` checks the package-owned Rust executable and protocol.
