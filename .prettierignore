@@ -1,3 +1,6 @@
 node_modules/
+.runtime/
+target/
+Cargo.lock
 package-lock.json
 CHANGELOG.md

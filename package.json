@@ -1,7 +1,7 @@
 {
   "name": "@jwilger/tiber",
   "version": "1.2.2",
-  "description": "Tiber npm package",
+  "description": "Pi-native development system with a Rust-authoritative policy and workflow engine",
   "license": "MIT OR Apache-2.0",
   "author": "John Wilger",
   "type": "module",
@@ -19,16 +19,47 @@
   },
   "files": [
     "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
     "LICENSE",
     "LICENSE-APACHE",
     "LICENSE-MIT",
-    "README.md"
+    "PLAN.md",
+    "README.md",
+    "docs",
+    "extensions",
+    "scripts",
+    "skills",
+    "src"
   ],
+  "keywords": [
+    "pi-package",
+    "development",
+    "workflow",
+    "tiber"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
   "scripts": {
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "verify": "npm run format:check && npm run verify:package",
-    "verify:package": "npm pack --dry-run"
+    "runtime:install": "bash scripts/install-runtime.sh",
+    "runtime:remove": "rm -rf .runtime",
+    "test:rust": "cargo test --locked",
+    "verify": "npm run format:check && npm run verify:rust && npm run verify:package",
+    "verify:package": "npm pack --dry-run",
+    "verify:rust": "cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --locked"
   },
   "devDependencies": {
     "lefthook": "2.1.10",

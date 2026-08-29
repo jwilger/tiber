@@ -1,5 +1,7 @@
 # Node
 node_modules/
+.runtime/
+target/
 *.tgz
 
 # Nix
