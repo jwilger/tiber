@@ -1,6 +1,6 @@
 {
   "name": "@jwilger/tiber",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Pi-native development system with a Rust-authoritative policy and workflow engine",
   "license": "MIT OR Apache-2.0",
   "author": "John Wilger",

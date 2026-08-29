@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/jwilger/tiber/compare/v1.2.2...v1.3.0) (2026-08-29)
+
+
+### Features
+
+* establish Pi-native Tiber boundary ([#57](https://github.com/jwilger/tiber/issues/57)) ([1b1a972](https://github.com/jwilger/tiber/commit/1b1a9722661f097ee699efb1fd1480f6d514d8ce))
+* install immutable development snapshots ([#59](https://github.com/jwilger/tiber/issues/59)) ([babc05c](https://github.com/jwilger/tiber/commit/babc05c34a1d5f58fc75a06ef17b91976e32576e))
+
 ## [1.2.2](https://github.com/jwilger/tiber/compare/v1.2.1...v1.2.2) (2026-08-27)
 
 
