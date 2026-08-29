@@ -52,12 +52,14 @@
     "typebox": "*"
   },
   "scripts": {
+    "dev:install": "node scripts/dev-install.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "runtime:install": "bash scripts/install-runtime.sh",
     "runtime:remove": "rm -rf .runtime",
+    "test:dev-install": "node --test tests/dev-install.test.mjs",
     "test:rust": "cargo test --locked",
-    "verify": "npm run format:check && npm run verify:rust && npm run verify:package",
+    "verify": "npm run format:check && npm run test:dev-install && npm run verify:rust && npm run verify:package",
     "verify:package": "npm pack --dry-run",
     "verify:rust": "cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --locked"
   },
