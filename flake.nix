@@ -1,5 +1,5 @@
 {
-  description = "Tiber npm package development shell";
+  description = "Tiber TypeScript and Rust development shell";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -15,10 +15,25 @@
         packages = with pkgs; [
           git
           lefthook
-          nodejs_22
+
+          # TypeScript
+          nodejs
+          typescript
+          typescript-language-server
+
+          # Rust
+          cargo
+          rustc
+          clippy
+          rustfmt
+          cargo-nextest
+          mutagen
         ];
         shellHook = ''
-          echo "Tiber devshell ready: $(node --version), npm $(npm --version)"
+          echo "Tiber devshell ready"
+          echo "  TypeScript $(tsc --version), Node.js $(node --version), npm $(npm --version)"
+          echo "  Rust $(rustc --version), Cargo $(cargo --version)"
+          echo "  Nextest $(cargo nextest --version), Mutagen $(mutagen version)"
         '';
       };
     };
