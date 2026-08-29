@@ -1,15 +1,6 @@
 # Node
 node_modules/
-dist/
-coverage/
-.stryker-tmp/
-reports/stryker-incremental.json
-.worktrees/
-*.tsbuildinfo
-
-# Local Pi/Tiber state
-.pi/
-.tiber/
+*.tgz
 
 # Nix
 .direnv/

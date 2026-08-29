@@ -1,5 +1,5 @@
 {
-  description = "Tiber stock-Pi TypeScript development shell";
+  description = "Tiber npm package development shell";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

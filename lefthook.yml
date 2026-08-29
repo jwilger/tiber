@@ -1,16 +1,9 @@
 assert_lefthook_installed: true
 
 pre-commit:
-  parallel: true
   commands:
     format:
       run: npm run format:check
-    lint:
-      run: npm run lint
-    typecheck:
-      run: npm run typecheck
-    unit:
-      run: env -u GIT_DIR -u GIT_WORK_TREE npm run test:unit
 
 commit-msg:
   commands:
